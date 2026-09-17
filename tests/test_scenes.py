@@ -1,0 +1,54 @@
+"""The scene generators reproduce FactorioRL's, seed for seed."""
+
+from __future__ import annotations
+
+import json
+import random
+
+import pytest
+
+from fsim import scenes
+from fsim.parity import GOLDEN
+from fsim.rl import RlEnv
+
+GOLDEN_SCENES = json.loads((GOLDEN / "scenes.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("key", sorted(GOLDEN_SCENES))
+def test_generator_matches_factoriorl(key):
+    task, family, seed = key.split("|")
+    scene = scenes.GENERATORS[task](family, random.Random(int(seed)))
+    assert scene == GOLDEN_SCENES[key]
+
+
+def test_every_family_is_covered():
+    covered = {tuple(k.split("|")[:2]) for k in GOLDEN_SCENES}
+    declared = {(t, f) for t, fams in scenes.FAMILIES.items() for f in fams}
+    assert covered == declared
+
+
+def test_sample_draws_only_the_requested_split():
+    seen = {scenes.sample("construct_smelting_line", "train", s)[0] for s in range(64)}
+    assert seen == {"open_patch", "offset_patch"}
+    assert {scenes.sample("construct_smelting_line", "test", s)[0] for s in range(8)} == {
+        "obstructed_patch"
+    }
+
+
+def test_start_curriculum_moves_the_start_beside_the_patch():
+    _, scene = scenes.sample("construct_smelting_line", "train", 3, start_curriculum=1.0)
+    px, py = scene["markers"]["patch"]
+    x, y = scene["character"]["position"]
+    assert abs(x - px) + abs(y - py) <= 3.0
+
+
+@pytest.mark.parametrize("task", sorted(scenes.FAMILIES))
+def test_every_generated_scene_installs(task):
+    env = RlEnv()
+    for split in ("train", "val", "test"):
+        for seed in range(4):
+            if not scenes.families(task, split):
+                continue
+            _, scene = scenes.sample(task, split, seed)
+            obs = env.reset(task, scene)
+            assert obs["grid"][0].sum() > 0  # the ore patch is visible
