@@ -31,6 +31,7 @@ def main() -> int:
     parser.add_argument("--no-graph", action="store_true")
     parser.add_argument("--minibatch", type=int, default=4096)
     parser.add_argument("--epochs", type=int, default=2)
+    parser.add_argument("--action-space", choices=("v1", "v2"), default="v1")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         argv = [
@@ -39,7 +40,7 @@ def main() -> int:
             "--steps", str(args.envs * args.horizon * args.updates),
             "--eval-every", str(10**12), "--no-final", "--shaping", "progress",
             "--minibatches", str(args.envs * args.horizon // args.minibatch),
-            "--epochs", str(args.epochs),
+            "--epochs", str(args.epochs), "--action-space", args.action_space,
         ] + (["--no-graph"] if args.no_graph else [])  # fmt: skip
         train.main(argv)
         rows = [
@@ -54,6 +55,7 @@ def main() -> int:
             {
                 "envs": args.envs,
                 "epochs": args.epochs,
+                "action_space": args.action_space,
                 "graph": not args.no_graph,
                 "rollout_steps_per_s": round(samples / rollout),
                 "update_samples_per_s": round(samples / update),
