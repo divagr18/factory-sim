@@ -41,10 +41,24 @@ def worker(header, actions, seconds, out, index):
     out[index] = count
 
 
-def run(threads, seconds, header, actions):
+def rl_worker(header, records, seconds, out, index):
+    from fsim.rl import RlEnv
+
+    env = RlEnv()
+    vectors = [v for r in records[1:] for v in r["transition"]["action"]["vector"]]
+    batch = ffi.new("int32_t[]", vectors)
+    count = 0
+    deadline = time.perf_counter() + seconds
+    while time.perf_counter() < deadline:
+        env.reset(header["task"], header["blueprint"])
+        count += lib.fsim_rl_run(env.rl, batch, len(vectors) // 6, env.obs_c, env.mask_c)
+    out[index] = count
+
+
+def run(threads, seconds, header, payload, target=worker):
     out = [0] * threads
     pool = [
-        threading.Thread(target=worker, args=(header, actions, seconds, out, i))
+        threading.Thread(target=target, args=(header, payload, seconds, out, i))
         for i in range(threads)
     ]
     start = time.perf_counter()
@@ -66,13 +80,17 @@ def main() -> int:
         (r["transition"]["action"]["key"], r["transition"]["action"]["arguments"])
         for r in records[1:]
     ]
-    one = run(1, args.seconds, header, actions)
-    many = run(args.threads, args.seconds, header, actions)
     print(f"cpu count: {os.cpu_count()}")
-    print(f"1 env:  {one:,.0f} decisions/s ({one * 30:,.0f} ticks/s)")
-    print(
-        f"{args.threads} envs: {many:,.0f} decisions/s total ({many / args.threads:,.0f} per env)"
-    )
+    n = args.threads
+    for label, payload, target in (
+        ("simulator only (step + observation sweep)", actions, worker),
+        ("RL path (step + reward + tensor encoding + action mask)", records, rl_worker),
+    ):
+        one = run(1, args.seconds, header, payload, target)
+        many = run(n, args.seconds, header, payload, target)
+        print(label)
+        print(f"  1 env:  {one:,.0f} decisions/s")
+        print(f"  {n} envs: {many:,.0f} decisions/s total ({many / n:,.0f} per env)")
     return 0
 
 

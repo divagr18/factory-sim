@@ -1458,3 +1458,5 @@ int64_t fsim_run(fsim_env *env, const fsim_action *actions, int32_t count, int32
     for (int32_t i = 0; i < count; i++) fsim_step(env, &actions[i], ticks);
     return env->tick;
 }
+
+#include "fsim_rl.c"
