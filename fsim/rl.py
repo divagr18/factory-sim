@@ -23,6 +23,7 @@ SHAPING = {
     None: lib.SHAPING_NONE, False: lib.SHAPING_NONE, "none": lib.SHAPING_NONE,
     True: lib.SHAPING_POTENTIAL, "potential": lib.SHAPING_POTENTIAL,
     "progress": lib.SHAPING_PROGRESS,
+    "both": lib.SHAPING_BOTH,
 }  # fmt: skip
 #: `action_space` values: FactorioRL's parameterized-v1, or the simulator's v2
 #: prototype (entity-table targets, a fixed placement grid).
@@ -30,6 +31,7 @@ ACTION_SPACES = {"v1": lib.ACTION_SPACE_V1, "v2": lib.ACTION_SPACE_V2}
 SHAPED_COMPONENTS = {
     lib.SHAPING_POTENTIAL: ("verified_output", "line_potential"),
     lib.SHAPING_PROGRESS: ("verified_output", "line_progress"),
+    lib.SHAPING_BOTH: ("verified_output", "line_progress", "line_potential"),
 }
 COMPONENTS = {
     "construct_smelting_line": ("verified_output",),

@@ -379,6 +379,7 @@ double fsim_capacity(int32_t kind);
 #define SHAPING_NONE 0
 #define SHAPING_POTENTIAL 1
 #define SHAPING_PROGRESS 2
+#define SHAPING_BOTH 3
 
 typedef struct {
     float grid[25350];          /* 6 x 65 x 65 */
@@ -417,7 +418,9 @@ typedef struct {
     /* construct_smelting_line shaping over the line potential phi:
      *   SHAPING_NONE      1.1.1, the verification score alone
      *   SHAPING_POTENTIAL gamma * phi(s') - phi(s), phi(terminal) = 0
-     *   SHAPING_PROGRESS  a HIGH_WATER component on phi, weight 0.5, cap 0.45 */
+     *   SHAPING_PROGRESS  a HIGH_WATER component on phi, weight 0.5, cap 0.45
+     *   SHAPING_BOTH      both: progress pays for reaching a stage once, the
+     *                     potential charges for leaving it */
     int32_t shaping;
     double gamma;
     /* ACTION_SPACE_V1: FactorioRL's parameterized-v1 (the default).

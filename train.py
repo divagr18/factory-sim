@@ -74,7 +74,7 @@ def parse(argv=None) -> argparse.Namespace:
     p.add_argument("--ent", type=float, default=0.01)
     p.add_argument("--vf", type=float, default=0.5)
     p.add_argument("--max-grad-norm", type=float, default=0.5)
-    p.add_argument("--shaping", choices=("none", "potential", "progress"), default="none")
+    p.add_argument("--shaping", choices=("none", "potential", "progress", "both"), default="none")
     p.add_argument("--start-curriculum", type=float, default=0.0)
     p.add_argument(
         "--demo-starts",

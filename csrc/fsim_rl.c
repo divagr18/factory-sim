@@ -666,27 +666,31 @@ static double rl_rewards(fsim_rl *rl, int succeeded) {
     return rl->components[0];
 }
 
-/* One transition's shaping term, mirroring `RewardAccountant.step`. */
-static double rl_shaping(fsim_rl *rl, int32_t mode, int terminated) {
+/* One transition's shaping terms, mirroring `RewardAccountant.step`:
+ * parts[0] the progress (HIGH_WATER) term, parts[1] the potential term. */
+static double rl_shaping(fsim_rl *rl, int32_t mode, int terminated, double *parts) {
     double value = fsim_rl_potential(rl);
-    if (mode == SHAPING_POTENTIAL) {
+    parts[0] = parts[1] = 0.0;
+    if (mode == SHAPING_POTENTIAL || mode == SHAPING_BOTH) {
         /* Grzes 2017: phi(terminal) = 0, or the sum does not telescope. */
         double next = terminated ? 0.0 : value;
-        double shaped = rl->task.gamma * next - rl->potential;
+        parts[1] = rl->task.gamma * next - rl->potential;
         rl->potential = next;
-        return shaped;
     }
-    /* HIGH_WATER: pay the rise of the running maximum, never the level, up to
-     * a cumulative cap -- a line pays once however often it is rebuilt. */
-    double previous = rl->progress_high;
-    double gain = value - previous > 0.0 ? value - previous : 0.0;
-    rl->progress_high = previous > value ? previous : value;
-    double payout = PROGRESS_WEIGHT * gain * 1.0;
-    double room = PROGRESS_CAP - rl->progress_paid;
-    payout = payout < room ? payout : room;
-    if (payout < 0.0) payout = 0.0;
-    rl->progress_paid += payout;
-    return payout;
+    if (mode == SHAPING_PROGRESS || mode == SHAPING_BOTH) {
+        /* HIGH_WATER: pay the rise of the running maximum, never the level, up
+         * to a cumulative cap -- a line pays once however often it is rebuilt. */
+        double previous = rl->progress_high;
+        double gain = value - previous > 0.0 ? value - previous : 0.0;
+        rl->progress_high = previous > value ? previous : value;
+        double payout = PROGRESS_WEIGHT * gain * 1.0;
+        double room = PROGRESS_CAP - rl->progress_paid;
+        payout = payout < room ? payout : room;
+        if (payout < 0.0) payout = 0.0;
+        rl->progress_paid += payout;
+        parts[0] = payout;
+    }
+    return parts[0] + parts[1];
 }
 
 static void rl_verify(fsim_rl *rl) {
@@ -724,8 +728,17 @@ double fsim_rl_step(fsim_rl *rl, const int32_t *vector) {
      * `FactorioEnv.step` scores it; `run_verification` then scores a second
      * transition, from s' to the state after the window, which is terminal. */
     if (shaping) {
-        double shaped = rl_shaping(rl, shaping, terminated);
-        rl->components[1] = shaped;
+        double parts[2];
+        double shaped = rl_shaping(rl, shaping, terminated, parts);
+        /* components: [verified_output, line_progress or line_potential]
+         * for one mode, [verified_output, line_progress, line_potential] for
+         * both. */
+        if (shaping == SHAPING_BOTH) {
+            rl->components[1] = parts[0];
+            rl->components[2] = parts[1];
+        } else {
+            rl->components[1] = shaped;
+        }
         reward += shaped;
     }
     int truncated = !terminated && (rl->steps >= rl->task.max_steps ||
@@ -734,7 +747,10 @@ double fsim_rl_step(fsim_rl *rl, const int32_t *vector) {
         rl_verify(rl);
         double score = rl->verified_output / VERIFY_TARGET;
         reward += score < 1.0 ? score : 1.0;
-        if (shaping) reward += rl_shaping(rl, shaping, 1);
+        if (shaping) {
+            double parts[2];
+            reward += rl_shaping(rl, shaping, 1, parts);
+        }
         succeeded = rl_succeeded(rl);
         terminated = 1;
         truncated = 0;
