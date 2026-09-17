@@ -184,10 +184,61 @@ def _gumbel_argmax(logits: torch.Tensor) -> torch.Tensor:
     return (logits - torch.log(-torch.log(u))).argmax(-1)
 
 
+class _Unused(nn.Module):
+    """Stands in for a v2 head in a v1 policy: no parameters, never called."""
+
+    def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        return a
+
+
 ROW_DIM = 64
 ROWS = 32
 CROP = 13
-PLACE_CONTEXT = 16
+PLACE_CONTEXT = 32
+
+
+class PointerHead(nn.Module):
+    """score(row, context) = w . relu(A row + B context + b) + c.
+
+    The same function as an MLP on the concatenation [row, context], computed
+    without repeating the 278-wide context for each of the 32 rows: at a
+    4096-sample minibatch that concatenation made v2's update 2.6x slower
+    than v1's.
+    """
+
+    def __init__(self, row_dim: int, context_dim: int, hidden: int = 128) -> None:
+        super().__init__()
+        self.rows = _layer(row_dim, hidden)
+        self.context = _layer(context_dim, hidden)
+        self.out = _layer(hidden, 1, 0.01)
+
+    def forward(self, rows: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+        hidden = torch.relu(self.rows(rows) + self.context(context).unsqueeze(1))
+        return self.out(hidden).squeeze(-1)
+
+
+class PlacementHead(nn.Module):
+    """Per-tile scores over the grid crop, conditioned on the context.
+
+    The context enters as a per-channel bias after the first convolution rather
+    than as broadcast input channels, so the convolutions run on the crop's six
+    planes alone.
+    """
+
+    def __init__(self, context_dim: int, channels: int = PLACE_CONTEXT) -> None:
+        super().__init__()
+        self.first = nn.Conv2d(6, channels, 3, padding=1)
+        self.context = _layer(context_dim, channels, 1.0)
+        self.second = nn.Conv2d(channels, channels, 3, padding=1)
+        self.out = nn.Conv2d(channels, 1, 1)
+        nn.init.orthogonal_(self.out.weight, 0.01)
+        nn.init.zeros_(self.out.bias)
+
+    def forward(self, crop: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+        bias = self.context(context).unsqueeze(-1).unsqueeze(-1)
+        h = torch.relu(self.first(crop) + bias)
+        h = torch.relu(self.second(h))
+        return self.out(h)[:, 0]
 
 
 class Policy(nn.Module):
@@ -208,29 +259,16 @@ class Policy(nn.Module):
         self.rows: int = ROWS
         self.row_dim: int = ROW_DIM
         self.crop: int = CROP
-        self.place_channels: int = PLACE_CONTEXT
         self.extractor = Extractor(features_dim)
         self.extractor.expose = self.v2
         context = features_dim + OPS
         if self.v2:
-            self.target_head = nn.Sequential(
-                _layer(ROW_DIM + context, 128), nn.ReLU(), _layer(128, 1, 0.01)
-            )
-            self.place_context = _layer(context, PLACE_CONTEXT, 1.0)
-            self.place_net = nn.Sequential(
-                nn.Conv2d(6 + PLACE_CONTEXT, 32, 3, padding=1),
-                nn.ReLU(),
-                nn.Conv2d(32, 32, 3, padding=1),
-                nn.ReLU(),
-                nn.Conv2d(32, 1, 1),
-            )
-            nn.init.orthogonal_(self.place_net[4].weight, 0.01)
-            nn.init.zeros_(self.place_net[4].bias)
+            self.target_head = PointerHead(ROW_DIM, context)
+            self.place_head = PlacementHead(context)
         else:
             # Placeholders, so TorchScript compiles the v2 branch; no parameters.
-            self.target_head = nn.Identity()
-            self.place_context = nn.Identity()
-            self.place_net = nn.Identity()
+            self.target_head = _Unused()
+            self.place_head = _Unused()
         self.op_head = nn.Sequential(_layer(features_dim, 256), nn.ReLU(), _layer(256, OPS, 0.01))
         self.arg_head = nn.Sequential(
             _layer(features_dim + OPS, 256), nn.ReLU(), _layer(256, sum(ARG_NVEC), 0.01)
@@ -298,11 +336,8 @@ class Policy(nn.Module):
         width = self.rows * self.row_dim
         rows = features[:, start : start + width].reshape(batch, self.rows, self.row_dim)
         crop = features[:, start + width :].reshape(batch, 6, self.crop, self.crop)
-        expanded = context.unsqueeze(1).expand(batch, self.rows, context.shape[1])
-        targets = self.target_head(torch.cat([rows, expanded], dim=2)).squeeze(-1)
-        place = self.place_context(context).reshape(batch, self.place_channels, 1, 1)
-        place = place.expand(batch, self.place_channels, self.crop, self.crop)
-        cells = self.place_net(torch.cat([crop, place], dim=1))[:, 0, 1:12, 1:12]
+        targets = self.target_head(rows, context)
+        cells = self.place_head(crop, context)[:, 1:12, 1:12]
         # Grid rows are y and columns x; slot (dx + 5) * 11 + (dy + 5).
         placements = cells.transpose(1, 2).reshape(batch, 121)
         return torch.cat([flat[:, :1], targets, flat[:, 33:34], placements, flat[:, 155:]], dim=1)
