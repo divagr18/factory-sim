@@ -270,6 +270,13 @@ typedef struct {
     fsim_entity entities[128];
     int32_t entity_count;
     int32_t next_unit;
+    /* Gap fillers: the space between two aligned obstacles too close for the
+     * character to pass, as boxes [x0, x1] x [y0, y1]. Rebuilt when
+     * `entities_version` moves past `fillers_version`. */
+    int32_t entities_version;
+    int32_t fillers_version;
+    int32_t filler_count;
+    int32_t fillers[256];       /* 64 boxes, 4 values each */
     fsim_resource resources[512];
     int32_t resource_count;
 
@@ -343,6 +350,9 @@ void fsim_observe(fsim_env *env);
 int64_t fsim_run(fsim_env *env, const fsim_action *actions, int32_t count, int32_t ticks);
 /* Recompute derived character state after a hidden-state load. */
 void fsim_after_load(fsim_env *env);
+/* Walk `ticks` ticks in `dir16` (0, 4, 8, 12) with nothing else running, and
+ * write the position after each into `xy` (2 per tick). For collision tests. */
+void fsim_walk_ticks(fsim_env *env, int32_t dir16, int32_t ticks, int32_t *xy);
 int32_t fsim_resolve(fsim_env *env, int32_t handle, int32_t *kind, int32_t *index);
 double fsim_capacity(int32_t kind);
 /* ---- RL layer (fsim_rl.c): the tensors, masks, goal and reward of
