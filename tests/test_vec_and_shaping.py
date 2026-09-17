@@ -174,3 +174,20 @@ def test_potential_matches_factoriorl_on_every_recorded_decision(name):
     for index, record in enumerate(records[1:], start=1):
         env.step(record["transition"]["action"]["vector"])
         assert lib.fsim_rl_potential(env.rl) == expected[index], (name, index)
+
+
+def test_both_is_the_sum_of_progress_and_potential():
+    header, vectors = reference_vectors()
+    envs = {mode: RlEnv() for mode in ("progress", "potential", "both")}
+    for mode, env in envs.items():
+        env.reset(header["task"], header["blueprint"], shaping=mode)
+    for vector in vectors:
+        out = {mode: env.step(vector) for mode, env in envs.items()}
+        both = out["both"][4]["reward_components"]
+        assert both["line_progress"] == out["progress"][4]["reward_components"]["line_progress"]
+        assert both["line_potential"] == out["potential"][4]["reward_components"]["line_potential"]
+        plain = out["progress"][1] - out["progress"][4]["reward_components"]["line_progress"]
+        extra = out["potential"][1] - plain
+        assert out["both"][1] == pytest.approx(plain + both["line_progress"] + extra, abs=1e-12)
+        if out["both"][2]:
+            break
