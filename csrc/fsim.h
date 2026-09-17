@@ -376,6 +376,23 @@ typedef struct {
     float goal[12];
 } fsim_obs;
 
+/* The same observation, packed: what a trainer copies to the GPU every
+ * decision, a third of the size. Grid planes 0-3 (resources) and 5 (blocked)
+ * only ever hold 0 or 1, so they are bits -- plane p's cell c is bit
+ * (k * 4225 + c) of `flags`, LSB first, for k = 0..4 over planes 0, 1, 2, 3, 5.
+ * Plane 4 (the log amount, in [0, 1]) is `amount`, round(255 * value), half to
+ * even. */
+#define RL_FLAG_BYTES 2641
+typedef struct {
+    uint8_t flags[2641];
+    uint8_t amount[4225];
+    float entities[512];
+    int8_t entity_mask[32];
+    float self_[12];
+    float inventory[14];
+    float goal[12];
+} fsim_obs8;
+
 typedef struct {
     int32_t task;
     int32_t decision_ticks;
@@ -439,6 +456,12 @@ double fsim_rl_potential(const fsim_rl *rl);
 void fsim_rl_step_range(fsim_rl **rls, int32_t first, int32_t last, const int32_t *actions,
                         fsim_obs *obs, uint8_t *masks, double *rewards, uint8_t *flags,
                         double *verified);
+void fsim_rl_encode8(fsim_rl *rl, fsim_obs8 *obs);
+/* As fsim_rl_step_range, writing compact observations and each environment's
+ * line potential after the step. */
+void fsim_rl_step_range8(fsim_rl **rls, int32_t first, int32_t last, const int32_t *actions,
+                         fsim_obs8 *obs, uint8_t *masks, double *rewards, uint8_t *flags,
+                         double *verified, double *potentials);
 /* CFFI-END */
 
 #endif

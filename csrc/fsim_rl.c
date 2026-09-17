@@ -83,18 +83,28 @@ static void rl_domains_build(const fsim_env *env, rl_domains *d) {
 
     int32_t here_x = (int32_t)floordiv(env->char_pos.x, TILE);
     int32_t here_y = (int32_t)floordiv(env->char_pos.y, TILE);
+    /* Occupancy of the (2R+1)^2 window, marked in one pass over the sweep
+     * and the blocked tiles instead of once per candidate. */
+    enum { SIDE = 2 * RL_PLACEMENT_RADIUS + 1 };
+    uint8_t occupied_at[SIDE * SIDE];
+    memset(occupied_at, 0, sizeof(occupied_at));
+    occupied_at[RL_PLACEMENT_RADIUS * SIDE + RL_PLACEMENT_RADIUS] = 1; /* own tile */
+    for (int32_t k = 0; k < env->seen_count; k++) {
+        const fsim_entity *e = &env->entities[env->seen[k].entity];
+        if (e->kind == K_PILE) continue;
+        int64_t dx = floordiv(e->pos.x, TILE) - here_x + RL_PLACEMENT_RADIUS;
+        int64_t dy = floordiv(e->pos.y, TILE) - here_y + RL_PLACEMENT_RADIUS;
+        if (dx >= 0 && dx < SIDE && dy >= 0 && dy < SIDE) occupied_at[dx * SIDE + dy] = 1;
+    }
+    for (int32_t k = 0; k < env->blocked_count; k++) {
+        int64_t dx = (int64_t)env->blocked[2 * k] - here_x + RL_PLACEMENT_RADIUS;
+        int64_t dy = (int64_t)env->blocked[2 * k + 1] - here_y + RL_PLACEMENT_RADIUS;
+        if (dx >= 0 && dx < SIDE && dy >= 0 && dy < SIDE) occupied_at[dx * SIDE + dy] = 1;
+    }
     for (int32_t dx = -RL_PLACEMENT_RADIUS; dx <= RL_PLACEMENT_RADIUS; dx++) {
         for (int32_t dy = -RL_PLACEMENT_RADIUS; dy <= RL_PLACEMENT_RADIUS; dy++) {
             int32_t tx = here_x + dx, ty = here_y + dy;
-            int occupied = (dx == 0 && dy == 0);
-            for (int32_t k = 0; k < env->seen_count && !occupied; k++) {
-                const fsim_entity *e = &env->entities[env->seen[k].entity];
-                if (e->kind == K_PILE) continue;
-                if (floordiv(e->pos.x, TILE) == tx && floordiv(e->pos.y, TILE) == ty) occupied = 1;
-            }
-            for (int32_t k = 0; k < env->blocked_count && !occupied; k++)
-                if (env->blocked[2 * k] == tx && env->blocked[2 * k + 1] == ty) occupied = 1;
-            if (occupied) continue;
+            if (occupied_at[(dx + RL_PLACEMENT_RADIUS) * SIDE + dy + RL_PLACEMENT_RADIUS]) continue;
             d->placements[2 * d->placement_count] = tx;
             d->placements[2 * d->placement_count + 1] = ty;
             d->placement_count++;
@@ -252,32 +262,90 @@ typedef struct {
 static void rl_goal(fsim_rl *rl, float *goal);
 double fsim_rl_potential(const fsim_rl *rl);
 
+/* The fields of one observation, wherever they live: `fsim_obs` has a float
+ * grid, `fsim_obs8` a packed one (`grid` is NULL exactly when `flags` is set).
+ * The caller has zeroed every field. */
+typedef struct {
+    float *grid;
+    uint8_t *flags;       /* packed planes 0-3 and 5 */
+    uint8_t *amount;      /* plane 4 as bytes */
+    float *entities;
+    int8_t *entity_mask;
+    float *self_;
+    float *inventory;
+    float *goal;
+} rl_fields;
+
+/* Round half to even, as `rint` does in the default rounding mode, without
+ * the library call: MSVC's `rint` reads the floating-point environment on
+ * every call, and two per resource tile made it most of the encoder's time.
+ * Exact for |x| < 2^53 (the integer part and the fraction are both exact). */
+static double rl_rint(double x) {
+    double t = (double)(int64_t)x;      /* toward zero */
+    if (t > x) t -= 1.0;                /* now floor(x) */
+    double frac = x - t;
+    if (frac > 0.5) return t + 1.0;
+    if (frac < 0.5) return t;
+    return ((int64_t)t & 1) ? t + 1.0 : t;
+}
+
+/* round(255 * v) for v in [0, 1], half to even: what `fsim_obs8` stores, and
+ * what `torch.round(grid * 255)` gives on the float grid. */
+static uint8_t rl_byte(float v) {
+    if (v <= 0.0f) return 0;
+    if (v >= 1.0f) return 255;
+    return (uint8_t)rl_rint((double)(v * 255.0f));
+}
+
+/* Sets flag plane `k`'s bit for `cell` in a packed grid. */
+static void rl_set_flag(uint8_t *flags, int32_t k, int32_t cell) {
+    int32_t bit = k * RL_GRID_SIZE * RL_GRID_SIZE + cell;
+    flags[bit >> 3] |= (uint8_t)(1u << (bit & 7));
+}
+
+static void rl_encode_into(fsim_rl *rl, rl_fields *obs);
+
 void fsim_rl_encode(fsim_rl *rl, fsim_obs *obs) {
-    const fsim_env *env = rl->env;
     memset(obs, 0, sizeof(*obs));
+    rl_fields fields = {obs->grid, NULL, NULL, obs->entities, obs->entity_mask, obs->self_,
+                        obs->inventory, obs->goal};
+    rl_encode_into(rl, &fields);
+}
+
+static void rl_encode_into(fsim_rl *rl, rl_fields *obs) {
+    const fsim_env *env = rl->env;
     double ox = tiles(env->char_pos.x), oy = tiles(env->char_pos.y);
     const int32_t span = 2 * RL_RADIUS;
+    const int32_t plane_size = RL_GRID_SIZE * RL_GRID_SIZE;
 
     for (int32_t k = 0; k < env->tile_count; k++) {
         const fsim_resource *r = &env->resources[env->tiles[k].resource];
         double px = r->tx + 0.5, py = r->ty + 0.5;
-        int32_t col = (int32_t)rint(px - ox) + RL_RADIUS;
-        int32_t row = (int32_t)rint(py - oy) + RL_RADIUS;
+        int32_t col = (int32_t)rl_rint(px - ox) + RL_RADIUS;
+        int32_t row = (int32_t)rl_rint(py - oy) + RL_RADIUS;
         if (row < 0 || row > span || col < 0 || col > span) continue;
         int32_t plane = r->item == IT_IRON_ORE ? 0 : r->item == IT_COPPER_ORE ? 1
                       : r->item == IT_COAL ? 2 : r->item == IT_STONE ? 3 : -1;
         int32_t cell = row * RL_GRID_SIZE + col;
-        if (plane >= 0) obs->grid[plane * RL_GRID_SIZE * RL_GRID_SIZE + cell] = 1.0f;
         float amount = (float)rl_log_count((double)r->amount, 4000.0);
-        float *slot = &obs->grid[4 * RL_GRID_SIZE * RL_GRID_SIZE + cell];
-        if (amount > *slot) *slot = amount;
+        if (obs->grid) {
+            if (plane >= 0) obs->grid[plane * plane_size + cell] = 1.0f;
+            float *slot = &obs->grid[4 * plane_size + cell];
+            if (amount > *slot) *slot = amount;
+        } else {
+            if (plane >= 0) rl_set_flag(obs->flags, plane, cell);
+            uint8_t byte = rl_byte(amount);
+            if (byte > obs->amount[cell]) obs->amount[cell] = byte;
+        }
     }
     for (int32_t k = 0; k < env->blocked_count; k++) {
         double px = env->blocked[2 * k], py = env->blocked[2 * k + 1];
-        int32_t col = (int32_t)rint(px - ox) + RL_RADIUS;
-        int32_t row = (int32_t)rint(py - oy) + RL_RADIUS;
+        int32_t col = (int32_t)rl_rint(px - ox) + RL_RADIUS;
+        int32_t row = (int32_t)rl_rint(py - oy) + RL_RADIUS;
         if (row < 0 || row > span || col < 0 || col > span) continue;
-        obs->grid[5 * RL_GRID_SIZE * RL_GRID_SIZE + row * RL_GRID_SIZE + col] = 1.0f;
+        int32_t cell = 5 * plane_size + row * RL_GRID_SIZE + col;
+        if (obs->grid) obs->grid[cell] = 1.0f;
+        else rl_set_flag(obs->flags, 4, row * RL_GRID_SIZE + col);
     }
 
     /* Rows: visible entities then remembered ones, stably by distance. */
@@ -492,7 +560,7 @@ static void rl_goal(fsim_rl *rl, float *goal) {
  *
  *   0.1 * approach   max(0, 1 - |character - patch| / 64)  (CHARACTER_WITHIN)
  *   0.2 * drill      a burner drill is visible
- *   0.3 * line       a visible machine's footprint holds a drill's drop point
+ *   0.3 * line       a visible furnace's footprint holds a drill's drop point
  *   0.1 * each of    the best line's drill has fuel, its furnace has fuel,
  *                    its furnace holds ore or plates
  *
@@ -515,12 +583,15 @@ double fsim_rl_potential(const fsim_rl *rl) {
         fsim_pos drop = drop_position(d);
         for (int32_t j = 0; j < env->seen_count; j++) {
             const fsim_entity *f = &env->entities[env->seen[j].entity];
-            if (j == i || (f->kind != K_FURNACE && f->kind != K_DRILL)) continue;
+            /* Only a furnace makes a line: a drill's fuel slot takes no ore, so
+             * one drill dropping into another is a jam, and counting it let a
+             * policy bank 0.3 for placing its two drills side by side. */
+            if (j == i || f->kind != K_FURNACE) continue;
             if (!(drop.x >= f->pos.x - TILE && drop.x < f->pos.x + TILE &&
                   drop.y >= f->pos.y - TILE && drop.y < f->pos.y + TILE)) continue;
             line = 1;
-            int score = (d->fuel.count > 0) + (f->fuel.count > 0);
-            if (f->kind == K_FURNACE) score += f->source.count > 0 || f->result.count > 0;
+            int score = (d->fuel.count > 0) + (f->fuel.count > 0) +
+                        (f->source.count > 0 || f->result.count > 0);
             if (score > best) best = score;
         }
     }
@@ -683,6 +754,30 @@ void fsim_rl_step_range(fsim_rl **rls, int32_t first, int32_t last, const int32_
         flags[4 * i + 3] = (uint8_t)rl->decode_failure;
         verified[i] = rl->verified ? rl->verified_output : -1.0;
         fsim_rl_encode(rl, &obs[i]);
+        fsim_rl_mask(rl, &masks[RL_MASK_SIZE * i]);
+    }
+}
+
+void fsim_rl_encode8(fsim_rl *rl, fsim_obs8 *out) {
+    memset(out, 0, sizeof(*out));
+    rl_fields fields = {NULL, out->flags, out->amount, out->entities, out->entity_mask,
+                        out->self_, out->inventory, out->goal};
+    rl_encode_into(rl, &fields);
+}
+
+void fsim_rl_step_range8(fsim_rl **rls, int32_t first, int32_t last, const int32_t *actions,
+                         fsim_obs8 *obs, uint8_t *masks, double *rewards, uint8_t *flags,
+                         double *verified, double *potentials) {
+    for (int32_t i = first; i < last; i++) {
+        fsim_rl *rl = rls[i];
+        rewards[i] = fsim_rl_step(rl, &actions[6 * i]);
+        flags[4 * i] = (uint8_t)rl->terminated;
+        flags[4 * i + 1] = (uint8_t)rl->truncated;
+        flags[4 * i + 2] = (uint8_t)rl->success;
+        flags[4 * i + 3] = (uint8_t)rl->decode_failure;
+        verified[i] = rl->verified ? rl->verified_output : -1.0;
+        potentials[i] = fsim_rl_potential(rl);
+        fsim_rl_encode8(rl, &obs[i]);
         fsim_rl_mask(rl, &masks[RL_MASK_SIZE * i]);
     }
 }

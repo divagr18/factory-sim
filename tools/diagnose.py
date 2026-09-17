@@ -107,6 +107,7 @@ def main() -> int:
             s: share(lambda r, s=s: s in r["stages"]) for s in ("drill", "line", "fuelled")
         },
         "peak_potential_mean": round(float(np.mean([r["peak_potential"] for r in results])), 3),
+        "peak_at_least_line": share(lambda r: r["peak_potential"] >= 0.5),
         "verified_output_mean": round(
             float(np.mean([max(0.0, r["verified_output"]) for r in results])), 3
         ),

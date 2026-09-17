@@ -48,9 +48,9 @@ import numpy as np
 import torch
 from torch import nn
 
-from fsim import ffi
+from fsim import ffi, lib
 from fsim.policy import EXTRACTOR_VERSION, Policy, export
-from fsim.vec import VecEnv, obs_layout
+from fsim.vec import VecEnv, obs_layout, unpack_grid
 
 ROOT = Path(__file__).resolve().parent
 KEYS = ("grid", "entities", "entity_mask", "self", "inventory", "goal")
@@ -92,6 +92,8 @@ def parse(argv=None) -> argparse.Namespace:
     p.add_argument("--eval-episodes", type=int, default=256)
     p.add_argument("--eval-every", type=int, default=2_000_000)
     p.add_argument("--out", type=Path, default=ROOT / "runs")
+    p.add_argument("--no-graph", action="store_true", help="rollout inference without CUDA graphs")
+    p.add_argument("--no-final", action="store_true", help="skip the final evaluation and export")
     return p.parse_args(argv)
 
 
@@ -99,37 +101,95 @@ def to_device(obs: dict, device) -> dict:
     return {k: torch.from_numpy(obs[k]).to(device) for k in KEYS}
 
 
-class PinnedObservations:
-    """The environments write observations into page-locked memory, and the
-    whole batch goes to the device as one copy, sliced there. Copying the six
-    numpy views separately from pageable memory took 8.5 ms of a 22 ms step."""
+class Rollout:
+    """Rollout inference with one host-to-device copy and one kernel launch.
 
-    DTYPES = {"<f4": torch.float32, "|i1": torch.int8}
+    The environments write compact observations (`fsim_obs8`, the grid as
+    bytes) and masks straight into page-locked memory. Each decision copies
+    both blocks to static device tensors, and a CUDA graph -- slicing the block
+    into tensors, the extractor, sampling, the value head -- replays in one
+    launch. Measured before this: about 830 kernel launches and 13 MB of
+    transfer per decision at 128 environments, most of a 19 ms step.
+    """
 
-    def __init__(self, n: int, device) -> None:
-        self.n, self.device = n, device
-        self.size = ffi.sizeof("fsim_obs")
+    DTYPES = {"<f4": torch.float32, "|i1": torch.int8, "|u1": torch.uint8}
+
+    def __init__(self, policy: Policy, n: int, device, graph: bool = True) -> None:
+        self.policy, self.n, self.device = policy, n, device
+        self.size = ffi.sizeof("fsim_obs8")
         pin = device.type == "cuda"
-        self.block = torch.empty(n * self.size, dtype=torch.uint8, pin_memory=pin)
-        self.layout = obs_layout()
+        self.host = torch.empty(n * self.size, dtype=torch.uint8, pin_memory=pin)
+        self.host_mask = torch.empty(n * 201, dtype=torch.uint8, pin_memory=pin)
+        self.block = torch.zeros(n * self.size, dtype=torch.uint8, device=device)
+        self.mask = torch.zeros((n, 201), dtype=torch.bool, device=device)
+        self.layout = obs_layout(compact=True)
+        self.graph = None
+        self.out = None
+        self.use_graph = graph and device.type == "cuda"
 
-    def memory(self):
-        return (self.block.data_ptr(), self.block)
+    def memories(self) -> dict:
+        return {
+            "obs_memory": (self.host.data_ptr(), self.host),
+            "mask_memory": (self.host_mask.data_ptr(), self.host_mask),
+        }
 
-    def fetch(self) -> dict:
-        rows = self.block.to(self.device).view(self.n, self.size)
+    def decode(self, block: torch.Tensor, n: int) -> dict:
+        """Field tensors over a flat block of `n` compact observations."""
+        rows = block.view(n, self.size)
         out = {}
         for key, (offset, dtype, shape) in self.layout.items():
             tdtype = self.DTYPES[dtype]
             nbytes = math.prod(shape) * torch.empty((), dtype=tdtype).element_size()
-            field = rows[:, offset : offset + nbytes].contiguous().view(tdtype)
-            out[key] = field.view(self.n, *shape)
+            out[key] = rows[:, offset : offset + nbytes].contiguous().view(tdtype).view(n, *shape)
         return out
+
+    def _infer(self):
+        obs = unpacked(self.decode(self.block, self.n))
+        with torch.no_grad():
+            f = features(self.policy, obs)
+            actions, logp = self.policy.act(f, self.mask)
+            value = self.policy.value(f)
+        return obs, actions, logp, value
+
+    def __call__(self):
+        """-> (observation tensors, actions, log-probabilities, values).
+
+        The returned tensors are overwritten by the next call."""
+        self.block.copy_(self.host, non_blocking=True)
+        self.mask.copy_(self.host_mask.view(self.n, 201), non_blocking=True)
+        if not self.use_graph:
+            return self._infer()
+        if self.graph is None:
+            # device constants are made here, outside the capture
+            flags = torch.zeros((1, lib.RL_FLAG_BYTES), dtype=torch.uint8, device=self.device)
+            amount = torch.zeros((1, 65, 65), dtype=torch.uint8, device=self.device)
+            unpack_grid(flags, amount, torch)
+            side = torch.cuda.Stream()
+            with torch.cuda.stream(side):
+                for _ in range(3):
+                    self._infer()
+            torch.cuda.current_stream().wait_stream(side)
+            self.graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(self.graph):
+                self.out = self._infer()
+        self.graph.replay()
+        return self.out
+
+
+def unpacked(obs: dict) -> dict:
+    """Packed observation tensors as the policy reads them: the byte grid
+    rebuilt, the packed fields dropped."""
+    grid = unpack_grid(obs.pop("flags"), obs.pop("amount"), torch)
+    return {**obs, "grid": grid}
 
 
 def features(policy: Policy, obs: dict) -> torch.Tensor:
-    """The extractor under bf16 autocast; the heads run in float32."""
-    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=obs["grid"].is_cuda):
+    """The extractor under bf16 autocast; the heads run in float32.
+
+    The autocast cast cache is off, so a CUDA graph holds no stale casts of the
+    weights across optimizer steps."""
+    cuda = obs["grid"].is_cuda
+    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=cuda, cache_enabled=False):
         f = policy.features(*(obs[k] for k in KEYS))
     return f.float()
 
@@ -206,22 +266,29 @@ def main(argv=None) -> int:
     log = (out / "metrics.jsonl").open("a", encoding="utf-8")
 
     torch.backends.cudnn.benchmark = True
-    pinned = PinnedObservations(args.envs, device)
+    policy = Policy().to(device)
+    if device.type == "cuda":
+        # bf16 grid materialisation, and channels-last weights: the grid path's
+        # second convolution gets its input in that layout (fsim/policy.py).
+        policy.extractor.input_dtype = torch.bfloat16
+        policy = policy.to(memory_format=torch.channels_last)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr, eps=1e-5)
+    rollout = Rollout(policy, args.envs, device, graph=not args.no_graph)
     env = VecEnv(
         args.envs, args.task, split="train", seed=args.seed, threads=args.threads,
         shaping=args.shaping, gamma=args.gamma, start_curriculum=args.start_curriculum,
         max_steps=tuple(args.horizon_curriculum) if args.horizon_curriculum else 600,
-        obs_memory=pinned.memory(), demo_starts=args.demo_starts,
+        demo_starts=args.demo_starts, compact=True, **rollout.memories(),
     )  # fmt: skip
-    policy = Policy().to(device)
-    optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr, eps=1e-5)
 
     N, T = args.envs, args.horizon
     batch = N * T
     mb = batch // args.minibatches
     updates = args.steps // batch
     buf = {
-        "grid": torch.zeros((T, N, 6, 65, 65), dtype=torch.float16, device=device),
+        # The byte grid, unpacked once in the rollout graph: the update reads it
+        # every epoch, and unpacking per minibatch cost more than it saved.
+        "grid": torch.zeros((T, N, 6, 65, 65), dtype=torch.uint8, device=device),
         "entities": torch.zeros((T, N, 32, 16), device=device),
         "entity_mask": torch.zeros((T, N, 32), dtype=torch.int8, device=device),
         "self": torch.zeros((T, N, 12), device=device),
@@ -235,9 +302,9 @@ def main(argv=None) -> int:
     done_buf = torch.zeros((T, N), device=device)
     val_buf = torch.zeros((T, N), device=device)
 
-    obs, masks = env.reset()
-    next_obs = pinned.fetch()
-    next_mask = torch.from_numpy(masks).to(device).bool()
+    env.reset()
+    host_step = torch.empty((2, N), dtype=torch.float32, pin_memory=device.type == "cuda")
+    step_np = host_step.numpy()
     next_done = torch.zeros(N, device=device)
     episodes: list[dict] = []
     steps = 0
@@ -245,32 +312,37 @@ def main(argv=None) -> int:
     next_eval = args.eval_every
     best = -1.0
 
+    def clock() -> float:
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        return time.perf_counter()
+
     for update in range(1, updates + 1):
+        began = clock()
         frac = 1.0 - (update - 1) / updates
         for group in optimizer.param_groups:
             group["lr"] = frac * args.lr
-        policy.eval()
         for t in range(T):
+            obs, action, logp, value = rollout()
             for k in KEYS:
-                buf[k][t] = next_obs[k]
-            masks_buf[t] = next_mask
-            done_buf[t] = next_done
-            with torch.no_grad():
-                f = features(policy, next_obs)
-                action, logp = policy.act(f, next_mask)
-                val_buf[t] = policy.value(f)
-            actions_buf[t] = action
-            logp_buf[t] = logp
-            obs, masks, reward, term, trunc, finished = env.step(action.cpu().numpy())
+                buf[k][t].copy_(obs[k])
+            masks_buf[t].copy_(rollout.mask)
+            done_buf[t].copy_(next_done)
+            actions_buf[t].copy_(action)
+            logp_buf[t].copy_(logp)
+            val_buf[t].copy_(value)
+            _, _, reward, term, trunc, finished = env.step(action.cpu().numpy())
             episodes.extend(finished)
-            rew_buf[t] = torch.from_numpy(reward).to(device, torch.float32)
-            next_obs = pinned.fetch()
-            next_mask = torch.from_numpy(masks).to(device).bool()
-            next_done = torch.from_numpy((term | trunc).astype(np.float32)).to(device)
+            step_np[0] = reward
+            step_np[1] = term | trunc
+            host = host_step.to(device, non_blocking=True)
+            rew_buf[t].copy_(host[0])
+            next_done = host[1]
         steps += batch
+        rolled = clock()
 
         with torch.no_grad():
-            next_value = policy.value(features(policy, next_obs))
+            next_value = rollout()[3].clone()
             adv = torch.zeros_like(rew_buf)
             last = torch.zeros(N, device=device)
             for t in reversed(range(T)):
@@ -291,14 +363,12 @@ def main(argv=None) -> int:
         b_logp, b_adv = logp_buf.reshape(-1), adv.reshape(-1)
         b_ret, b_val = returns.reshape(-1), val_buf.reshape(-1)
 
-        policy.train()
         stats = {"pg": [], "v": [], "ent": [], "kl": [], "clipfrac": []}
         for _epoch in range(args.epochs):
             order = torch.randperm(batch, device=device)
             for s in range(0, batch, mb):
                 idx = order[s : s + mb]
-                o = {k: (v[idx].float() if k == "grid" else v[idx]) for k, v in flat.items()}
-                f = features(policy, o)
+                f = features(policy, {k: v[idx] for k, v in flat.items()})
                 logp, entropy = policy.evaluate(f, b_masks[idx], b_actions[idx])
                 value = policy.value(f)
                 ratio_log = logp - b_logp[idx]
@@ -317,22 +387,26 @@ def main(argv=None) -> int:
                 nn.utils.clip_grad_norm_(policy.parameters(), args.max_grad_norm)
                 optimizer.step()
                 with torch.no_grad():
-                    stats["pg"].append(pg.item())
-                    stats["v"].append(v_loss.item())
-                    stats["ent"].append(ent.item())
-                    stats["kl"].append(((ratio - 1) - ratio_log).mean().item())
-                    stats["clipfrac"].append(((ratio - 1).abs() > args.clip).float().mean().item())
+                    stats["pg"].append(pg.detach())
+                    stats["v"].append(v_loss.detach())
+                    stats["ent"].append(ent.detach())
+                    stats["kl"].append(((ratio - 1) - ratio_log).mean())
+                    stats["clipfrac"].append(((ratio - 1).abs() > args.clip).float().mean())
 
+        updated = clock()
+        loss_means = torch.stack([torch.stack(v).mean() for v in stats.values()]).tolist()
         elapsed = time.perf_counter() - start
         recent = [e for e in episodes[-2048:] if e["start"] == "scene"][-512:]
         demo = [e for e in episodes[-2048:] if e["start"] != "scene"][-512:]
         row = {
             "update": update,
+            "time_rollout": round(rolled - began, 4),
+            "time_update": round(updated - rolled, 4),
             "steps": steps,
             "sps": round(steps / elapsed),
             "lr": optimizer.param_groups[0]["lr"],
             "episodes": len(episodes),
-            **{k: float(np.mean(v)) for k, v in stats.items()},
+            **dict(zip(stats, loss_means, strict=True)),
         }
         if recent:
             row.update(
@@ -373,6 +447,9 @@ def main(argv=None) -> int:
             print(json.dumps(brief), flush=True)
 
     env.close()
+    log.close()
+    if args.no_final:
+        return 0
     # The final report: both splits, sampled and greedy, from the best checkpoint.
     policy.load_state_dict(torch.load(out / "best.pt", weights_only=True))
     policy.eval()

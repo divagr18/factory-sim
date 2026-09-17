@@ -28,6 +28,8 @@ environment, whose `action_masks()` is the same flat 201-entry vector.
 
 from __future__ import annotations
 
+import copy
+
 import torch
 from torch import nn
 
@@ -52,7 +54,7 @@ def argument_uses() -> torch.Tensor:
     return uses
 
 
-EXTRACTOR_VERSION = 1
+EXTRACTOR_VERSION = 2  # 2: the grid is read at 1/255 resolution
 
 #: The placement choices cover the 11x11 tiles around the character; rows and
 #: columns 26..38 of the grid hold them whichever way the character's position
@@ -92,9 +94,43 @@ class Extractor(nn.Module):
             nn.LayerNorm(features_dim),
             nn.ReLU(),
         )
+        #: The dtype the grid is materialised in; a trainer running the
+        #: extractor under bf16 autocast sets bf16, so the cast happens once.
+        self.input_dtype: torch.dtype = torch.float32
+
+    def _grid(self, grid: torch.Tensor) -> torch.Tensor:
+        """`grid_net`, with its first layer computed as what it is.
+
+        A 4x4 convolution with stride 4 on a 65x65 grid reads the top-left 64x64
+        in disjoint 4x4 patches: it is a linear map of `pixel_unshuffle(4)`,
+        with the same weights. As a matrix multiply it measured 25 ms against
+        cuDNN's 33 ms for the grid path's forward and backward at 4096 samples,
+        and its output is already in channels-last layout, which the second
+        convolution runs fastest in. Same parameters, same numbers.
+        """
+        first = self.grid_net[0]
+        patches = torch.nn.functional.pixel_unshuffle(grid[:, :, :64, :64], 4)
+        h = torch.nn.functional.linear(
+            patches.permute(0, 2, 3, 1), first.weight.flatten(1), first.bias
+        ).permute(0, 3, 1, 2)
+        for index, layer in enumerate(self.grid_net):
+            if index >= 1:
+                h = layer(h)
+        return h
 
     def forward(self, grid, entities, entity_mask, self_, inventory, goal):
-        g = self.grid_net(grid)
+        # Every grid value is read at 1/255 resolution, so the float grid the
+        # engine's encoder produces and the byte grid a trainer ships to the GPU
+        # (`fsim_obs8`, round(255 * value)) are the same input. A byte grid goes
+        # straight to the compute dtype: at a 4096-sample minibatch the grid is
+        # 104M elements, and every extra full-size pass over it showed up in the
+        # update's wall time.
+        if grid.dtype == torch.uint8:
+            grid = grid.to(self.input_dtype)
+        else:
+            grid = torch.round(grid * 255.0).to(self.input_dtype)
+        grid = grid.div_(255.0)
+        g = self._grid(grid)
         c = self.crop_net(grid[:, :, 26:39, 26:39])
         e = self.entity_net(entities)
         mask = entity_mask.float().unsqueeze(-1)
@@ -113,10 +149,31 @@ def _layer(i: int, o: int, std: float = 2**0.5) -> nn.Linear:
     return layer
 
 
-def _masked_entropy(logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    logp = torch.log_softmax(logits, dim=-1)
-    p_log_p = torch.where(mask, logp.exp() * logp, torch.zeros_like(logp))
-    return -p_log_p.sum(-1)
+def _layout() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Where each of the 179 argument entries sits in a (5, 122) padded grid.
+
+    Returns the flat scatter index into 5 * 122, the argument dimension of
+    each entry, and which entries are a dimension's UNUSED sentinel (index 0).
+    """
+    width = max(ARG_NVEC)
+    index, dim, sentinel = [], [], []
+    for j, size in enumerate(ARG_NVEC):
+        for k in range(size):
+            index.append(j * width + k)
+            dim.append(j)
+            sentinel.append(k == 0)
+    return torch.tensor(index), torch.tensor(dim), torch.tensor(sentinel)
+
+
+def _gumbel_argmax(logits: torch.Tensor) -> torch.Tensor:
+    """A sample from softmax(logits): argmax(logits + Gumbel noise).
+
+    Same distribution as `torch.multinomial(softmax(logits))`, but with no
+    host synchronisation and no data-dependent kernel, so a rollout step can
+    be captured in a CUDA graph. Masked entries sit at -1e8 and never win.
+    """
+    u = torch.rand_like(logits).clamp_(1e-10, 1.0 - 1e-7)
+    return (logits - torch.log(-torch.log(u))).argmax(-1)
 
 
 class Policy(nn.Module):
@@ -128,8 +185,13 @@ class Policy(nn.Module):
             _layer(features_dim + OPS, 256), nn.ReLU(), _layer(256, sum(ARG_NVEC), 0.01)
         )
         self.value_head = nn.Sequential(_layer(features_dim, 256), nn.ReLU(), _layer(256, 1, 1.0))
+        index, dim, sentinel = _layout()
         self.register_buffer("uses", argument_uses(), persistent=False)
+        self.register_buffer("pad_index", index, persistent=False)
+        self.register_buffer("pad_dim", dim, persistent=False)
+        self.register_buffer("pad_sentinel", sentinel, persistent=False)
         self.arg_sizes: list[int] = list(ARG_NVEC)
+        self.arg_width: int = max(ARG_NVEC)
         self.ops: int = OPS
         self.masked: float = MASKED
 
@@ -139,64 +201,60 @@ class Policy(nn.Module):
     def value(self, features: torch.Tensor) -> torch.Tensor:
         return self.value_head(features).squeeze(-1)
 
-    def _argument_masks(self, mask: torch.Tensor, op: torch.Tensor) -> list[torch.Tensor]:
-        uses = self.uses[op]  # B x 5
-        out: list[torch.Tensor] = []
-        offset = self.ops
-        for j, size in enumerate(self.arg_sizes):
-            m = mask[:, offset : offset + size]
-            offset += size
-            used = uses[:, j : j + 1]
-            others = m[:, 1:].any(dim=1, keepdim=True)
-            sentinel_only = torch.zeros_like(m)
-            sentinel_only[:, 0] = True
-            narrowed = m.clone()
-            narrowed[:, :1] = m[:, :1] & ~others
-            out.append(torch.where(used, narrowed, sentinel_only))
-        return out
+    def _op_logits(self, features: torch.Tensor, mask: torch.Tensor):
+        op_mask = mask[:, : self.ops]
+        logits = self.op_head(features)
+        return torch.where(op_mask, logits, torch.full_like(logits, self.masked)), op_mask
 
-    def _argument_logits(self, features: torch.Tensor, op: torch.Tensor) -> list[torch.Tensor]:
+    def _arguments(self, features: torch.Tensor, mask: torch.Tensor, op: torch.Tensor):
+        """Masked argument logits and masks for the chosen ops, as (B, 5, 122).
+
+        An argument the op does not read may only be its sentinel; one it does
+        read may not be, while anything else in its dimension is legal.
+        Padding is masked. One pass for all five dimensions.
+        """
+        batch = features.shape[0]
+        seg = mask[:, self.ops :]  # B x 179
+        used = self.uses[op][:, self.pad_dim]  # B x 179
+        real = seg & ~self.pad_sentinel
+        others = torch.zeros(batch, len(self.arg_sizes), device=seg.device, dtype=features.dtype)
+        others = others.index_add(1, self.pad_dim, real.to(features.dtype)) > 0
+        narrowed = seg & ~(self.pad_sentinel & others[:, self.pad_dim])
+        allowed = torch.where(used, narrowed, self.pad_sentinel.expand_as(seg))
+
         one_hot = torch.nn.functional.one_hot(op, self.ops).to(features.dtype)
-        logits = self.arg_head(torch.cat([features, one_hot], dim=1))
-        return list(torch.split(logits, self.arg_sizes, dim=1))
+        flat = self.arg_head(torch.cat([features, one_hot], dim=1))  # B x 179
+        size = len(self.arg_sizes) * self.arg_width
+        logits = torch.full((batch, size), self.masked, device=flat.device, dtype=flat.dtype)
+        logits = logits.index_copy(1, self.pad_index, torch.where(allowed, flat, logits[:, :1]))
+        pad_mask = torch.zeros(batch, size, device=seg.device, dtype=torch.bool)
+        pad_mask = pad_mask.index_copy(1, self.pad_index, allowed)
+        shape = (batch, len(self.arg_sizes), self.arg_width)
+        return logits.view(shape), pad_mask.view(shape)
 
     def act(self, features: torch.Tensor, mask: torch.Tensor, greedy: bool = False):
         """-> actions (B x 6, int64), log-probabilities (B)."""
-        op_mask = mask[:, : self.ops]
-        op_logits = self.op_head(features)
-        op_logits = torch.where(op_mask, op_logits, torch.full_like(op_logits, self.masked))
-        if greedy:
-            op = op_logits.argmax(-1)
-        else:
-            op = torch.multinomial(torch.softmax(op_logits, -1), 1).squeeze(-1)
+        op_logits, _ = self._op_logits(features, mask)
+        op = op_logits.argmax(-1) if greedy else _gumbel_argmax(op_logits)
+        logits, _ = self._arguments(features, mask, op)
+        args = logits.argmax(-1) if greedy else _gumbel_argmax(logits)
         logp = torch.log_softmax(op_logits, -1).gather(1, op.unsqueeze(1)).squeeze(1)
-        actions = [op]
-        masks = self._argument_masks(mask, op)
-        for logits, m in zip(self._argument_logits(features, op), masks):  # noqa: B905 (TorchScript has no strict=)
-            logits = torch.where(m, logits, torch.full_like(logits, self.masked))
-            if greedy:
-                a = logits.argmax(-1)
-            else:
-                a = torch.multinomial(torch.softmax(logits, -1), 1).squeeze(-1)
-            logp = logp + torch.log_softmax(logits, -1).gather(1, a.unsqueeze(1)).squeeze(1)
-            actions.append(a)
-        return torch.stack(actions, dim=1), logp
+        arg_logp = torch.log_softmax(logits, -1).gather(2, args.unsqueeze(2)).squeeze(2)
+        return torch.cat([op.unsqueeze(1), args], dim=1), logp + arg_logp.sum(1)
 
     def evaluate(self, features: torch.Tensor, mask: torch.Tensor, actions: torch.Tensor):
         """-> log-probabilities and entropies (B) of stored actions."""
         op = actions[:, 0]
-        op_mask = mask[:, : self.ops]
-        op_logits = self.op_head(features)
-        op_logits = torch.where(op_mask, op_logits, torch.full_like(op_logits, self.masked))
-        logp = torch.log_softmax(op_logits, -1).gather(1, op.unsqueeze(1)).squeeze(1)
-        entropy = _masked_entropy(op_logits, op_mask)
-        masks = self._argument_masks(mask, op)
-        for j, (logits, m) in enumerate(zip(self._argument_logits(features, op), masks)):  # noqa: B905
-            logits = torch.where(m, logits, torch.full_like(logits, self.masked))
-            a = actions[:, j + 1]
-            logp = logp + torch.log_softmax(logits, -1).gather(1, a.unsqueeze(1)).squeeze(1)
-            entropy = entropy + _masked_entropy(logits, m)
-        return logp, entropy
+        op_logits, op_mask = self._op_logits(features, mask)
+        op_logp = torch.log_softmax(op_logits, -1)
+        logp = op_logp.gather(1, op.unsqueeze(1)).squeeze(1)
+        zero = torch.zeros_like(op_logp)
+        entropy = -torch.where(op_mask, op_logp.exp() * op_logp, zero).sum(-1)
+        logits, pad_mask = self._arguments(features, mask, op)
+        arg_logp = torch.log_softmax(logits, -1)
+        logp = logp + arg_logp.gather(2, actions[:, 1:].unsqueeze(2)).squeeze(2).sum(1)
+        p_log_p = torch.where(pad_mask, arg_logp.exp() * arg_logp, torch.zeros_like(arg_logp))
+        return logp, entropy - p_log_p.sum((1, 2))
 
 
 class Exported(nn.Module):
@@ -218,6 +276,7 @@ class Exported(nn.Module):
 
 
 def export(policy: Policy, path) -> None:
-    module = Exported(policy).cpu().eval()
+    module = Exported(copy.deepcopy(policy)).cpu().eval()
+    module.policy.extractor.input_dtype = torch.float32
     scripted = torch.jit.script(module)
     scripted.save(str(path))
