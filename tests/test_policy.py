@@ -136,3 +136,62 @@ def test_gumbel_sampling_follows_the_softmax():
     expected = torch.softmax(logits[0], -1)
     assert counts[2] == 0
     assert torch.allclose(counts, expected, atol=0.005)
+
+
+@pytest.fixture(scope="module")
+def batch_v2():
+    env = VecEnv(8, threads=2, demo_starts=1.0, action_space="v2", seed=5)
+    obs, masks = env.reset()
+    out = (
+        {k: torch.from_numpy(obs[k].copy()) for k in OBS_KEYS},
+        torch.from_numpy(masks.copy()).bool(),
+    )
+    env.close()
+    return out
+
+
+def test_v2_actions_respect_masks_and_scores_match(batch_v2, tmp_path):
+    t, mask = batch_v2
+    torch.manual_seed(3)
+    policy = Policy(action_space="v2").eval()
+    offsets = np.cumsum((0,) + NVEC)
+    with torch.no_grad():
+        f = policy.features(*(t[k] for k in OBS_KEYS))
+        assert f.shape[1] == 256 + 32 * 64 + 6 * 13 * 13
+        for _ in range(20):
+            actions, logp = policy.act(f, mask)
+            again, entropy = policy.evaluate(f, mask, actions)
+            assert torch.allclose(logp, again, atol=1e-5)
+            assert torch.isfinite(entropy).all()
+            for row, a in zip(mask, actions, strict=True):
+                for d in range(6):
+                    assert row[offsets[d] + a[d]]
+    export(policy, tmp_path / "v2.ts")
+    loaded = torch.jit.load(str(tmp_path / "v2.ts"))
+    with torch.no_grad():
+        greedy, _ = policy.act(f, mask, True)
+        assert torch.equal(loaded(*(t[k] for k in OBS_KEYS), mask, True), greedy)
+
+
+def test_v2_target_scores_follow_the_rows(batch_v2):
+    """Swapping two entity rows swaps their target scores: a pointer, not a slot."""
+    t, mask = batch_v2
+    torch.manual_seed(4)
+    policy = Policy(action_space="v2").eval()
+    counts = t["entity_mask"].sum(1)
+    assert (counts >= 2).any()
+    i = int(torch.nonzero(counts >= 2)[0])
+    swapped = {k: v.clone() for k, v in t.items()}
+    swapped["entities"][:, [0, 1]] = swapped["entities"][:, [1, 0]]
+    op = torch.full((len(mask),), 16, dtype=torch.long)  # give_to
+    with torch.no_grad():
+        a, _ = policy._arguments(policy.features(*(t[k] for k in OBS_KEYS)), mask, op)
+        b, _ = policy._arguments(policy.features(*(swapped[k] for k in OBS_KEYS)), mask, op)
+    # the pooled context is permutation-invariant, so only the pointer moves
+    assert torch.allclose(a[i, 0, 1], b[i, 0, 2], atol=1e-5)
+    assert torch.allclose(a[i, 0, 2], b[i, 0, 1], atol=1e-5)
+
+
+def test_v1_checkpoints_still_load():
+    state = Policy().state_dict()
+    Policy(action_space="v1").load_state_dict(state)

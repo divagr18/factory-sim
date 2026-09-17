@@ -24,6 +24,9 @@ SHAPING = {
     True: lib.SHAPING_POTENTIAL, "potential": lib.SHAPING_POTENTIAL,
     "progress": lib.SHAPING_PROGRESS,
 }  # fmt: skip
+#: `action_space` values: FactorioRL's parameterized-v1, or the simulator's v2
+#: prototype (entity-table targets, a fixed placement grid).
+ACTION_SPACES = {"v1": lib.ACTION_SPACE_V1, "v2": lib.ACTION_SPACE_V2}
 SHAPED_COMPONENTS = {
     lib.SHAPING_POTENTIAL: ("verified_output", "line_potential"),
     lib.SHAPING_PROGRESS: ("verified_output", "line_progress"),
@@ -35,7 +38,8 @@ COMPONENTS = {
 
 
 def task_struct(task: str, blueprint: dict, *, decision_ticks=30, max_steps=600,
-                construction_tick_limit=None, shaping=False, gamma=0.999):  # fmt: skip
+                construction_tick_limit=None, shaping=False, gamma=0.999,
+                action_space="v1"):  # fmt: skip
     t = ffi.new("fsim_task *")
     t.task = TASKS[task]
     t.decision_ticks = decision_ticks
@@ -47,6 +51,7 @@ def task_struct(task: str, blueprint: dict, *, decision_ticks=30, max_steps=600,
     if mode and task != "construct_smelting_line":
         raise ValueError("line shaping is defined for construct_smelting_line only")
     t.shaping = mode
+    t.action_space = ACTION_SPACES[action_space]
     t.gamma = gamma
     patch = (blueprint.get("markers") or {}).get("patch")
     if patch is not None and "patch" in (blueprint.get("public_markers") or []):

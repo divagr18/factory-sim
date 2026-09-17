@@ -65,6 +65,48 @@ static int32_t rl_status_slot(int32_t status) {
     }
 }
 
+/* ------------------------------------------------------------------ rows */
+
+typedef struct {
+    double distance;
+    int32_t remembered;
+    int32_t index;       /* seen index, or memory index */
+    int32_t order;
+} rl_row;
+
+/* The entity table's rows: visible entities then remembered ones, stably by
+ * distance from the character, at most RL_MAX_ENTITIES. */
+static int32_t rl_rows(const fsim_env *env, rl_row *rows) {
+    double ox = tiles(env->char_pos.x), oy = tiles(env->char_pos.y);
+    int32_t n = 0;
+    for (int32_t k = 0; k < env->seen_count; k++) {
+        const fsim_entity *e = &env->entities[env->seen[k].entity];
+        rows[n].distance = hypot(tiles(e->pos.x) - ox, tiles(e->pos.y) - oy);
+        rows[n].remembered = 0;
+        rows[n].index = k;
+        rows[n].order = n;
+        n++;
+    }
+    for (int32_t k = 0; k < env->remembered_count; k++) {
+        const fsim_memory *m = &env->memory[env->remembered[k]];
+        rows[n].distance = hypot(tiles(m->pos.x) - ox, tiles(m->pos.y) - oy);
+        rows[n].remembered = 1;
+        rows[n].index = env->remembered[k];
+        rows[n].order = n;
+        n++;
+    }
+    for (int32_t i = 1; i < n; i++) {
+        rl_row v = rows[i];
+        int32_t j = i - 1;
+        while (j >= 0 && rows[j].distance > v.distance) {
+            rows[j + 1] = rows[j];
+            j--;
+        }
+        rows[j + 1] = v;
+    }
+    return n > RL_MAX_ENTITIES ? RL_MAX_ENTITIES : n;
+}
+
 /* ------------------------------------------------------------------ domains */
 
 typedef struct {
@@ -72,14 +114,29 @@ typedef struct {
     int32_t target_count;
     int32_t placements[2 * RL_PLACEMENTS];   /* tile x, y */
     int32_t placement_count;
+    int32_t placement_legal[RL_PLACEMENTS];  /* v2: slot k is a legal tile */
     int32_t held[IT_COUNT];                  /* item held with a count */
     int32_t source[IT_COUNT];                /* item some visible entity holds */
 } rl_domains;
 
-static void rl_domains_build(const fsim_env *env, rl_domains *d) {
+static void rl_domains_build(const fsim_rl *rl, rl_domains *d) {
+    const fsim_env *env = rl->env;
+    int v2 = rl->task.action_space == ACTION_SPACE_V2;
     memset(d, 0, sizeof(*d));
-    for (int32_t k = 0; k < env->seen_count; k++) d->targets[d->target_count++] = env->seen[k].handle;
-    for (int32_t k = 0; k < env->tile_count; k++) d->targets[d->target_count++] = env->tiles[k].handle;
+    if (v2) {
+        rl_row rows[FSIM_MAX_SWEEP + FSIM_MAX_MEMORY];
+        int32_t n = rl_rows(env, rows);
+        for (int32_t k = 0; k < n; k++) {
+            d->targets[d->target_count++] = rows[k].remembered
+                ? env->memory[rows[k].index].handle
+                : env->seen[rows[k].index].handle;
+        }
+    } else {
+        for (int32_t k = 0; k < env->seen_count; k++)
+            d->targets[d->target_count++] = env->seen[k].handle;
+        for (int32_t k = 0; k < env->tile_count; k++)
+            d->targets[d->target_count++] = env->tiles[k].handle;
+    }
 
     int32_t here_x = (int32_t)floordiv(env->char_pos.x, TILE);
     int32_t here_y = (int32_t)floordiv(env->char_pos.y, TILE);
@@ -104,7 +161,15 @@ static void rl_domains_build(const fsim_env *env, rl_domains *d) {
     for (int32_t dx = -RL_PLACEMENT_RADIUS; dx <= RL_PLACEMENT_RADIUS; dx++) {
         for (int32_t dy = -RL_PLACEMENT_RADIUS; dy <= RL_PLACEMENT_RADIUS; dy++) {
             int32_t tx = here_x + dx, ty = here_y + dy;
-            if (occupied_at[(dx + RL_PLACEMENT_RADIUS) * SIDE + dy + RL_PLACEMENT_RADIUS]) continue;
+            int32_t slot = (dx + RL_PLACEMENT_RADIUS) * SIDE + dy + RL_PLACEMENT_RADIUS;
+            if (v2) {
+                d->placements[2 * slot] = tx;
+                d->placements[2 * slot + 1] = ty;
+                d->placement_legal[slot] = !occupied_at[slot];
+                d->placement_count += !occupied_at[slot];
+                continue;
+            }
+            if (occupied_at[slot]) continue;
             d->placements[2 * d->placement_count] = tx;
             d->placements[2 * d->placement_count + 1] = ty;
             d->placement_count++;
@@ -131,7 +196,8 @@ static int rl_any(const int32_t *flags) {
 
 void fsim_rl_mask(fsim_rl *rl, uint8_t *mask) {
     rl_domains d;
-    rl_domains_build(rl->env, &d);
+    rl_domains_build(rl, &d);
+    int v2 = rl->task.action_space == ACTION_SPACE_V2;
     memset(mask, 0, RL_MASK_SIZE);
     int has_targets = d.target_count > 0;
     int has_items = rl_any(d.held);
@@ -153,7 +219,11 @@ void fsim_rl_mask(fsim_rl *rl, uint8_t *mask) {
     for (int32_t k = 0; k < d.target_count && k < RL_TARGETS; k++) mask[offset + 1 + k] = 1;
     offset += RL_TARGETS + 1;
     mask[offset] = 1;
-    for (int32_t k = 0; k < d.placement_count && k < RL_PLACEMENTS; k++) mask[offset + 1 + k] = 1;
+    if (v2) {
+        for (int32_t k = 0; k < RL_PLACEMENTS; k++) mask[offset + 1 + k] = (uint8_t)d.placement_legal[k];
+    } else {
+        for (int32_t k = 0; k < d.placement_count && k < RL_PLACEMENTS; k++) mask[offset + 1 + k] = 1;
+    }
     offset += RL_PLACEMENTS + 1;
     for (int k = 0; k <= 4; k++) mask[offset + k] = 1;
     offset += 5;
@@ -183,7 +253,8 @@ int32_t fsim_rl_decode(fsim_rl *rl, const int32_t *v, fsim_action *out) {
     if (op == OP_SET_RECIPE || op == OP_CRAFT || op == OP_CANCEL) return 1;
 
     rl_domains d;
-    rl_domains_build(rl->env, &d);
+    rl_domains_build(rl, &d);
+    int v2 = rl->task.action_space == ACTION_SPACE_V2;
     int32_t targets = d.target_count < RL_TARGETS ? d.target_count : RL_TARGETS;
     int32_t placements = d.placement_count < RL_PLACEMENTS ? d.placement_count : RL_PLACEMENTS;
     int32_t target = v[1], placement = v[2], direction = v[3], item_index = v[4], amount = v[5];
@@ -193,7 +264,12 @@ int32_t fsim_rl_decode(fsim_rl *rl, const int32_t *v, fsim_action *out) {
     switch (op) {
     case OP_PLACE_AT:
         if (item_index == 0 || item_index - 1 >= RL_ITEMS) return 1;
-        if (placement == 0 || placement - 1 >= placements) return 1;
+        if (v2) {
+            if (placement < 1 || placement > RL_PLACEMENTS || !d.placement_legal[placement - 1])
+                return 1;
+        } else if (placement == 0 || placement - 1 >= placements) {
+            return 1;
+        }
         if (direction == 0 || direction - 1 >= 4) return 1;
         break;
     case OP_MINE_AT: case OP_ROTATE_AT: case OP_ROTATE_REVERSE:
@@ -251,13 +327,6 @@ int32_t fsim_rl_decode(fsim_rl *rl, const int32_t *v, fsim_action *out) {
 }
 
 /* ------------------------------------------------------------------ encode */
-
-typedef struct {
-    double distance;
-    int32_t remembered;
-    int32_t index;       /* seen index, or memory index */
-    int32_t order;
-} rl_row;
 
 static void rl_goal(fsim_rl *rl, float *goal);
 double fsim_rl_potential(const fsim_rl *rl);
@@ -350,33 +419,7 @@ static void rl_encode_into(fsim_rl *rl, rl_fields *obs) {
 
     /* Rows: visible entities then remembered ones, stably by distance. */
     rl_row rows[FSIM_MAX_SWEEP + FSIM_MAX_MEMORY];
-    int32_t n = 0;
-    for (int32_t k = 0; k < env->seen_count; k++) {
-        const fsim_entity *e = &env->entities[env->seen[k].entity];
-        rows[n].distance = hypot(tiles(e->pos.x) - ox, tiles(e->pos.y) - oy);
-        rows[n].remembered = 0;
-        rows[n].index = k;
-        rows[n].order = n;
-        n++;
-    }
-    for (int32_t k = 0; k < env->remembered_count; k++) {
-        const fsim_memory *m = &env->memory[env->remembered[k]];
-        rows[n].distance = hypot(tiles(m->pos.x) - ox, tiles(m->pos.y) - oy);
-        rows[n].remembered = 1;
-        rows[n].index = env->remembered[k];
-        rows[n].order = n;
-        n++;
-    }
-    for (int32_t i = 1; i < n; i++) {
-        rl_row v = rows[i];
-        int32_t j = i - 1;
-        while (j >= 0 && rows[j].distance > v.distance) {
-            rows[j + 1] = rows[j];
-            j--;
-        }
-        rows[j + 1] = v;
-    }
-    if (n > RL_MAX_ENTITIES) n = RL_MAX_ENTITIES;
+    int32_t n = rl_rows(env, rows);
     for (int32_t i = 0; i < n; i++) {
         float *f = &obs->entities[i * RL_ENTITY_FEATURES];
         int32_t kind, direction, status, working_known, working;
@@ -780,4 +823,12 @@ void fsim_rl_step_range8(fsim_rl **rls, int32_t first, int32_t last, const int32
         fsim_rl_encode8(rl, &obs[i]);
         fsim_rl_mask(rl, &masks[RL_MASK_SIZE * i]);
     }
+}
+
+int32_t fsim_rl_targets(fsim_rl *rl, int32_t *handles, int32_t cap) {
+    rl_domains d;
+    rl_domains_build(rl, &d);
+    int32_t n = d.target_count < cap ? d.target_count : cap;
+    for (int32_t k = 0; k < n; k++) handles[k] = d.targets[k];
+    return n;
 }

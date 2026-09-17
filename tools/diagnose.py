@@ -49,14 +49,17 @@ def main() -> int:
     p.add_argument("--greedy", action="store_true")
     p.add_argument("--max-steps", type=int, default=600)
     p.add_argument("--device", default="cpu", help="cpu leaves the GPU to a training run")
+    p.add_argument("--action-space", choices=("v1", "v2"), default="v1")
     args = p.parse_args()
     device = torch.device(args.device)
-    policy = Policy().to(device)
+    policy = Policy(action_space=args.action_space).to(device)
     policy.load_state_dict(torch.load(args.checkpoint, map_location=device, weights_only=True))
     policy.eval()
 
     n = min(64, args.episodes)
-    env = VecEnv(n, threads=8, eval_seeds=True, max_steps=args.max_steps)
+    env = VecEnv(
+        n, threads=8, eval_seeds=True, max_steps=args.max_steps, action_space=args.action_space
+    )
     obs, masks = env.reset()
     ops = Counter()
     decode_failures = 0
