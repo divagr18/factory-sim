@@ -359,16 +359,145 @@ static int box_hits_water(const fsim_env *env, fsim_pos p, int32_t r, int inclus
     return 0;
 }
 
-static int character_blocked(const fsim_env *env, fsim_pos p) {
+/* ------------------------------------------------------------ character motion
+ *
+ * Measured on the engine (FactorioRL tools/probe_corner_slide.py,
+ * docs/evidence/sim-mechanics-m5-slide*.json):
+ *
+ * - Two aligned obstacles whose boxes are closer than GAP_SOLID block the
+ *   character between them, although it would fit: two adjacent walls (108/256
+ *   apart) stop a 102/256 character mid-gap, while a wall beside a furnace
+ *   (131/256) and adjacent furnaces (154/256) let it through. The gap is
+ *   modelled as a box of its own.
+ * - A blocked stride turns into a slide when the obstacle can be cleared
+ *   sideways: towards the side the character's centre is on (a dead-centre
+ *   walker tries +y first when walking east or west, -x when walking north or
+ *   south, then the other side), by up to a stride per tick with no forward
+ *   progress, only if the whole clearance is at most SLIDE_LIMIT and a stride
+ *   from the cleared position is free.
+ * - Otherwise the character creeps forward to contact (see walk_one_tick).
+ */
+
+#define GAP_SOLID 128             /* 108 blocks, 131 passes: bounded, not pinned */
+#define SLIDE_LIMIT 179           /* 175 slides, 183 does not: bounded, not pinned */
+
+typedef struct {
+    int32_t x0, y0, x1, y1;
+} fsim_box;
+
+static int solid_entity(const fsim_entity *e) {
+    return e->alive && e->kind != K_PILE && box_of(e->kind) > 0;
+}
+
+static fsim_box entity_box(const fsim_entity *e) {
+    int32_t r = box_of(e->kind);
+    fsim_box b = {e->pos.x - r, e->pos.y - r, e->pos.x + r, e->pos.y + r};
+    return b;
+}
+
+static void rebuild_fillers(fsim_env *env) {
+    env->filler_count = 0;
+    for (int32_t i = 0; i < env->entity_count; i++) {
+        if (!solid_entity(&env->entities[i])) continue;
+        fsim_box a = entity_box(&env->entities[i]);
+        for (int32_t j = 0; j < env->entity_count; j++) {
+            if (j == i || !solid_entity(&env->entities[j])) continue;
+            fsim_box b = entity_box(&env->entities[j]);
+            fsim_box f;
+            int32_t gap;
+            if (a.x1 < b.x0 && a.y0 <= b.y1 && b.y0 <= a.y1) {   /* b east of a */
+                gap = b.x0 - a.x1;
+                f.x0 = a.x1; f.x1 = b.x0;
+                f.y0 = a.y0 > b.y0 ? a.y0 : b.y0;
+                f.y1 = a.y1 < b.y1 ? a.y1 : b.y1;
+            } else if (a.y1 < b.y0 && a.x0 <= b.x1 && b.x0 <= a.x1) {  /* b south of a */
+                gap = b.y0 - a.y1;
+                f.y0 = a.y1; f.y1 = b.y0;
+                f.x0 = a.x0 > b.x0 ? a.x0 : b.x0;
+                f.x1 = a.x1 < b.x1 ? a.x1 : b.x1;
+            } else {
+                continue;
+            }
+            if (gap >= GAP_SOLID || env->filler_count >= 64) continue;
+            int32_t *out = &env->fillers[4 * env->filler_count++];
+            out[0] = f.x0; out[1] = f.y0; out[2] = f.x1; out[3] = f.y1;
+        }
+    }
+    env->fillers_version = env->entities_version;
+}
+
+static int box_blocks(fsim_box b, fsim_pos p) {
+    /* Boxes that only touch still collide. */
+    return p.x + CHAR_BOX >= b.x0 && p.x - CHAR_BOX <= b.x1 &&
+           p.y + CHAR_BOX >= b.y0 && p.y - CHAR_BOX <= b.y1;
+}
+
+/* The first obstacle the character at `p` collides with: an entity, then a
+ * gap filler. Returns 0 when only water (or nothing) is in the way. */
+static int blocking_box(fsim_env *env, fsim_pos p, fsim_box *out) {
+    if (env->fillers_version != env->entities_version) rebuild_fillers(env);
     for (int32_t i = 0; i < env->entity_count; i++) {
         const fsim_entity *e = &env->entities[i];
-        if (!e->alive || e->kind == K_PILE) continue;
-        int32_t reach = box_of(e->kind) + CHAR_BOX;
-        int32_t dx = abs(e->pos.x - p.x), dy = abs(e->pos.y - p.y);
-        /* Boxes that only touch still collide. */
-        if (dx <= reach && dy <= reach) return 1;
+        if (!solid_entity(e)) continue;
+        fsim_box b = entity_box(e);
+        if (box_blocks(b, p)) {
+            *out = b;
+            return 1;
+        }
     }
+    for (int32_t k = 0; k < env->filler_count; k++) {
+        const int32_t *f = &env->fillers[4 * k];
+        fsim_box b = {f[0], f[1], f[2], f[3]};
+        if (box_blocks(b, p)) {
+            *out = b;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int character_blocked(fsim_env *env, fsim_pos p) {
+    fsim_box b;
+    if (blocking_box(env, p, &b)) return 1;
     return box_hits_water(env, p, CHAR_BOX, 1);
+}
+
+/* Slide around the obstacle `next` runs into, if the engine would. */
+static int try_slide(fsim_env *env, int32_t ux, int32_t uy, fsim_pos next) {
+    fsim_box b;
+    if (!blocking_box(env, next, &b)) return 0;
+    int horizontal = ux != 0;
+    int32_t c = horizontal ? next.y : next.x;
+    int32_t lo = horizontal ? b.y0 : b.x0, hi = horizontal ? b.y1 : b.x1;
+    int32_t rel2 = 2 * c - (lo + hi);
+    int32_t sides[2];
+    int32_t n = 0;
+    if (rel2 > 0) {
+        sides[n++] = 1;
+    } else if (rel2 < 0) {
+        sides[n++] = -1;
+    } else {
+        sides[n++] = horizontal ? 1 : -1;
+        sides[n++] = horizontal ? -1 : 1;
+    }
+    for (int32_t k = 0; k < n; k++) {
+        int32_t side = sides[k];
+        int32_t need = side > 0 ? hi + CHAR_BOX + 1 - c : c - (lo - CHAR_BOX - 1);
+        if (need <= 0 || need > SLIDE_LIMIT) continue;
+        fsim_pos cleared = env->char_pos;
+        if (horizontal) cleared.y += side * need;
+        else cleared.x += side * need;
+        fsim_pos ahead = {cleared.x + ux * STRIDE, cleared.y + uy * STRIDE};
+        if (character_blocked(env, ahead)) continue;
+        int32_t step = need < STRIDE ? need : STRIDE;
+        fsim_pos moved = env->char_pos;
+        if (horizontal) moved.y += side * step;
+        else moved.x += side * step;
+        if (character_blocked(env, moved)) continue;
+        env->char_pos = moved;
+        return 1;
+    }
+    return 0;
 }
 
 static void walk_one_tick(fsim_env *env, int32_t dir16) {
@@ -383,8 +512,19 @@ static void walk_one_tick(fsim_env *env, int32_t dir16) {
         env->char_pos = next;
         return;
     }
-    /* Blocked: the largest power-of-two step that still clears. */
-    for (int32_t step = 32; step >= 1; step /= 2) {
+    if (try_slide(env, ux, uy, next)) return;
+    /* Creep: half a stride, then 1/32 of a tile, then exactly to contact --
+     * measured from every start phase against a furnace (a gap of 37 goes
+     * 19, 8, 8, 2; a gap of 13 goes 8, 5; a gap of 7 goes 7). */
+    static const int32_t CREEP[2] = {STRIDE / 2, 8};
+    for (int32_t k = 0; k < 2; k++) {
+        fsim_pos p = {env->char_pos.x + ux * CREEP[k], env->char_pos.y + uy * CREEP[k]};
+        if (!character_blocked(env, p)) {
+            env->char_pos = p;
+            return;
+        }
+    }
+    for (int32_t step = 7; step >= 1; step--) {
         fsim_pos p = {env->char_pos.x + ux * step, env->char_pos.y + uy * step};
         if (!character_blocked(env, p)) {
             env->char_pos = p;
@@ -441,6 +581,7 @@ static void face(fsim_env *env, fsim_pos target) {
 static int32_t new_entity(fsim_env *env, int32_t kind, fsim_pos pos, int32_t direction,
                           int32_t neutral) {
     int32_t i = env->entity_count++;
+    env->entities_version++;
     fsim_entity *e = &env->entities[i];
     memset(e, 0, sizeof(*e));
     e->alive = 1;
@@ -457,6 +598,7 @@ static int32_t new_entity(fsim_env *env, int32_t kind, fsim_pos pos, int32_t dir
 static void destroy_entity(fsim_env *env, int32_t index) {
     fsim_entity *e = &env->entities[index];
     e->alive = 0;
+    env->entities_version++;
     if (e->kind != K_PILE) unit_destroyed(env, e->unit);
     if (env->selected_kind == 1 && env->selected_index == index) env->selected_kind = 0;
 }
@@ -1406,7 +1548,16 @@ void fsim_set_water(fsim_env *env, const int32_t *xy, int32_t count) {
     env->water_count = count;
 }
 
+void fsim_walk_ticks(fsim_env *env, int32_t dir16, int32_t ticks, int32_t *xy) {
+    for (int32_t i = 0; i < ticks; i++) {
+        walk_one_tick(env, dir16);
+        xy[2 * i] = env->char_pos.x;
+        xy[2 * i + 1] = env->char_pos.y;
+    }
+}
+
 void fsim_after_load(fsim_env *env) {
+    env->entities_version++;
     if (env->mining) {
         int32_t kind, index;
         env->mining_target_entity = -1;

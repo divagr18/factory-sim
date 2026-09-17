@@ -63,6 +63,9 @@ def main() -> int:
         "sim-mechanics-m1.json",
         "sim-mechanics-m3.json",
         "sim-mechanics-m3-drills.json",
+        "sim-mechanics-m5-slide.json",
+        "sim-mechanics-m5-slide-gaps.json",
+        "sim-mechanics-m5-slide-creep.json",
     ):
         path = args.source / "docs" / "evidence" / extra
         if path.exists():
