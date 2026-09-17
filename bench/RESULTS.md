@@ -111,3 +111,24 @@ What is left is the GPU:
 
 `--epochs 1` (PufferLib's default) doubles the update rate, but that is a
 learning choice, not an optimisation, and the default stays at 2.
+
+### On a desktop: RTX 4060 (8 GB) and Ryzen 5 5600T (6 cores, 12 threads)
+
+`--threads 12`, same commands:
+
+| envs | rollout steps/s | update samples/s | overall steps/s |
+|---:|---:|---:|---:|
+| 256 | 120,205 | 77,583 | 47,151 |
+| 512 | 122,717 | 81,695 | 49,045 |
+| 1024 | 91,528 | 82,936 | 43,510 |
+| 512, `--epochs 1` | 122,461 | 158,775 | 69,137 |
+
+A 5M-step training run at 512 envs (`--demo-starts 0.5`) held **47,158
+steps/s** from start to finish. The GPU stayed at 57 C, and every update
+took 0.40 s. That is 3.3 times the laptop's sustained rate.
+
+At this rate a 20M-step run takes about 7 minutes.
+
+Other numbers on the same machine:
+- the simulator alone: 169k decisions/s on one core, 981k on 12 threads;
+- the RL path: 91k decisions/s on one core, 541k on 12 threads.
