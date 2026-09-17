@@ -1,0 +1,579 @@
+{
+  "build_line_reference": {
+    "about": "the build_line reference solver, to success",
+    "action_outcomes": {
+      "give_to:completed": 2,
+      "move_east:completed": 2,
+      "move_north:completed": 1,
+      "place_at:completed": 2,
+      "step_north:completed": 2,
+      "wait:completed": 231
+    },
+    "decisions": 240,
+    "decode_failures": 0,
+    "engine_build": 83512,
+    "error": null,
+    "final_entities": [
+      {
+        "name": "burner-mining-drill",
+        "status": "working"
+      },
+      {
+        "name": "stone-furnace",
+        "status": "working"
+      }
+    ],
+    "final_ground_items": 0,
+    "final_tick": 7200,
+    "layout_family": "square_patch",
+    "mod_source_digest": "c53124ef0df14b20",
+    "replay_identical": true,
+    "replay_sha256": "1045062791853674d920eedd84887e12a705a882fd36a2bbcaf9b7f82da776f7",
+    "return": 0.91,
+    "success": true,
+    "task": "build_line",
+    "task_version": "1.1.0",
+    "terminated": true,
+    "trace": "build_line_reference.jsonl.xz",
+    "trace_sha256": "1045062791853674d920eedd84887e12a705a882fd36a2bbcaf9b7f82da776f7",
+    "truncated": false,
+    "unencodable_actions": 0,
+    "verification": null,
+    "wall_seconds": 11.2
+  },
+  "burner_run_on": {
+    "about": "one coal each: slots empty, stored energy runs on, machines stop, refuel",
+    "action_outcomes": {
+      "give_to:completed": 4,
+      "place_at:completed": 2,
+      "wait:completed": 110
+    },
+    "decisions": 116,
+    "decode_failures": 0,
+    "engine_build": 83512,
+    "error": null,
+    "final_entities": [
+      {
+        "name": "stone-furnace",
+        "status": "working"
+      },
+      {
+        "name": "burner-mining-drill",
+        "status": "working"
+      }
+    ],
+    "final_ground_items": 0,
+    "final_tick": 3480,
+    "layout_family": "offset_patch",
+    "mod_source_digest": "c53124ef0df14b20",
+    "replay_identical": true,
+    "replay_sha256": "3732b954bcbbc3c5b0f6e6e7231da16384c3d86fb2091e2dbe6b94e3e0e1ef54",
+    "return": 0.0,
+    "success": false,
+    "task": "construct_smelting_line",
+    "task_version": "1.1.1",
+    "terminated": false,
+    "ticks": {
+      "first_mismatch": null,
+      "matches_decision_trace": true,
+      "repeat_identical": true,
+      "ticks": 3480,
+      "trace": "burner_run_on.ticks.jsonl.xz",
+      "trace_sha256": "5e78f95fd78adb0dc18428c85c44091a1c8c93680ca1d89d2d7a1f9aecc4c0ea",
+      "wall_seconds": 153.6
+    },
+    "trace": "burner_run_on.jsonl.xz",
+    "trace_sha256": "3732b954bcbbc3c5b0f6e6e7231da16384c3d86fb2091e2dbe6b94e3e0e1ef54",
+    "truncated": false,
+    "unencodable_actions": 0,
+    "verification": null,
+    "wall_seconds": 5.0
+  },
+  "construct_smelting_line_exploit": {
+    "about": "a hand-fed furnace and no drill, which verification must score zero",
+    "action_outcomes": {
+      "give_to:completed": 2,
+      "mine_at:running": 14,
+      "nudge_north:completed": 1,
+      "nudge_west:completed": 2,
+      "place_at:completed": 1,
+      "step_north:completed": 3,
+      "wait:completed": 577
+    },
+    "decisions": 600,
+    "decode_failures": 0,
+    "engine_build": 83512,
+    "error": null,
+    "final_entities": [
+      {
+        "name": "stone-furnace",
+        "status": "no_ingredients"
+      }
+    ],
+    "final_ground_items": 0,
+    "final_tick": 21600,
+    "layout_family": "open_patch",
+    "mod_source_digest": "c53124ef0df14b20",
+    "replay_identical": true,
+    "replay_sha256": "cd5f6949b41f1d0f935cfd9796e80cc3e331f2e35b901a0ad52692166e9afc77",
+    "return": 0.0,
+    "success": false,
+    "task": "construct_smelting_line",
+    "task_version": "1.1.1",
+    "terminated": true,
+    "trace": "construct_smelting_line_exploit.jsonl.xz",
+    "trace_sha256": "cd5f6949b41f1d0f935cfd9796e80cc3e331f2e35b901a0ad52692166e9afc77",
+    "truncated": false,
+    "unencodable_actions": 0,
+    "verification": {
+      "machine_output": 0.0,
+      "machine_source": 0.0,
+      "reward": 0.0,
+      "success": false,
+      "uncapped_output": 14.0
+    },
+    "wall_seconds": 45.1
+  },
+  "construct_smelting_line_reference": {
+    "about": "the reference line, then the budget run out into automatic verification",
+    "action_outcomes": {
+      "give_to:completed": 2,
+      "move_east:completed": 2,
+      "place_at:completed": 2,
+      "step_east:completed": 2,
+      "wait:completed": 592
+    },
+    "decisions": 600,
+    "decode_failures": 0,
+    "engine_build": 83512,
+    "error": null,
+    "final_entities": [
+      {
+        "name": "burner-mining-drill",
+        "status": "working"
+      },
+      {
+        "name": "stone-furnace",
+        "status": "working"
+      }
+    ],
+    "final_ground_items": 0,
+    "final_tick": 21600,
+    "layout_family": "offset_patch",
+    "mod_source_digest": "c53124ef0df14b20",
+    "replay_identical": true,
+    "replay_sha256": "37480b6ea23b038f758c6ea6c867ff2e85d691c54bd9d63ea1427b66d1064eb1",
+    "return": 1.0,
+    "success": true,
+    "task": "construct_smelting_line",
+    "task_version": "1.1.1",
+    "terminated": true,
+    "trace": "construct_smelting_line_reference.jsonl.xz",
+    "trace_sha256": "37480b6ea23b038f758c6ea6c867ff2e85d691c54bd9d63ea1427b66d1064eb1",
+    "truncated": false,
+    "unencodable_actions": 0,
+    "verification": {
+      "machine_output": 15.0,
+      "machine_source": 15.0,
+      "reward": 1.0,
+      "success": true,
+      "uncapped_output": 15.0
+    },
+    "wall_seconds": 45.0
+  },
+  "drill_furnace_facings": {
+    "about": "a drill feeding a furnace in each of four facings, fuelled and run",
+    "action_outcomes": {
+      "give_to:completed": 8,
+      "place_at:completed": 8,
+      "wait:completed": 60
+    },
+    "decisions": 76,
+    "decode_failures": 0,
+    "engine_build": 83512,
+    "error": null,
+    "final_entities": [
+      {
+        "name": "stone-furnace",
+        "status": "working"
+      },
+      {
+        "name": "burner-mining-drill",
+        "status": "working"
+      },
+      {
+        "name": "stone-furnace",
+        "status": "working"
+      },
+      {
+        "name": "burner-mining-drill",
+        "status": "working"
+      },
+      {
+        "name": "burner-mining-drill",
+        "status": "working"
+      },
+      {
+        "name": "stone-furnace",
+        "status": "working"
+      },
+      {
+        "name": "burner-mining-drill",
+        "status": "working"
+      },
+      {
+        "name": "stone-furnace",
+        "status": "no_ingredients"
+      }
+    ],
+    "final_ground_items": 0,
+    "final_tick": 2280,
+    "layout_family": "open_patch",
+    "mod_source_digest": "c53124ef0df14b20",
+    "replay_identical": true,
+    "replay_sha256": "e697c336574ed966f9fdc7a6fb77c1ad39497838131c30dbdea22cf832ac8948",
+    "return": 0.0,
+    "success": false,
+    "task": "construct_smelting_line",
+    "task_version": "1.1.1",
+    "terminated": false,
+    "ticks": {
+      "first_mismatch": null,
+      "matches_decision_trace": true,
+      "repeat_identical": true,
+      "ticks": 2280,
+      "trace": "drill_furnace_facings.ticks.jsonl.xz",
+      "trace_sha256": "adb114273a2277389a38e059afd618bcdb27c3662a3164c69eca114b9fcb02d1",
+      "wall_seconds": 90.9
+    },
+    "trace": "drill_furnace_facings.jsonl.xz",
+    "trace_sha256": "e697c336574ed966f9fdc7a6fb77c1ad39497838131c30dbdea22cf832ac8948",
+    "truncated": false,
+    "unencodable_actions": 0,
+    "verification": null,
+    "wall_seconds": 3.2
+  },
+  "drill_jam_and_build_over_pile": {
+    "about": "a drill stopped by its own ground pile, then a furnace built on the pile",
+    "action_outcomes": {
+      "give_to:completed": 2,
+      "place_at:completed": 2,
+      "wait:completed": 40
+    },
+    "decisions": 44,
+    "decode_failures": 0,
+    "engine_build": 83512,
+    "error": null,
+    "final_entities": [
+      {
+        "name": "stone-furnace",
+        "status": "working"
+      },
+      {
+        "name": "burner-mining-drill",
+        "status": "working"
+      }
+    ],
+    "final_ground_items": 1,
+    "final_tick": 1320,
+    "layout_family": "open_patch",
+    "mod_source_digest": "c53124ef0df14b20",
+    "replay_identical": true,
+    "replay_sha256": "ebd5c7a98ccb67cd167c651539d0ede708a6132317a785658bc5a0fca6d0ef06",
+    "return": 0.0,
+    "success": false,
+    "task": "construct_smelting_line",
+    "task_version": "1.1.1",
+    "terminated": false,
+    "ticks": {
+      "first_mismatch": null,
+      "matches_decision_trace": true,
+      "repeat_identical": true,
+      "ticks": 1320,
+      "trace": "drill_jam_and_build_over_pile.ticks.jsonl.xz",
+      "trace_sha256": "8c5dc225dd82ad38ac8112a0a2835a8eeb2bf6be6c1087580fd4fce34ab21970",
+      "wall_seconds": 37.2
+    },
+    "trace": "drill_jam_and_build_over_pile.jsonl.xz",
+    "trace_sha256": "ebd5c7a98ccb67cd167c651539d0ede708a6132317a785658bc5a0fca6d0ef06",
+    "truncated": false,
+    "unencodable_actions": 0,
+    "verification": null,
+    "wall_seconds": 1.6
+  },
+  "hand_mine_exhaustion": {
+    "about": "hand-mining 121-tick ore, a second mine mid-mine, walking away, tiles to zero",
+    "action_outcomes": {
+      "mine_at:rejected:busy": 1,
+      "mine_at:running": 7,
+      "nudge_south:completed": 1,
+      "wait:completed": 32
+    },
+    "decisions": 41,
+    "decode_failures": 0,
+    "engine_build": 83512,
+    "error": null,
+    "final_entities": [],
+    "final_ground_items": 0,
+    "final_tick": 1230,
+    "layout_family": "offset_patch",
+    "mod_source_digest": "c53124ef0df14b20",
+    "replay_identical": true,
+    "replay_sha256": "3e71e4516f07fc149a476a07fd9aa22a41c6e77d1cf53aa94088e90c3bab7f11",
+    "return": 0.0,
+    "success": false,
+    "task": "construct_smelting_line",
+    "task_version": "1.1.1",
+    "terminated": false,
+    "ticks": {
+      "first_mismatch": null,
+      "matches_decision_trace": true,
+      "repeat_identical": true,
+      "ticks": 1230,
+      "trace": "hand_mine_exhaustion.ticks.jsonl.xz",
+      "trace_sha256": "5c1cd6cce2186936ef1ac76dd726921891e63ef0f3734b34892d77ab01ae424b",
+      "wall_seconds": 17.5
+    },
+    "trace": "hand_mine_exhaustion.jsonl.xz",
+    "trace_sha256": "3e71e4516f07fc149a476a07fd9aa22a41c6e77d1cf53aa94088e90c3bab7f11",
+    "truncated": false,
+    "unencodable_actions": 0,
+    "verification": null,
+    "wall_seconds": 1.0
+  },
+  "masked_random_rollout": {
+    "about": "200 uniformly random legal vectors, decode failures included",
+    "action_outcomes": {
+      "give_to:rejected:out_of_reach": 2,
+      "give_to:rejected:precondition": 1,
+      "mine_at:rejected:out_of_reach": 14,
+      "mine_at:running": 4,
+      "move_east:completed": 12,
+      "move_north:completed": 7,
+      "move_south:completed": 11,
+      "move_west:completed": 14,
+      "nudge_east:completed": 3,
+      "nudge_north:completed": 9,
+      "nudge_south:completed": 17,
+      "nudge_west:completed": 12,
+      "place_at:rejected:collision": 3,
+      "place_at:rejected:invalid_target": 2,
+      "rotate_at:rejected:invalid_target": 3,
+      "rotate_at:rejected:out_of_reach": 9,
+      "rotate_at_reverse:rejected:invalid_target": 2,
+      "rotate_at_reverse:rejected:out_of_reach": 6,
+      "step_east:completed": 15,
+      "step_north:completed": 19,
+      "step_south:completed": 4,
+      "step_west:completed": 7,
+      "wait:completed": 24
+    },
+    "decisions": 200,
+    "decode_failures": 13,
+    "engine_build": 83512,
+    "error": null,
+    "final_entities": [],
+    "final_ground_items": 0,
+    "final_tick": 6000,
+    "layout_family": "square_patch",
+    "mod_source_digest": "c53124ef0df14b20",
+    "replay_identical": true,
+    "replay_sha256": "3dcdeccd1df6ad76eb69e4a72d4344e61ef4b3af0f1cccc90ec0ddf51d799158",
+    "return": -0.2,
+    "success": false,
+    "task": "build_line",
+    "task_version": "1.1.0",
+    "terminated": false,
+    "trace": "masked_random_rollout.jsonl.xz",
+    "trace_sha256": "3dcdeccd1df6ad76eb69e4a72d4344e61ef4b3af0f1cccc90ec0ddf51d799158",
+    "truncated": false,
+    "unencodable_actions": 0,
+    "verification": null,
+    "wall_seconds": 9.4
+  },
+  "mine_machine_returns_contents": {
+    "about": "picking up a working furnace and drill returns them with their contents",
+    "action_outcomes": {
+      "give_to:completed": 3,
+      "mine_at:completed": 1,
+      "mine_at:running": 1,
+      "place_at:completed": 2,
+      "wait:completed": 22
+    },
+    "decisions": 29,
+    "decode_failures": 0,
+    "engine_build": 83512,
+    "error": null,
+    "final_entities": [],
+    "final_ground_items": 1,
+    "final_tick": 870,
+    "layout_family": "offset_patch",
+    "mod_source_digest": "c53124ef0df14b20",
+    "replay_identical": true,
+    "replay_sha256": "ca26353b023439cc276ce22357dfd96f67ddfc7899024c27655ba50d2f433410",
+    "return": 0.0,
+    "success": false,
+    "task": "construct_smelting_line",
+    "task_version": "1.1.1",
+    "terminated": false,
+    "ticks": {
+      "first_mismatch": null,
+      "matches_decision_trace": true,
+      "repeat_identical": true,
+      "ticks": 870,
+      "trace": "mine_machine_returns_contents.ticks.jsonl.xz",
+      "trace_sha256": "50f5cdbb8fcc264567b2d6418b46b1b404c4fd3547a5e5bdb2bd9537896248a0",
+      "wall_seconds": 23.8
+    },
+    "trace": "mine_machine_returns_contents.jsonl.xz",
+    "trace_sha256": "ca26353b023439cc276ce22357dfd96f67ddfc7899024c27655ba50d2f433410",
+    "truncated": false,
+    "unencodable_actions": 0,
+    "verification": null,
+    "wall_seconds": 1.1
+  },
+  "placement_footprints": {
+    "about": "2x2 snapping, refusals for the character's box, overlap and bare ground, rotation",
+    "action_outcomes": {
+      "mine_at:running": 1,
+      "place_at:completed": 3,
+      "place_at:rejected:collision": 3,
+      "rotate_at:completed": 1,
+      "rotate_at_reverse:completed": 2,
+      "wait:completed": 3
+    },
+    "decisions": 13,
+    "decode_failures": 0,
+    "engine_build": 83512,
+    "error": null,
+    "final_entities": [
+      {
+        "name": "burner-mining-drill",
+        "status": "no_fuel"
+      },
+      {
+        "name": "burner-mining-drill",
+        "status": "no_fuel"
+      }
+    ],
+    "final_ground_items": 0,
+    "final_tick": 390,
+    "layout_family": "offset_patch",
+    "mod_source_digest": "c53124ef0df14b20",
+    "replay_identical": true,
+    "replay_sha256": "9f1ce6f4ef97b07add7c1a0ab853a9ce6121d9b0d10eb3b70115468d6a0bd4f4",
+    "return": 0.0,
+    "success": false,
+    "task": "construct_smelting_line",
+    "task_version": "1.1.1",
+    "terminated": false,
+    "ticks": {
+      "first_mismatch": null,
+      "matches_decision_trace": true,
+      "repeat_identical": true,
+      "ticks": 390,
+      "trace": "placement_footprints.ticks.jsonl.xz",
+      "trace_sha256": "98a817088014acdf0ced37d919c445cd0cc275f0c8022aae0ec88a1b17c6f723",
+      "wall_seconds": 9.2
+    },
+    "trace": "placement_footprints.jsonl.xz",
+    "trace_sha256": "9f1ce6f4ef97b07add7c1a0ab853a9ce6121d9b0d10eb3b70115468d6a0bd4f4",
+    "truncated": false,
+    "unencodable_actions": 0,
+    "verification": null,
+    "wall_seconds": 0.5
+  },
+  "transfer_clamping": {
+    "about": "gives and takes clamped to what is there, and a take during a hand-mine",
+    "action_outcomes": {
+      "give_to:completed": 5,
+      "mine_at:running": 1,
+      "place_at:completed": 1,
+      "take_from:completed": 3,
+      "wait:completed": 21
+    },
+    "decisions": 31,
+    "decode_failures": 0,
+    "engine_build": 83512,
+    "error": null,
+    "final_entities": [
+      {
+        "name": "stone-furnace",
+        "status": "working"
+      }
+    ],
+    "final_ground_items": 0,
+    "final_tick": 930,
+    "layout_family": "offset_patch",
+    "mod_source_digest": "c53124ef0df14b20",
+    "replay_identical": true,
+    "replay_sha256": "23ce8c5a624b4acf012461b8bb3a322e526363937b6d3d46205b5f8c8f715aae",
+    "return": 0.0,
+    "success": false,
+    "task": "construct_smelting_line",
+    "task_version": "1.1.1",
+    "terminated": false,
+    "ticks": {
+      "first_mismatch": null,
+      "matches_decision_trace": true,
+      "repeat_identical": true,
+      "ticks": 930,
+      "trace": "transfer_clamping.ticks.jsonl.xz",
+      "trace_sha256": "8a149a43be8c7bd2dc17e4a7dea097cdc7478297eec245eb135c624d14022b14",
+      "wall_seconds": 25.9
+    },
+    "trace": "transfer_clamping.jsonl.xz",
+    "trace_sha256": "23ce8c5a624b4acf012461b8bb3a322e526363937b6d3d46205b5f8c8f715aae",
+    "truncated": false,
+    "unencodable_actions": 0,
+    "verification": null,
+    "wall_seconds": 1.2
+  },
+  "walk_and_reach": {
+    "about": "strides into a wall, along its face and round it; resource reach",
+    "action_outcomes": {
+      "mine_at:rejected:out_of_reach": 1,
+      "mine_at:running": 1,
+      "move_east:completed": 1,
+      "move_north:completed": 1,
+      "move_south:completed": 1,
+      "move_west:completed": 5,
+      "nudge_north:completed": 2,
+      "step_east:completed": 1,
+      "step_north:completed": 2,
+      "step_west:completed": 1,
+      "wait:completed": 5
+    },
+    "decisions": 21,
+    "decode_failures": 0,
+    "engine_build": 83512,
+    "error": null,
+    "final_entities": [],
+    "final_ground_items": 0,
+    "final_tick": 630,
+    "layout_family": "obstructed_patch",
+    "mod_source_digest": "c53124ef0df14b20",
+    "replay_identical": true,
+    "replay_sha256": "722ccd3bcaf966f62d4fe7f3d03b7a540ec75204c3725afaece94711e94aeb25",
+    "return": 0.0,
+    "success": false,
+    "task": "construct_smelting_line",
+    "task_version": "1.1.1",
+    "terminated": false,
+    "ticks": {
+      "first_mismatch": null,
+      "matches_decision_trace": true,
+      "repeat_identical": true,
+      "ticks": 630,
+      "trace": "walk_and_reach.ticks.jsonl.xz",
+      "trace_sha256": "ba9a803918c864bd3e030e667155621b7267762515c37de654f10d6425377338",
+      "wall_seconds": 13.8
+    },
+    "trace": "walk_and_reach.jsonl.xz",
+    "trace_sha256": "722ccd3bcaf966f62d4fe7f3d03b7a540ec75204c3725afaece94711e94aeb25",
+    "truncated": false,
+    "unencodable_actions": 0,
+    "verification": null,
+    "wall_seconds": 0.8
+  }
+}

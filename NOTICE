@@ -1,0 +1,27 @@
+factory-sim
+Copyright (c) 2026 factory-sim contributors
+Licensed under the MIT License; see LICENSE.
+
+Factorio
+--------
+Factorio is a game by Wube Software Ltd. "Factorio" is a trademark of Wube
+Software Ltd. This project is independent. It is not affiliated with,
+sponsored by, or endorsed by Wube Software Ltd.
+
+What this is
+------------
+A small simulator of a few early-game mechanics, written from scratch. Every
+rule and number in it comes from this project's own measurements of the
+running game, recorded by FactorioRL (its docs/evidence/). No Factorio code,
+data files, prototype definitions, art, sound or fonts were copied or are
+included, and nothing here draws anything that imitates the game.
+
+The golden traces under tests/golden/ are recordings FactorioRL made of its
+own scenarios and are distributed under the same MIT License.
+
+Rules for contributors
+----------------------
+- Never copy code or data from the game or from projects whose licence does
+  not allow it. Measure behaviour and write it down; then implement it.
+- Never commit game binaries, graphics, sounds, fonts, locale files, saves or
+  prototype dumps.

@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyd
+*.so
+*.obj
+*.o
+*.lib
+*.exp
+build/
+dist/
+.venv/
+*.egg-info/
+fsim/_fsim.c
