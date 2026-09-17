@@ -363,6 +363,10 @@ double fsim_capacity(int32_t kind);
 #define TASK_CONSTRUCT_SMELTING_LINE 1
 #define TASK_BUILD_LINE 2
 
+#define SHAPING_NONE 0
+#define SHAPING_POTENTIAL 1
+#define SHAPING_PROGRESS 2
+
 typedef struct {
     float grid[25350];          /* 6 x 65 x 65 */
     float entities[512];        /* 32 x 16 */
@@ -380,6 +384,12 @@ typedef struct {
     int32_t has_patch;
     double patch_x;
     double patch_y;
+    /* construct_smelting_line shaping over the line potential phi:
+     *   SHAPING_NONE      1.1.1, the verification score alone
+     *   SHAPING_POTENTIAL gamma * phi(s') - phi(s), phi(terminal) = 0
+     *   SHAPING_PROGRESS  a HIGH_WATER component on phi, weight 0.5, cap 0.45 */
+    int32_t shaping;
+    double gamma;
 } fsim_task;
 
 typedef struct {
@@ -403,6 +413,9 @@ typedef struct {
     int32_t success;
     double components[3];       /* task-specific; see fsim_rl.c */
     int32_t decode_failure;
+    double potential;           /* SHAPING_POTENTIAL: phi of the current state */
+    double progress_high;       /* SHAPING_PROGRESS: highest phi so far */
+    double progress_paid;       /* ...and what it has paid */
 } fsim_rl;
 
 fsim_rl *fsim_rl_new(void);
@@ -418,6 +431,14 @@ void fsim_rl_mask(fsim_rl *rl, uint8_t *mask);
 int32_t fsim_rl_decode(fsim_rl *rl, const int32_t *vector, fsim_action *out);
 int32_t fsim_rl_run(fsim_rl *rl, const int32_t *vectors, int32_t count, fsim_obs *obs,
                     uint8_t *mask);
+/* The line potential phi(s) in [0, 1], from the published observation. */
+double fsim_rl_potential(const fsim_rl *rl);
+/* Environments [first, last) of a batch: step each with its row of `actions`
+ * (6 per env), then write its observation, mask and transition. A caller runs
+ * disjoint ranges on separate threads. */
+void fsim_rl_step_range(fsim_rl **rls, int32_t first, int32_t last, const int32_t *actions,
+                        fsim_obs *obs, uint8_t *masks, double *rewards, uint8_t *flags,
+                        double *verified);
 /* CFFI-END */
 
 #endif

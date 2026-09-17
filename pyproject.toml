@@ -10,6 +10,18 @@ dependencies = ["cffi>=1.17", "numpy>=2"]
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6", "setuptools>=70"]
+# Only for train.py. Not synced by default, so CI and the simulator stay
+# torch-free: `uv sync --group train`.
+train = ["torch>=2.5"]
+
+# CUDA wheels; PyPI's default torch is CPU-only.
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu124" }]
 
 [tool.ruff]
 line-length = 100

@@ -17,6 +17,17 @@ TASKS = {
     "construct_smelting_line": lib.TASK_CONSTRUCT_SMELTING_LINE,
     "build_line": lib.TASK_BUILD_LINE,
 }
+#: `shaping` values: none, potential-based (`line_potential`), or a capped
+#: high-water bonus on the same potential (`line_progress`).
+SHAPING = {
+    None: lib.SHAPING_NONE, False: lib.SHAPING_NONE, "none": lib.SHAPING_NONE,
+    True: lib.SHAPING_POTENTIAL, "potential": lib.SHAPING_POTENTIAL,
+    "progress": lib.SHAPING_PROGRESS,
+}  # fmt: skip
+SHAPED_COMPONENTS = {
+    lib.SHAPING_POTENTIAL: ("verified_output", "line_potential"),
+    lib.SHAPING_PROGRESS: ("verified_output", "line_progress"),
+}
 COMPONENTS = {
     "construct_smelting_line": ("verified_output",),
     "build_line": ("constructed", "plates_produced", "step_cost"),
@@ -24,7 +35,7 @@ COMPONENTS = {
 
 
 def task_struct(task: str, blueprint: dict, *, decision_ticks=30, max_steps=600,
-                construction_tick_limit=None):  # fmt: skip
+                construction_tick_limit=None, shaping=False, gamma=0.999):  # fmt: skip
     t = ffi.new("fsim_task *")
     t.task = TASKS[task]
     t.decision_ticks = decision_ticks
@@ -32,6 +43,11 @@ def task_struct(task: str, blueprint: dict, *, decision_ticks=30, max_steps=600,
     if construction_tick_limit is None:
         construction_tick_limit = 18000
     t.construction_tick_limit = construction_tick_limit
+    mode = SHAPING[shaping]
+    if mode and task != "construct_smelting_line":
+        raise ValueError("line shaping is defined for construct_smelting_line only")
+    t.shaping = mode
+    t.gamma = gamma
     patch = (blueprint.get("markers") or {}).get("patch")
     if patch is not None and "patch" in (blueprint.get("public_markers") or []):
         t.has_patch = 1
@@ -75,6 +91,8 @@ class RlEnv:
 
     def reset(self, task: str, blueprint: dict, **task_options) -> dict:
         self.task_name = task
+        mode = SHAPING[task_options.get("shaping")]
+        self.components = SHAPED_COMPONENTS[mode] if mode else COMPONENTS[task]
         scene, keep = scene_struct(blueprint)
         t = task_struct(task, blueprint, **task_options)
         self._keep = (scene, keep, t)
@@ -91,7 +109,7 @@ class RlEnv:
             self.vector_c[i] = int(vector[i])
         reward = lib.fsim_rl_step(self.rl, self.vector_c)
         obs = self.observe()
-        names = COMPONENTS[self.task_name]
+        names = self.components
         info = {
             "success": bool(self.rl.success),
             "decode_failure": bool(self.rl.decode_failure),

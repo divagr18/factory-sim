@@ -11,3 +11,4 @@ dist/
 .venv/
 *.egg-info/
 fsim/_fsim.c
+runs/

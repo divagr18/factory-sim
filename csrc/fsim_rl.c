@@ -250,6 +250,7 @@ typedef struct {
 } rl_row;
 
 static void rl_goal(fsim_rl *rl, float *goal);
+double fsim_rl_potential(const fsim_rl *rl);
 
 void fsim_rl_encode(fsim_rl *rl, fsim_obs *obs) {
     const fsim_env *env = rl->env;
@@ -407,6 +408,8 @@ static int32_t rl_machine_produced(const fsim_env *env, int32_t item) {
 #define SAMPLE_GAP 30
 #define VERIFY_TARGET 10
 #define VERIFY_TICKS 3600
+#define PROGRESS_WEIGHT 0.5
+#define PROGRESS_CAP 0.45
 
 static void rl_window_record(fsim_rl *rl) {
     int64_t tick = rl->env->tick;
@@ -481,8 +484,52 @@ static void rl_goal(fsim_rl *rl, float *goal) {
     }
 }
 
+/* The line potential (construct_smelting_line 1.2.0), phi(s) in [0, 0.9].
+ *
+ * Read from the published observation only -- the entities the last sweep saw,
+ * the character's position and the public patch marker -- so FactorioRL's
+ * `line_potential` computes the same number from the same payload:
+ *
+ *   0.1 * approach   max(0, 1 - |character - patch| / 64)  (CHARACTER_WITHIN)
+ *   0.2 * drill      a burner drill is visible
+ *   0.3 * line       a visible machine's footprint holds a drill's drop point
+ *   0.1 * each of    the best line's drill has fuel, its furnace has fuel,
+ *                    its furnace holds ore or plates
+ *
+ * A potential of the state, so any loop through states pays nothing (Ng,
+ * Harada & Russell 1999) and it is zeroed on termination (Grzes 2017). */
+double fsim_rl_potential(const fsim_rl *rl) {
+    const fsim_env *env = rl->env;
+    double phi = 0.0;
+    if (rl->task.has_patch) {
+        double dx = tiles(env->char_pos.x) - rl->task.patch_x;
+        double dy = tiles(env->char_pos.y) - rl->task.patch_y;
+        double approach = 1.0 - sqrt(dx * dx + dy * dy) / 64.0;
+        phi += 0.1 * (approach > 0.0 ? approach : 0.0);
+    }
+    int drill = 0, line = 0, best = 0;
+    for (int32_t i = 0; i < env->seen_count; i++) {
+        const fsim_entity *d = &env->entities[env->seen[i].entity];
+        if (d->kind != K_DRILL) continue;
+        drill = 1;
+        fsim_pos drop = drop_position(d);
+        for (int32_t j = 0; j < env->seen_count; j++) {
+            const fsim_entity *f = &env->entities[env->seen[j].entity];
+            if (j == i || (f->kind != K_FURNACE && f->kind != K_DRILL)) continue;
+            if (!(drop.x >= f->pos.x - TILE && drop.x < f->pos.x + TILE &&
+                  drop.y >= f->pos.y - TILE && drop.y < f->pos.y + TILE)) continue;
+            line = 1;
+            int score = (d->fuel.count > 0) + (f->fuel.count > 0);
+            if (f->kind == K_FURNACE) score += f->source.count > 0 || f->result.count > 0;
+            if (score > best) best = score;
+        }
+    }
+    return phi + 0.2 * drill + 0.3 * line + 0.1 * best;
+}
+
 /* Components, by task:
- *   construct_smelting_line: [verified_output]
+ *   construct_smelting_line: [verified_output], and with shaping
+ *                            [verified_output, line_potential]
  *   build_line: [constructed, plates_produced, step_cost] */
 static double rl_rewards(fsim_rl *rl, int succeeded) {
     memset(rl->components, 0, sizeof(rl->components));
@@ -503,6 +550,29 @@ static double rl_rewards(fsim_rl *rl, int succeeded) {
     }
     rl->components[0] = succeeded ? 1.0 : 0.0;
     return rl->components[0];
+}
+
+/* One transition's shaping term, mirroring `RewardAccountant.step`. */
+static double rl_shaping(fsim_rl *rl, int32_t mode, int terminated) {
+    double value = fsim_rl_potential(rl);
+    if (mode == SHAPING_POTENTIAL) {
+        /* Grzes 2017: phi(terminal) = 0, or the sum does not telescope. */
+        double next = terminated ? 0.0 : value;
+        double shaped = rl->task.gamma * next - rl->potential;
+        rl->potential = next;
+        return shaped;
+    }
+    /* HIGH_WATER: pay the rise of the running maximum, never the level, up to
+     * a cumulative cap -- a line pays once however often it is rebuilt. */
+    double previous = rl->progress_high;
+    double gain = value - previous > 0.0 ? value - previous : 0.0;
+    rl->progress_high = previous > value ? previous : value;
+    double payout = PROGRESS_WEIGHT * gain * 1.0;
+    double room = PROGRESS_CAP - rl->progress_paid;
+    payout = payout < room ? payout : room;
+    if (payout < 0.0) payout = 0.0;
+    rl->progress_paid += payout;
+    return payout;
 }
 
 static void rl_verify(fsim_rl *rl) {
@@ -535,12 +605,22 @@ double fsim_rl_step(fsim_rl *rl, const int32_t *vector) {
     int succeeded = rl_succeeded(rl);
     int terminated = succeeded;
     double reward = rl_rewards(rl, succeeded);
+    int shaping = rl->task.task == TASK_CONSTRUCT_SMELTING_LINE ? rl->task.shaping : SHAPING_NONE;
+    /* The transition is scored before the verification window runs, as
+     * `FactorioEnv.step` scores it; `run_verification` then scores a second
+     * transition, from s' to the state after the window, which is terminal. */
+    if (shaping) {
+        double shaped = rl_shaping(rl, shaping, terminated);
+        rl->components[1] = shaped;
+        reward += shaped;
+    }
     int truncated = !terminated && (rl->steps >= rl->task.max_steps ||
                                     rl->env->tick >= rl->task.construction_tick_limit);
     if (truncated && rl->task.task == TASK_CONSTRUCT_SMELTING_LINE && !rl->verified) {
         rl_verify(rl);
         double score = rl->verified_output / VERIFY_TARGET;
         reward += score < 1.0 ? score : 1.0;
+        if (shaping) reward += rl_shaping(rl, shaping, 1);
         succeeded = rl_succeeded(rl);
         terminated = 1;
         truncated = 0;
@@ -572,6 +652,10 @@ void fsim_rl_reset(fsim_rl *rl, const fsim_task *task, const fsim_scene *scene) 
     fsim_reset(env, scene);
     rl_window_record(rl);
     rl->high_water = (double)env->produced[IT_IRON_PLATE];
+    if (rl->task.shaping) {
+        rl->potential = fsim_rl_potential(rl);
+        rl->progress_high = rl->potential;
+    }
 }
 
 /* Decisions, each followed by the encoding and mask a policy would read. */
@@ -585,4 +669,20 @@ int32_t fsim_rl_run(fsim_rl *rl, const int32_t *vectors, int32_t count, fsim_obs
         done++;
     }
     return done;
+}
+
+void fsim_rl_step_range(fsim_rl **rls, int32_t first, int32_t last, const int32_t *actions,
+                        fsim_obs *obs, uint8_t *masks, double *rewards, uint8_t *flags,
+                        double *verified) {
+    for (int32_t i = first; i < last; i++) {
+        fsim_rl *rl = rls[i];
+        rewards[i] = fsim_rl_step(rl, &actions[6 * i]);
+        flags[4 * i] = (uint8_t)rl->terminated;
+        flags[4 * i + 1] = (uint8_t)rl->truncated;
+        flags[4 * i + 2] = (uint8_t)rl->success;
+        flags[4 * i + 3] = (uint8_t)rl->decode_failure;
+        verified[i] = rl->verified ? rl->verified_output : -1.0;
+        fsim_rl_encode(rl, &obs[i]);
+        fsim_rl_mask(rl, &masks[RL_MASK_SIZE * i]);
+    }
 }

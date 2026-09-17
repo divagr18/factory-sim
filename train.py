@@ -1,0 +1,393 @@
+"""Masked-MultiDiscrete PPO on the simulator, in one file.
+
+CleanRL's layout (one file, one loop, no framework) with PufferLib's scale
+(hundreds of C environments per batch). The choices, and where they come from:
+
+* Invalid-action masking on every dimension, operation first and arguments
+  conditioned on it (`fsim/policy.py`; Huang & Ontanon 2020, Gym-muRTS 2021).
+* GAE (Schulman et al. 2016) with lambda 0.95. gamma is 0.999 by default: an
+  episode is 600 decisions and the verification score arrives on the last one,
+  so 0.99's 100-decision horizon would discount it to 0.2% of its value from
+  the decisions that build the line (0.99^590); 0.999^590 is 55%.
+* Clipped surrogate and clipped value loss, advantage normalisation per
+  minibatch, gradient-norm clipping and a linearly annealed learning rate: the
+  CleanRL `ppo_atari` defaults (clip 0.2 as Huang et al. use for masked PPO).
+* Entropy 0.01 (CleanRL, Huang et al.) rather than PufferLib's 0.001: the masks
+  already remove most of the action space, and early exploration is the
+  bottleneck here.
+* `--shaping`, over the line potential phi of `fsim_rl_potential`:
+  `potential` is gamma*phi(s') - phi(s) with phi(terminal) = 0 (Ng, Harada &
+  Russell 1999; Grzes 2017), using this run's gamma; `progress` pays the rise
+  of phi's running maximum, half-weighted and capped at 0.45 (FactorioRL's
+  HIGH_WATER kind). See docs/shaping.md for why the second exists.
+
+`--demo-starts p` begins that fraction of training episodes partway along a
+scripted build (`fsim/expert.py`; Salimans & Chen 2018). Training metrics
+report scene-start episodes and demonstration-start ones separately, and
+evaluation always starts at the scene's own start.
+
+Truncation is not bootstrapped: construct_smelting_line never truncates (the
+budget running out starts verification, a true terminal), and build_line's
+600-decision truncation is treated as terminal, a known and small bias.
+
+    python train.py --run sparse-s1 --seed 1 --steps 20000000
+    python train.py --run progress-s1 --seed 1 --steps 20000000 --shaping progress
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import random
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+from torch import nn
+
+from fsim import ffi
+from fsim.policy import EXTRACTOR_VERSION, Policy, export
+from fsim.vec import VecEnv, obs_layout
+
+ROOT = Path(__file__).resolve().parent
+KEYS = ("grid", "entities", "entity_mask", "self", "inventory", "goal")
+
+
+def parse(argv=None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("--run", required=True)
+    p.add_argument("--task", default="construct_smelting_line")
+    p.add_argument("--seed", type=int, default=1)
+    p.add_argument("--steps", type=int, default=20_000_000)
+    p.add_argument("--envs", type=int, default=256)
+    p.add_argument("--horizon", type=int, default=64)
+    p.add_argument("--threads", type=int, default=12)
+    p.add_argument("--minibatches", type=int, default=4)
+    p.add_argument("--epochs", type=int, default=2)
+    p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--gamma", type=float, default=0.999)
+    p.add_argument("--lam", type=float, default=0.95)
+    p.add_argument("--clip", type=float, default=0.2)
+    p.add_argument("--ent", type=float, default=0.01)
+    p.add_argument("--vf", type=float, default=0.5)
+    p.add_argument("--max-grad-norm", type=float, default=0.5)
+    p.add_argument("--shaping", choices=("none", "potential", "progress"), default="none")
+    p.add_argument("--start-curriculum", type=float, default=0.0)
+    p.add_argument(
+        "--demo-starts",
+        type=float,
+        default=0.0,
+        help="fraction of training episodes started partway along the scripted build",
+    )
+    p.add_argument(
+        "--horizon-curriculum",
+        type=int,
+        nargs=2,
+        metavar=("LO", "HI"),
+        help="draw each training episode's decision budget from [LO, HI] (default: 600)",
+    )
+    p.add_argument("--eval-episodes", type=int, default=256)
+    p.add_argument("--eval-every", type=int, default=2_000_000)
+    p.add_argument("--out", type=Path, default=ROOT / "runs")
+    return p.parse_args(argv)
+
+
+def to_device(obs: dict, device) -> dict:
+    return {k: torch.from_numpy(obs[k]).to(device) for k in KEYS}
+
+
+class PinnedObservations:
+    """The environments write observations into page-locked memory, and the
+    whole batch goes to the device as one copy, sliced there. Copying the six
+    numpy views separately from pageable memory took 8.5 ms of a 22 ms step."""
+
+    DTYPES = {"<f4": torch.float32, "|i1": torch.int8}
+
+    def __init__(self, n: int, device) -> None:
+        self.n, self.device = n, device
+        self.size = ffi.sizeof("fsim_obs")
+        pin = device.type == "cuda"
+        self.block = torch.empty(n * self.size, dtype=torch.uint8, pin_memory=pin)
+        self.layout = obs_layout()
+
+    def memory(self):
+        return (self.block.data_ptr(), self.block)
+
+    def fetch(self) -> dict:
+        rows = self.block.to(self.device).view(self.n, self.size)
+        out = {}
+        for key, (offset, dtype, shape) in self.layout.items():
+            tdtype = self.DTYPES[dtype]
+            nbytes = math.prod(shape) * torch.empty((), dtype=tdtype).element_size()
+            field = rows[:, offset : offset + nbytes].contiguous().view(tdtype)
+            out[key] = field.view(self.n, *shape)
+        return out
+
+
+def features(policy: Policy, obs: dict) -> torch.Tensor:
+    """The extractor under bf16 autocast; the heads run in float32."""
+    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=obs["grid"].is_cuda):
+        f = policy.features(*(obs[k] for k in KEYS))
+    return f.float()
+
+
+def wilson(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """95% Wilson score interval for a success rate."""
+    if n == 0:
+        return (0.0, 1.0)
+    p = successes / n
+    centre = (p + z * z / (2 * n)) / (1 + z * z / n)
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / (1 + z * z / n)
+    return (max(0.0, centre - half), min(1.0, centre + half))
+
+
+@torch.no_grad()
+def evaluate(policy, device, args, split: str, episodes: int, greedy: bool) -> dict:
+    """Success over fresh evaluation seeds, disjoint from every training seed."""
+    n = min(64, episodes)
+    env = VecEnv(
+        n, args.task, split=split, seed=args.seed, threads=args.threads,
+        shaping=False, gamma=args.gamma, eval_seeds=True,
+    )  # fmt: skip
+    obs, masks = env.reset()
+    done: list[dict] = []
+    # Each slot runs exactly one episode per round, so the families drawn are
+    # the first `episodes` seeds, independent of how long each episode lasts.
+    active = np.ones(n, dtype=bool)
+    started = n
+    while len(done) < episodes:
+        t = to_device(obs, device)
+        mask = torch.from_numpy(masks).to(device).bool()
+        actions, _ = policy.act(features(policy, t), mask, greedy)
+        obs, masks, _, term, trunc, finished = env.step(actions.cpu().numpy())
+        ended = np.flatnonzero(term | trunc)
+        for i, record in zip(ended, finished, strict=True):
+            if active[i]:
+                done.append(record)
+                if started >= episodes:
+                    active[i] = False
+                started += 1
+        if not active.any():
+            break
+    env.close()
+    done = done[:episodes]
+    wins = sum(r["success"] for r in done)
+    low, high = wilson(wins, len(done))
+    return {
+        "split": split,
+        "greedy": greedy,
+        "episodes": len(done),
+        "success": wins / max(1, len(done)),
+        "success_ci95": [low, high],
+        "verified_output_mean": float(np.mean([max(0.0, r["verified_output"]) for r in done])),
+        "by_family": {
+            f: sum(r["success"] for r in done if r["family"] == f)
+            / max(1, sum(r["family"] == f for r in done))
+            for f in sorted({r["family"] for r in done})
+        },
+    }
+
+
+def main(argv=None) -> int:
+    args = parse(argv)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    out = args.out / args.run
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "config.json").write_text(
+        json.dumps({**vars(args), "out": str(args.out), "extractor_version": EXTRACTOR_VERSION},
+                   indent=2, default=str), "utf-8",
+    )  # fmt: skip
+    log = (out / "metrics.jsonl").open("a", encoding="utf-8")
+
+    torch.backends.cudnn.benchmark = True
+    pinned = PinnedObservations(args.envs, device)
+    env = VecEnv(
+        args.envs, args.task, split="train", seed=args.seed, threads=args.threads,
+        shaping=args.shaping, gamma=args.gamma, start_curriculum=args.start_curriculum,
+        max_steps=tuple(args.horizon_curriculum) if args.horizon_curriculum else 600,
+        obs_memory=pinned.memory(), demo_starts=args.demo_starts,
+    )  # fmt: skip
+    policy = Policy().to(device)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr, eps=1e-5)
+
+    N, T = args.envs, args.horizon
+    batch = N * T
+    mb = batch // args.minibatches
+    updates = args.steps // batch
+    buf = {
+        "grid": torch.zeros((T, N, 6, 65, 65), dtype=torch.float16, device=device),
+        "entities": torch.zeros((T, N, 32, 16), device=device),
+        "entity_mask": torch.zeros((T, N, 32), dtype=torch.int8, device=device),
+        "self": torch.zeros((T, N, 12), device=device),
+        "inventory": torch.zeros((T, N, 14), device=device),
+        "goal": torch.zeros((T, N, 12), device=device),
+    }
+    masks_buf = torch.zeros((T, N, 201), dtype=torch.bool, device=device)
+    actions_buf = torch.zeros((T, N, 6), dtype=torch.long, device=device)
+    logp_buf = torch.zeros((T, N), device=device)
+    rew_buf = torch.zeros((T, N), device=device)
+    done_buf = torch.zeros((T, N), device=device)
+    val_buf = torch.zeros((T, N), device=device)
+
+    obs, masks = env.reset()
+    next_obs = pinned.fetch()
+    next_mask = torch.from_numpy(masks).to(device).bool()
+    next_done = torch.zeros(N, device=device)
+    episodes: list[dict] = []
+    steps = 0
+    start = time.perf_counter()
+    next_eval = args.eval_every
+    best = -1.0
+
+    for update in range(1, updates + 1):
+        frac = 1.0 - (update - 1) / updates
+        for group in optimizer.param_groups:
+            group["lr"] = frac * args.lr
+        policy.eval()
+        for t in range(T):
+            for k in KEYS:
+                buf[k][t] = next_obs[k]
+            masks_buf[t] = next_mask
+            done_buf[t] = next_done
+            with torch.no_grad():
+                f = features(policy, next_obs)
+                action, logp = policy.act(f, next_mask)
+                val_buf[t] = policy.value(f)
+            actions_buf[t] = action
+            logp_buf[t] = logp
+            obs, masks, reward, term, trunc, finished = env.step(action.cpu().numpy())
+            episodes.extend(finished)
+            rew_buf[t] = torch.from_numpy(reward).to(device, torch.float32)
+            next_obs = pinned.fetch()
+            next_mask = torch.from_numpy(masks).to(device).bool()
+            next_done = torch.from_numpy((term | trunc).astype(np.float32)).to(device)
+        steps += batch
+
+        with torch.no_grad():
+            next_value = policy.value(features(policy, next_obs))
+            adv = torch.zeros_like(rew_buf)
+            last = torch.zeros(N, device=device)
+            for t in reversed(range(T)):
+                if t == T - 1:
+                    nonterminal = 1.0 - next_done
+                    value_next = next_value
+                else:
+                    nonterminal = 1.0 - done_buf[t + 1]
+                    value_next = val_buf[t + 1]
+                delta = rew_buf[t] + args.gamma * value_next * nonterminal - val_buf[t]
+                last = delta + args.gamma * args.lam * nonterminal * last
+                adv[t] = last
+            returns = adv + val_buf
+
+        flat = {k: v.reshape(batch, *v.shape[2:]) for k, v in buf.items()}
+        b_masks = masks_buf.reshape(batch, -1)
+        b_actions = actions_buf.reshape(batch, -1)
+        b_logp, b_adv = logp_buf.reshape(-1), adv.reshape(-1)
+        b_ret, b_val = returns.reshape(-1), val_buf.reshape(-1)
+
+        policy.train()
+        stats = {"pg": [], "v": [], "ent": [], "kl": [], "clipfrac": []}
+        for _epoch in range(args.epochs):
+            order = torch.randperm(batch, device=device)
+            for s in range(0, batch, mb):
+                idx = order[s : s + mb]
+                o = {k: (v[idx].float() if k == "grid" else v[idx]) for k, v in flat.items()}
+                f = features(policy, o)
+                logp, entropy = policy.evaluate(f, b_masks[idx], b_actions[idx])
+                value = policy.value(f)
+                ratio_log = logp - b_logp[idx]
+                ratio = ratio_log.exp()
+                a = b_adv[idx]
+                a = (a - a.mean()) / (a.std() + 1e-8)
+                pg = torch.max(-a * ratio, -a * ratio.clamp(1 - args.clip, 1 + args.clip)).mean()
+                v_clipped = b_val[idx] + (value - b_val[idx]).clamp(-args.clip, args.clip)
+                v_loss = (
+                    0.5 * torch.max((value - b_ret[idx]) ** 2, (v_clipped - b_ret[idx]) ** 2).mean()
+                )
+                ent = entropy.mean()
+                loss = pg - args.ent * ent + args.vf * v_loss
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                nn.utils.clip_grad_norm_(policy.parameters(), args.max_grad_norm)
+                optimizer.step()
+                with torch.no_grad():
+                    stats["pg"].append(pg.item())
+                    stats["v"].append(v_loss.item())
+                    stats["ent"].append(ent.item())
+                    stats["kl"].append(((ratio - 1) - ratio_log).mean().item())
+                    stats["clipfrac"].append(((ratio - 1).abs() > args.clip).float().mean().item())
+
+        elapsed = time.perf_counter() - start
+        recent = [e for e in episodes[-2048:] if e["start"] == "scene"][-512:]
+        demo = [e for e in episodes[-2048:] if e["start"] != "scene"][-512:]
+        row = {
+            "update": update,
+            "steps": steps,
+            "sps": round(steps / elapsed),
+            "lr": optimizer.param_groups[0]["lr"],
+            "episodes": len(episodes),
+            **{k: float(np.mean(v)) for k, v in stats.items()},
+        }
+        if recent:
+            row.update(
+                train_success=float(np.mean([e["success"] for e in recent])),
+                train_verified=float(np.mean([max(0.0, e["verified_output"]) for e in recent])),
+                train_return=float(np.mean([e["return"] for e in recent])),
+                peak_potential=float(np.mean([e["peak_potential"] for e in recent])),
+                line_built=float(np.mean([e["peak_potential"] >= 0.5 for e in recent])),
+                decode_failure_rate=float(
+                    np.sum([e["decode_failures"] for e in recent])
+                    / max(1, np.sum([e["length"] for e in recent]))
+                ),
+            )
+        if demo:
+            row["demo_success"] = {
+                stage: float(np.mean([e["success"] for e in demo if e["start"] == stage]))
+                for stage in sorted({e["start"] for e in demo})
+            }
+        if steps >= next_eval or update == updates:
+            next_eval += args.eval_every
+            policy.eval()
+            result = evaluate(policy, device, args, "train", args.eval_episodes, greedy=False)
+            row["eval"] = result
+            torch.save(policy.state_dict(), out / "last.pt")
+            if result["success"] >= best:
+                best = result["success"]
+                torch.save(policy.state_dict(), out / "best.pt")
+        log.write(json.dumps(row) + "\n")
+        log.flush()
+        if update % 10 == 0 or "eval" in row:
+            brief = {k: row[k] for k in ("steps", "sps", "ent", "kl") if k in row}
+            brief.update({k: round(row[k], 4) for k in ("train_success", "train_verified",
+                          "peak_potential", "line_built") if k in row})  # fmt: skip
+            if "demo_success" in row:
+                brief["demo"] = {k: round(v, 3) for k, v in row["demo_success"].items()}
+            if "eval" in row:
+                brief["eval_success"] = row["eval"]["success"]
+            print(json.dumps(brief), flush=True)
+
+    env.close()
+    # The final report: both splits, sampled and greedy, from the best checkpoint.
+    policy.load_state_dict(torch.load(out / "best.pt", weights_only=True))
+    policy.eval()
+    final = {
+        f"{split}_{'greedy' if greedy else 'sampled'}": evaluate(
+            policy, device, args, split, 512, greedy
+        )
+        for split in ("train", "test")
+        for greedy in (False, True)
+    }
+    (out / "final.json").write_text(json.dumps(final, indent=2), "utf-8")
+    export(policy, out / "policy.ts")
+    print(json.dumps({k: v["success"] for k, v in final.items()}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
