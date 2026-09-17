@@ -47,6 +47,12 @@ def placement_index(rl, tx: int, ty: int) -> int:
     """The placement argument (1-based) that names tile (tx, ty), or 0."""
     env = rl.env
     here_x, here_y = _floor_tile(env.char_pos.x), _floor_tile(env.char_pos.y)
+    if rl.task.action_space == lib.ACTION_SPACE_V2:
+        dx, dy = tx - here_x, ty - here_y
+        if abs(dx) > PLACEMENT_RADIUS or abs(dy) > PLACEMENT_RADIUS:
+            return 0
+        side = 2 * PLACEMENT_RADIUS + 1
+        return (dx + PLACEMENT_RADIUS) * side + dy + PLACEMENT_RADIUS + 1
     occupied = set()
     for k in range(env.seen_count):
         e = env.entities[env.seen[k].entity]
@@ -68,15 +74,19 @@ def placement_index(rl, tx: int, ty: int) -> int:
 def target_index(rl, kind: int, near: tuple[float, float]) -> int:
     """The target argument (1-based) of the visible `kind` nearest `near`, or 0."""
     env = rl.env
-    best, best_d = 0, math.inf
+    best, best_handle, best_d = 0, 0, math.inf
     for k in range(min(env.seen_count, MAX_TARGETS)):
         e = env.entities[env.seen[k].entity]
         if e.kind != kind:
             continue
         d = math.dist((e.pos.x / TILE, e.pos.y / TILE), near)
         if d < best_d:
-            best, best_d = k + 1, d
-    return best
+            best, best_handle, best_d = k + 1, env.seen[k].handle, d
+    if rl.task.action_space != lib.ACTION_SPACE_V2 or not best:
+        return best
+    handles = ffi.new("int32_t[]", MAX_TARGETS)
+    count = lib.fsim_rl_targets(rl, handles, MAX_TARGETS)
+    return next((k + 1 for k in range(count) if handles[k] == best_handle), 0)
 
 
 def move_vector(rl, goal: tuple[float, float], tolerance: float = 0.3) -> list[int] | None:

@@ -94,6 +94,12 @@ def parse(argv=None) -> argparse.Namespace:
     p.add_argument("--out", type=Path, default=ROOT / "runs")
     p.add_argument("--no-graph", action="store_true", help="rollout inference without CUDA graphs")
     p.add_argument("--no-final", action="store_true", help="skip the final evaluation and export")
+    p.add_argument(
+        "--action-space",
+        choices=("v1", "v2"),
+        default="v1",
+        help="v1: FactorioRL's parameterized-v1; v2: the simulator prototype",
+    )
     return p.parse_args(argv)
 
 
@@ -210,7 +216,7 @@ def evaluate(policy, device, args, split: str, episodes: int, greedy: bool) -> d
     n = min(64, episodes)
     env = VecEnv(
         n, args.task, split=split, seed=args.seed, threads=args.threads,
-        shaping=False, gamma=args.gamma, eval_seeds=True,
+        shaping=False, gamma=args.gamma, eval_seeds=True, action_space=args.action_space,
     )  # fmt: skip
     obs, masks = env.reset()
     done: list[dict] = []
@@ -266,7 +272,7 @@ def main(argv=None) -> int:
     log = (out / "metrics.jsonl").open("a", encoding="utf-8")
 
     torch.backends.cudnn.benchmark = True
-    policy = Policy().to(device)
+    policy = Policy(action_space=args.action_space).to(device)
     if device.type == "cuda":
         # bf16 grid materialisation, and channels-last weights: the grid path's
         # second convolution gets its input in that layout (fsim/policy.py).
@@ -278,7 +284,8 @@ def main(argv=None) -> int:
         args.envs, args.task, split="train", seed=args.seed, threads=args.threads,
         shaping=args.shaping, gamma=args.gamma, start_curriculum=args.start_curriculum,
         max_steps=tuple(args.horizon_curriculum) if args.horizon_curriculum else 600,
-        demo_starts=args.demo_starts, compact=True, **rollout.memories(),
+        demo_starts=args.demo_starts, compact=True, action_space=args.action_space,
+        **rollout.memories(),
     )  # fmt: skip
 
     N, T = args.envs, args.horizon

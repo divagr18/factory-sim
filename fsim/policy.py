@@ -97,6 +97,9 @@ class Extractor(nn.Module):
         #: The dtype the grid is materialised in; a trainer running the
         #: extractor under bf16 autocast sets bf16, so the cast happens once.
         self.input_dtype: torch.dtype = torch.float32
+        #: v2: also return the per-row entity embeddings and the placement
+        #: crop, flattened after the features, for the pointer and spatial heads.
+        self.expose: bool = False
 
     def _grid(self, grid: torch.Tensor) -> torch.Tensor:
         """`grid_net`, with its first layer computed as what it is.
@@ -139,7 +142,12 @@ class Extractor(nn.Module):
         max_pool = e.masked_fill(mask == 0, -1e9).max(dim=1).values
         max_pool = torch.nan_to_num(max_pool, neginf=0.0)
         v = self.vector_net(torch.cat([self_, inventory, goal], dim=1))
-        return self.head(torch.cat([g, c, mean_pool, max_pool, v], dim=1))
+        f = self.head(torch.cat([g, c, mean_pool, max_pool, v], dim=1))
+        if not self.expose:
+            return f
+        rows = (e * mask).flatten(1)
+        crop = grid[:, :, 26:39, 26:39].to(f.dtype).flatten(1)
+        return torch.cat([f, rows, crop], dim=1)
 
 
 def _layer(i: int, o: int, std: float = 2**0.5) -> nn.Linear:
@@ -176,10 +184,53 @@ def _gumbel_argmax(logits: torch.Tensor) -> torch.Tensor:
     return (logits - torch.log(-torch.log(u))).argmax(-1)
 
 
+ROW_DIM = 64
+ROWS = 32
+CROP = 13
+PLACE_CONTEXT = 16
+
+
 class Policy(nn.Module):
-    def __init__(self, features_dim: int = 256) -> None:
+    """`action_space` "v1" is FactorioRL's parameterized-v1. "v2" is the
+    simulator prototype (`csrc/fsim.h`, ACTION_SPACE_V2): its `target` names a
+    row of the entity table, so it is scored by a pointer head over the rows'
+    embeddings, and its `placement` names a fixed tile of the 11x11 window, so
+    it is scored by a small convolution over the grid crop whose central 11x11
+    cells are those tiles."""
+
+    def __init__(self, features_dim: int = 256, action_space: str = "v1") -> None:
         super().__init__()
+        if action_space not in ("v1", "v2"):
+            raise ValueError(f"unknown action space {action_space!r}")
+        self.action_space = action_space
+        self.v2: bool = action_space == "v2"
+        self.features_dim: int = features_dim
+        self.rows: int = ROWS
+        self.row_dim: int = ROW_DIM
+        self.crop: int = CROP
+        self.place_channels: int = PLACE_CONTEXT
         self.extractor = Extractor(features_dim)
+        self.extractor.expose = self.v2
+        context = features_dim + OPS
+        if self.v2:
+            self.target_head = nn.Sequential(
+                _layer(ROW_DIM + context, 128), nn.ReLU(), _layer(128, 1, 0.01)
+            )
+            self.place_context = _layer(context, PLACE_CONTEXT, 1.0)
+            self.place_net = nn.Sequential(
+                nn.Conv2d(6 + PLACE_CONTEXT, 32, 3, padding=1),
+                nn.ReLU(),
+                nn.Conv2d(32, 32, 3, padding=1),
+                nn.ReLU(),
+                nn.Conv2d(32, 1, 1),
+            )
+            nn.init.orthogonal_(self.place_net[4].weight, 0.01)
+            nn.init.zeros_(self.place_net[4].bias)
+        else:
+            # Placeholders, so TorchScript compiles the v2 branch; no parameters.
+            self.target_head = nn.Identity()
+            self.place_context = nn.Identity()
+            self.place_net = nn.Identity()
         self.op_head = nn.Sequential(_layer(features_dim, 256), nn.ReLU(), _layer(256, OPS, 0.01))
         self.arg_head = nn.Sequential(
             _layer(features_dim + OPS, 256), nn.ReLU(), _layer(256, sum(ARG_NVEC), 0.01)
@@ -199,11 +250,11 @@ class Policy(nn.Module):
         return self.extractor(grid, entities, entity_mask, self_, inventory, goal)
 
     def value(self, features: torch.Tensor) -> torch.Tensor:
-        return self.value_head(features).squeeze(-1)
+        return self.value_head(features[:, : self.features_dim]).squeeze(-1)
 
     def _op_logits(self, features: torch.Tensor, mask: torch.Tensor):
         op_mask = mask[:, : self.ops]
-        logits = self.op_head(features)
+        logits = self.op_head(features[:, : self.features_dim])
         return torch.where(op_mask, logits, torch.full_like(logits, self.masked)), op_mask
 
     def _arguments(self, features: torch.Tensor, mask: torch.Tensor, op: torch.Tensor):
@@ -222,8 +273,12 @@ class Policy(nn.Module):
         narrowed = seg & ~(self.pad_sentinel & others[:, self.pad_dim])
         allowed = torch.where(used, narrowed, self.pad_sentinel.expand_as(seg))
 
+        f = features[:, : self.features_dim]
         one_hot = torch.nn.functional.one_hot(op, self.ops).to(features.dtype)
-        flat = self.arg_head(torch.cat([features, one_hot], dim=1))  # B x 179
+        context = torch.cat([f, one_hot], dim=1)
+        flat = self.arg_head(context)  # B x 179
+        if self.v2:
+            flat = self._v2_logits(features, context, flat)
         size = len(self.arg_sizes) * self.arg_width
         logits = torch.full((batch, size), self.masked, device=flat.device, dtype=flat.dtype)
         logits = logits.index_copy(1, self.pad_index, torch.where(allowed, flat, logits[:, :1]))
@@ -231,6 +286,26 @@ class Policy(nn.Module):
         pad_mask = pad_mask.index_copy(1, self.pad_index, allowed)
         shape = (batch, len(self.arg_sizes), self.arg_width)
         return logits.view(shape), pad_mask.view(shape)
+
+    def _v2_logits(self, features: torch.Tensor, context: torch.Tensor, flat: torch.Tensor):
+        """Replace the target and placement segments with the v2 heads' scores.
+
+        Segments of `flat`: target [0, 33), placement [33, 155), then
+        direction, item and amount. The sentinels (0 and 33) stay the MLP's.
+        """
+        batch = features.shape[0]
+        start = self.features_dim
+        width = self.rows * self.row_dim
+        rows = features[:, start : start + width].reshape(batch, self.rows, self.row_dim)
+        crop = features[:, start + width :].reshape(batch, 6, self.crop, self.crop)
+        expanded = context.unsqueeze(1).expand(batch, self.rows, context.shape[1])
+        targets = self.target_head(torch.cat([rows, expanded], dim=2)).squeeze(-1)
+        place = self.place_context(context).reshape(batch, self.place_channels, 1, 1)
+        place = place.expand(batch, self.place_channels, self.crop, self.crop)
+        cells = self.place_net(torch.cat([crop, place], dim=1))[:, 0, 1:12, 1:12]
+        # Grid rows are y and columns x; slot (dx + 5) * 11 + (dy + 5).
+        placements = cells.transpose(1, 2).reshape(batch, 121)
+        return torch.cat([flat[:, :1], targets, flat[:, 33:34], placements, flat[:, 155:]], dim=1)
 
     def act(self, features: torch.Tensor, mask: torch.Tensor, greedy: bool = False):
         """-> actions (B x 6, int64), log-probabilities (B)."""

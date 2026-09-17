@@ -373,6 +373,9 @@ double fsim_capacity(int32_t kind);
 #define TASK_CONSTRUCT_SMELTING_LINE 1
 #define TASK_BUILD_LINE 2
 
+#define ACTION_SPACE_V1 0
+#define ACTION_SPACE_V2 2
+
 #define SHAPING_NONE 0
 #define SHAPING_POTENTIAL 1
 #define SHAPING_PROGRESS 2
@@ -417,6 +420,12 @@ typedef struct {
      *   SHAPING_PROGRESS  a HIGH_WATER component on phi, weight 0.5, cap 0.45 */
     int32_t shaping;
     double gamma;
+    /* ACTION_SPACE_V1: FactorioRL's parameterized-v1 (the default).
+     * ACTION_SPACE_V2: a simulator prototype with the same vector shape, where
+     *   `target` k names row k-1 of the encoded entity table and `placement` p
+     *   names the fixed tile ((p-1) / 11 - 5, (p-1) % 11 - 5) from the
+     *   character's tile, masked when occupied instead of skipped. */
+    int32_t action_space;
 } fsim_task;
 
 typedef struct {
@@ -467,6 +476,9 @@ void fsim_rl_step_range(fsim_rl **rls, int32_t first, int32_t last, const int32_
                         fsim_obs *obs, uint8_t *masks, double *rewards, uint8_t *flags,
                         double *verified);
 void fsim_rl_encode8(fsim_rl *rl, fsim_obs8 *obs);
+/* The target argument's domain, in order: handle of target k+1. Returns the
+ * count (at most `cap`). */
+int32_t fsim_rl_targets(fsim_rl *rl, int32_t *handles, int32_t cap);
 /* As fsim_rl_step_range, writing compact observations and each environment's
  * line potential after the step. */
 void fsim_rl_step_range8(fsim_rl **rls, int32_t first, int32_t last, const int32_t *actions,

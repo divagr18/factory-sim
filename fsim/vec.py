@@ -114,6 +114,7 @@ class VecEnv:
         demo_starts: float = 0.0,
         compact: bool = False,
         mask_memory=None,
+        action_space: str = "v1",
     ) -> None:
         """`obs_memory`, if given, is `(address, owner)`: `n * sizeof(fsim_obs)`
         bytes the observations are written into instead of a fresh block -- a
@@ -143,6 +144,7 @@ class VecEnv:
         if demo_starts and task != "construct_smelting_line":
             raise ValueError("demonstration starts exist for construct_smelting_line only")
         self.demo_starts = demo_starts
+        self.action_space = action_space
         self._step_vector = ffi.new("int32_t[6]")
 
         self._sim = Sim()  # owns the map's water; `env` dies with it
@@ -226,8 +228,9 @@ class VecEnv:
             lo, hi = budget
             budget = lo + (seed * 2654435761 + 97) % (hi - lo + 1)
         task = task_struct(
-            self.task, scene, max_steps=budget, shaping=self.shaping, gamma=self.gamma
-        )
+            self.task, scene, max_steps=budget, shaping=self.shaping, gamma=self.gamma,
+            action_space=self.action_space,
+        )  # fmt: skip
         self._keep[i] = (c_scene, keep, task)
         rl = self.rls[i]
         lib.fsim_rl_reset(rl, task, c_scene)
