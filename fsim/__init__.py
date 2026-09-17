@@ -15,7 +15,7 @@ from pathlib import Path
 
 from fsim._fsim import ffi, lib
 
-__all__ = ["Sim", "ffi", "lib"]
+__all__ = ["Sim", "action_struct", "ffi", "lib", "scene_struct"]
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -147,6 +147,87 @@ def water_tiles() -> list[tuple[int, int]]:
     return []
 
 
+def _handle(value) -> int:
+    if isinstance(value, str) and value.startswith("h") and value[1:].isdigit():
+        return int(value[1:])
+    return -1
+
+
+def _endpoint(value) -> int:
+    return 0 if value == "character" else _handle(value)
+
+
+def scene_struct(blueprint: dict):
+    """The C scene for a FactorioRL blueprint payload, and what keeps it alive."""
+    resources = blueprint.get("resources") or []
+    walls = [e for e in blueprint.get("entities") or [] if e["name"] == "stone-wall"]
+    others = [e for e in blueprint.get("entities") or [] if e["name"] != "stone-wall"]
+    if others:
+        raise NotImplementedError(f"scene entities beyond walls: {others[:1]}")
+    keep = []
+    scene = ffi.new("fsim_scene *")
+    keep.append(scene)
+
+    def array(values):
+        data = ffi.new("int32_t[]", list(values) or [0])
+        keep.append(data)
+        return data
+
+    scene.resource_count = len(resources)
+    scene.resource_item = array(ITEM_IDS[r["name"]] for r in resources)
+    scene.resource_tx = array(math.floor(r["position"][0]) for r in resources)
+    scene.resource_ty = array(math.floor(r["position"][1]) for r in resources)
+    scene.resource_amount = array(int(r.get("amount", 1000)) for r in resources)
+    scene.wall_count = len(walls)
+    scene.wall_x = array(fixed(w["position"][0]) for w in walls)
+    scene.wall_y = array(fixed(w["position"][1]) for w in walls)
+    character = blueprint.get("character") or {}
+    position = character.get("position") or [0, 0]
+    scene.character.x = fixed(position[0])
+    scene.character.y = fixed(position[1])
+    inventory = sorted((character.get("inventory") or {}).items())
+    scene.inventory_count = len(inventory)
+    scene.inventory_item = array(ITEM_IDS[name] for name, _ in inventory)
+    scene.inventory_amount = array(count for _, count in inventory)
+    return scene, keep
+
+
+def action_struct(key: str, arguments: dict | None = None):
+    """A catalog key and its arguments as a C action."""
+    arguments = arguments or {}
+    a = ffi.new("fsim_action *")
+    prefix, _, direction = key.partition("_")
+    if prefix in STRIDES and direction in DIRECTIONS:
+        a.verb = lib.V_MOVE
+        a.direction = DIRECTIONS.index(direction)
+        a.ticks = STRIDES[prefix]
+    elif key == "place_at":
+        a.verb = lib.V_PLACE
+        a.item = ITEM_IDS.get(arguments["item"], lib.IT_NONE)
+        a.direction = DIRECTIONS.index(arguments.get("direction", "north"))
+        a.position.x = round(arguments["position"][0] * 256)
+        a.position.y = round(arguments["position"][1] * 256)
+    elif key == "mine_at":
+        a.verb = lib.V_MINE
+        a.handle = _handle(arguments["handle"])
+        a.count = int(arguments.get("count", 1))
+    elif key in ("rotate_at", "rotate_at_reverse"):
+        a.verb = lib.V_ROTATE
+        a.handle = _handle(arguments["handle"])
+        a.reverse = 1 if key == "rotate_at_reverse" else 0
+    elif key in ("give_to", "take_from"):
+        a.verb = lib.V_TRANSFER
+        a.from_handle = _endpoint(arguments["from"] if key == "take_from" else "character")
+        a.to_handle = _endpoint(arguments["to"] if key == "give_to" else "character")
+        a.item = ITEM_IDS.get(arguments["item"], lib.IT_NONE)
+        a.count = int(arguments["count"])
+    elif key == "wait":
+        a.verb = lib.V_WAIT
+    else:
+        raise ValueError(f"unsupported action {key}")
+    return a
+
+
 class Sim:
     def __init__(self, water: list[tuple[int, int]] | None = None) -> None:
         self.env = lib.fsim_new()
@@ -167,81 +248,12 @@ class Sim:
     def reset(self, blueprint: dict) -> None:
         self.blueprint = blueprint
         self.steps = 0
-        resources = blueprint.get("resources") or []
-        walls = [e for e in blueprint.get("entities") or [] if e["name"] == "stone-wall"]
-        others = [e for e in blueprint.get("entities") or [] if e["name"] != "stone-wall"]
-        if others:
-            raise NotImplementedError(f"scene entities beyond walls: {others[:1]}")
-        keep = []
-        self._scene_arrays = keep
-        scene = ffi.new("fsim_scene *")
-
-        def array(values):
-            data = ffi.new("int32_t[]", list(values) or [0])
-            keep.append(data)
-            return data
-
-        scene.resource_count = len(resources)
-        scene.resource_item = array(ITEM_IDS[r["name"]] for r in resources)
-        scene.resource_tx = array(math.floor(r["position"][0]) for r in resources)
-        scene.resource_ty = array(math.floor(r["position"][1]) for r in resources)
-        scene.resource_amount = array(int(r.get("amount", 1000)) for r in resources)
-        scene.wall_count = len(walls)
-        scene.wall_x = array(fixed(w["position"][0]) for w in walls)
-        scene.wall_y = array(fixed(w["position"][1]) for w in walls)
-        character = blueprint.get("character") or {}
-        position = character.get("position") or [0, 0]
-        scene.character.x = fixed(position[0])
-        scene.character.y = fixed(position[1])
-        inventory = sorted((character.get("inventory") or {}).items())
-        scene.inventory_count = len(inventory)
-        scene.inventory_item = array(ITEM_IDS[name] for name, _ in inventory)
-        scene.inventory_amount = array(count for _, count in inventory)
+        scene, self._scene_arrays = scene_struct(blueprint)
         lib.fsim_reset(self.env, scene)
 
     # ------------------------------------------------------------- stepping
     def action(self, key: str, arguments: dict | None = None):
-        arguments = arguments or {}
-        a = ffi.new("fsim_action *")
-        prefix, _, direction = key.partition("_")
-        if prefix in STRIDES and direction in DIRECTIONS:
-            a.verb = lib.V_MOVE
-            a.direction = DIRECTIONS.index(direction)
-            a.ticks = STRIDES[prefix]
-        elif key == "place_at":
-            a.verb = lib.V_PLACE
-            a.item = ITEM_IDS.get(arguments["item"], lib.IT_NONE)
-            a.direction = DIRECTIONS.index(arguments.get("direction", "north"))
-            a.position.x = round(arguments["position"][0] * 256)
-            a.position.y = round(arguments["position"][1] * 256)
-        elif key == "mine_at":
-            a.verb = lib.V_MINE
-            a.handle = self._handle(arguments["handle"])
-            a.count = int(arguments.get("count", 1))
-        elif key in ("rotate_at", "rotate_at_reverse"):
-            a.verb = lib.V_ROTATE
-            a.handle = self._handle(arguments["handle"])
-            a.reverse = 1 if key == "rotate_at_reverse" else 0
-        elif key in ("give_to", "take_from"):
-            a.verb = lib.V_TRANSFER
-            a.from_handle = self._endpoint(arguments["from"] if key == "take_from" else "character")
-            a.to_handle = self._endpoint(arguments["to"] if key == "give_to" else "character")
-            a.item = ITEM_IDS.get(arguments["item"], lib.IT_NONE)
-            a.count = int(arguments["count"])
-        elif key == "wait":
-            a.verb = lib.V_WAIT
-        else:
-            raise ValueError(f"unsupported action {key}")
-        return a
-
-    @staticmethod
-    def _handle(value) -> int:
-        if isinstance(value, str) and value.startswith("h") and value[1:].isdigit():
-            return int(value[1:])
-        return -1
-
-    def _endpoint(self, value) -> int:
-        return 0 if value == "character" else self._handle(value)
+        return action_struct(key, arguments)
 
     def step(self, key: str, arguments: dict | None = None, ticks: int = 30) -> None:
         lib.fsim_step(self.env, self.action(key, arguments), ticks)

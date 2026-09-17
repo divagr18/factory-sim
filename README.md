@@ -19,8 +19,22 @@ M3, the simulator core, is done:
 - A single environment runs 173k decisions/s, and 8 threads run 850k in total
   (`bench/RESULTS.md`).
 
-Next is M4: the observation encoder, action masks, reward and goal vector in C,
-checked against FactorioRL's fixtures.
+M4, the RL contract, is done too. `fsim.rl.RlEnv` speaks FactorioRL's
+`parameterized-v1` action space (`MultiDiscrete[22, 33, 122, 5, 15, 4]`) and its
+`local-v2` tensor observation for `construct_smelting_line` and `build_line`:
+
+- It covers the encoder, argument domains, the action mask, vector decoding,
+  the goal vector, rewards, termination, and the verification window.
+- Driven by each golden trace's recorded action vectors, every decision
+  matches FactorioRL:
+  - each encoded tensor hashes identically, bit for bit;
+  - the mask, goal, reward, reward components, termination, truncation,
+    success and decode failures all match.
+- The whole RL path runs 60k decisions/s on one environment and 382k on
+  eight threads.
+
+Next is M5: a PPO learner trained here, then evaluated on the real game through
+FactorioRL.
 
 What it simulates today:
 

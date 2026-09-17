@@ -20,3 +20,20 @@ For comparison, the real engine through FactorioRL's harness runs 76
 decisions/s on one worker and 261 on eight.
 
 The M3 target was at least 100,000 decisions/s for the simulator alone.
+
+## RL path (M4)
+
+The same 600 decisions through `fsim_rl_run`. Each decision takes an action
+vector, runs 30 ticks, computes the reward and termination, then fills the
+full `local-v2` tensor observation (a 6x65x65 grid, 32 entity rows, self,
+inventory and goal) and the 201-entry action mask.
+
+M4, 2026-09-17, same machine:
+
+| Environments | Threads | Decisions/s | Per environment |
+|---:|---:|---:|---:|
+| 1 | 1 | 60,467 | 60,467 |
+| 8 | 8 | 382,431 | 47,804 |
+
+The encoding dominates: rewriting 25,350 grid cells per decision is a memory
+cost, not a simulation cost.

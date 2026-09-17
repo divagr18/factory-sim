@@ -345,6 +345,79 @@ int64_t fsim_run(fsim_env *env, const fsim_action *actions, int32_t count, int32
 void fsim_after_load(fsim_env *env);
 int32_t fsim_resolve(fsim_env *env, int32_t handle, int32_t *kind, int32_t *index);
 double fsim_capacity(int32_t kind);
+/* ---- RL layer (fsim_rl.c): the tensors, masks, goal and reward of
+ * FactorioRL's parameterized-v1 / local-v2 contract. */
+#define RL_GRID_PLANES 6
+#define RL_GRID_SIZE 65
+#define RL_MAX_ENTITIES 32
+#define RL_ENTITY_FEATURES 16
+#define RL_SELF_FEATURES 12
+#define RL_ITEMS 14
+#define RL_GOAL_FEATURES 12
+#define RL_OPERATIONS 22
+#define RL_TARGETS 32
+#define RL_PLACEMENTS 121
+#define RL_MASK_SIZE 201
+#define RL_WINDOW_SAMPLES 512
+
+#define TASK_CONSTRUCT_SMELTING_LINE 1
+#define TASK_BUILD_LINE 2
+
+typedef struct {
+    float grid[25350];          /* 6 x 65 x 65 */
+    float entities[512];        /* 32 x 16 */
+    int8_t entity_mask[32];
+    float self_[12];
+    float inventory[14];
+    float goal[12];
+} fsim_obs;
+
+typedef struct {
+    int32_t task;
+    int32_t decision_ticks;
+    int32_t max_steps;
+    int32_t construction_tick_limit;
+    int32_t has_patch;
+    double patch_x;
+    double patch_y;
+} fsim_task;
+
+typedef struct {
+    fsim_env *env;
+    fsim_task task;
+    int32_t steps;
+    int32_t done;
+    int32_t window_count;
+    int32_t window_head;
+    int64_t window_tick[512];
+    int32_t window_plates[512];
+    double high_water;
+    double paid;
+    int32_t verified;
+    double verified_output;
+    int32_t decode_failures;
+    /* the last transition */
+    double reward;
+    int32_t terminated;
+    int32_t truncated;
+    int32_t success;
+    double components[3];       /* task-specific; see fsim_rl.c */
+    int32_t decode_failure;
+} fsim_rl;
+
+fsim_rl *fsim_rl_new(void);
+void fsim_rl_free(fsim_rl *rl);
+void fsim_rl_reset(fsim_rl *rl, const fsim_task *task, const fsim_scene *scene);
+/* One decision from a MultiDiscrete vector [op, target, placement, direction,
+ * item, amount]. Returns the reward; flags are in `rl`. */
+double fsim_rl_step(fsim_rl *rl, const int32_t *vector);
+void fsim_rl_encode(fsim_rl *rl, fsim_obs *obs);
+void fsim_rl_mask(fsim_rl *rl, uint8_t *mask);
+/* Decode a vector into an action; returns 0, or 1 for a decode failure (the
+ * action is then a wait). */
+int32_t fsim_rl_decode(fsim_rl *rl, const int32_t *vector, fsim_action *out);
+int32_t fsim_rl_run(fsim_rl *rl, const int32_t *vectors, int32_t count, fsim_obs *obs,
+                    uint8_t *mask);
 /* CFFI-END */
 
 #endif
