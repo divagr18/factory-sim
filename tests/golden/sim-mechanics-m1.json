@@ -1,0 +1,480 @@
+{
+"drill_into_chest": {
+"count": 9,
+"first_tick_offset": 243,
+"intervals": [
+240
+],
+"joules_per_tick": 2500.06950236308,
+"median_interval": 240.0,
+"status_transitions": [
+[
+753,
+"working"
+],
+[
+995,
+"waiting_for_space_in_destination"
+],
+[
+996,
+"working"
+]
+]
+},
+"drill_into_unfuelled_furnace": {
+"blocked": true,
+"catches": true,
+"max_source_ore": 54,
+"source_ore_when_blocked": [
+54
+],
+"status_transitions": [
+[
+753,
+"working"
+],
+[
+995,
+"waiting_for_space_in_destination"
+],
+[
+996,
+"working"
+],
+[
+14013,
+"waiting_for_space_in_destination"
+]
+],
+"ticks_observed": 13500
+},
+"engine": {
+"build": 83512,
+"platform": "win64",
+"version": "2.0.60"
+},
+"furnace_smelting": {
+"count": 12,
+"first_tick_offset": 194,
+"intervals": [
+192
+],
+"joules_per_tick": 1500.0,
+"median_interval": 192,
+"status_transitions": [
+[
+753,
+"no_ingredients"
+],
+[
+754,
+"working"
+],
+[
+3059,
+"no_ingredients"
+]
+]
+},
+"hand_mining": {
+"ticks_from_issue_to_ore": [
+121,
+121,
+121
+]
+},
+"prototypes": {
+"character_main_slots": 80,
+"character_reach": {
+"build": 10,
+"pickup": 1,
+"reach": 10,
+"resource": 2.7
+},
+"entities": {
+"burner-mining-drill": {
+"effectivity": 1,
+"energy_usage": 2500,
+"fuel_inventory_size": 1,
+"max_energy_usage": 2500,
+"mining_drill_radius": 0.99,
+"mining_speed": 0.25
+},
+"character": {
+"crafting_speed": 1,
+"max_energy_usage": 0,
+"mining_speed": 0.5,
+"running_speed": 0.15
+},
+"stone-furnace": {
+"crafting_speed": 1,
+"effectivity": 1,
+"energy_usage": 1500,
+"fuel_inventory_size": 1,
+"max_energy_usage": 1500
+}
+},
+"items": {
+"burner-inserter": {
+"fuel_value": 0,
+"stack_size": 50
+},
+"burner-mining-drill": {
+"fuel_value": 0,
+"stack_size": 50
+},
+"coal": {
+"fuel_value": 4000000,
+"stack_size": 50
+},
+"copper-ore": {
+"fuel_value": 0,
+"stack_size": 50
+},
+"copper-plate": {
+"fuel_value": 0,
+"stack_size": 100
+},
+"iron-chest": {
+"fuel_value": 0,
+"stack_size": 50
+},
+"iron-gear-wheel": {
+"fuel_value": 0,
+"stack_size": 100
+},
+"iron-ore": {
+"fuel_value": 0,
+"stack_size": 50
+},
+"iron-plate": {
+"fuel_value": 0,
+"stack_size": 100
+},
+"stone": {
+"fuel_value": 0,
+"stack_size": 50
+},
+"stone-brick": {
+"fuel_value": 0,
+"stack_size": 100
+},
+"stone-furnace": {
+"fuel_value": 0,
+"stack_size": 50
+},
+"transport-belt": {
+"fuel_value": 0,
+"stack_size": 100
+},
+"wood": {
+"fuel_value": 2000000,
+"stack_size": 100
+},
+"wooden-chest": {
+"fuel_value": 0,
+"stack_size": 50
+}
+},
+"recipes": {
+"burner-inserter": {
+"category": "crafting",
+"energy": 0.5,
+"ingredients": [
+{
+"amount": 1,
+"name": "iron-plate"
+},
+{
+"amount": 1,
+"name": "iron-gear-wheel"
+}
+],
+"products": [
+{
+"amount": 1,
+"name": "burner-inserter"
+}
+]
+},
+"burner-mining-drill": {
+"category": "crafting",
+"energy": 2,
+"ingredients": [
+{
+"amount": 3,
+"name": "iron-plate"
+},
+{
+"amount": 3,
+"name": "iron-gear-wheel"
+},
+{
+"amount": 1,
+"name": "stone-furnace"
+}
+],
+"products": [
+{
+"amount": 1,
+"name": "burner-mining-drill"
+}
+]
+},
+"copper-plate": {
+"category": "smelting",
+"energy": 3.2,
+"ingredients": [
+{
+"amount": 1,
+"name": "copper-ore"
+}
+],
+"products": [
+{
+"amount": 1,
+"name": "copper-plate"
+}
+]
+},
+"iron-chest": {
+"category": "crafting",
+"energy": 0.5,
+"ingredients": [
+{
+"amount": 8,
+"name": "iron-plate"
+}
+],
+"products": [
+{
+"amount": 1,
+"name": "iron-chest"
+}
+]
+},
+"iron-gear-wheel": {
+"category": "crafting",
+"energy": 0.5,
+"ingredients": [
+{
+"amount": 2,
+"name": "iron-plate"
+}
+],
+"products": [
+{
+"amount": 1,
+"name": "iron-gear-wheel"
+}
+]
+},
+"iron-plate": {
+"category": "smelting",
+"energy": 3.2,
+"ingredients": [
+{
+"amount": 1,
+"name": "iron-ore"
+}
+],
+"products": [
+{
+"amount": 1,
+"name": "iron-plate"
+}
+]
+},
+"stone-brick": {
+"category": "smelting",
+"energy": 3.2,
+"ingredients": [
+{
+"amount": 2,
+"name": "stone"
+}
+],
+"products": [
+{
+"amount": 1,
+"name": "stone-brick"
+}
+]
+},
+"stone-furnace": {
+"category": "crafting",
+"energy": 0.5,
+"ingredients": [
+{
+"amount": 5,
+"name": "stone"
+}
+],
+"products": [
+{
+"amount": 1,
+"name": "stone-furnace"
+}
+]
+},
+"transport-belt": {
+"category": "crafting",
+"energy": 0.5,
+"ingredients": [
+{
+"amount": 1,
+"name": "iron-plate"
+},
+{
+"amount": 1,
+"name": "iron-gear-wheel"
+}
+],
+"products": [
+{
+"amount": 2,
+"name": "transport-belt"
+}
+]
+},
+"wooden-chest": {
+"category": "crafting",
+"energy": 0.5,
+"ingredients": [
+{
+"amount": 2,
+"name": "wood"
+}
+],
+"products": [
+{
+"amount": 1,
+"name": "wooden-chest"
+}
+]
+}
+},
+"resources": {
+"coal": {
+"mining_time": 1
+},
+"copper-ore": {
+"mining_time": 1
+},
+"iron-ore": {
+"mining_time": 1
+},
+"stone": {
+"mining_time": 1
+}
+}
+},
+"rigs": {
+"chest": [
+61.5,
+62.5
+],
+"drill_a": [
+61,
+61
+],
+"drill_b": [
+69,
+61
+],
+"drop_a": [
+61.5,
+62.296875
+],
+"drop_b": [
+69.5,
+62.296875
+],
+"furnace_b": [
+70,
+63
+],
+"furnace_b_catches": true,
+"furnace_c": [
+77,
+61
+]
+},
+"summary": {
+"character_main_slots": 80,
+"drill_first_ore_tick": 243,
+"drill_joules_per_tick": 2500.06950236308,
+"drill_ore_interval": 240.0,
+"drill_to_unfuelled_furnace_blocked": true,
+"drill_to_unfuelled_furnace_limit": [
+54
+],
+"furnace_first_plate_tick": 194,
+"furnace_joules_per_tick": 1500.0,
+"furnace_plate_interval": 192,
+"hand_mining_ticks": [
+121,
+121,
+121
+],
+"walk_dx_per_tick": [
+-0.1484375,
+0.1484375
+],
+"walk_exact_256ths": true
+},
+"task": "construct_smelting_line",
+"timing_ticks": 2400,
+"walking": {
+"move_east": {
+"decision_ticks": 30,
+"dx": 4.453125,
+"dx_in_256ths": 1140.0,
+"exact_256ths": true,
+"per_stride_tick": 0.1484375,
+"stride_ticks": 30
+},
+"move_west": {
+"decision_ticks": 30,
+"dx": -4.453125,
+"dx_in_256ths": -1140.0,
+"exact_256ths": true,
+"per_stride_tick": -0.1484375,
+"stride_ticks": 30
+},
+"nudge_east": {
+"decision_ticks": 30,
+"dx": 0.296875,
+"dx_in_256ths": 76.0,
+"exact_256ths": true,
+"per_stride_tick": 0.1484375,
+"stride_ticks": 2
+},
+"nudge_west": {
+"decision_ticks": 30,
+"dx": -0.296875,
+"dx_in_256ths": -76.0,
+"exact_256ths": true,
+"per_stride_tick": -0.1484375,
+"stride_ticks": 2
+},
+"step_east": {
+"decision_ticks": 30,
+"dx": 1.0390625,
+"dx_in_256ths": 266.0,
+"exact_256ths": true,
+"per_stride_tick": 0.1484375,
+"stride_ticks": 7
+},
+"step_west": {
+"decision_ticks": 30,
+"dx": -1.0390625,
+"dx_in_256ths": -266.0,
+"exact_256ths": true,
+"per_stride_tick": -0.1484375,
+"stride_ticks": 7
+}
+},
+"wall_seconds": 123.5
+}
