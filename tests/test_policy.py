@@ -84,3 +84,55 @@ def test_export_round_trips(batch, tmp_path):
         f = policy.features(*args)
         greedy, _ = policy.act(f, mask, True)
         assert torch.equal(loaded(*args, mask, True), greedy)
+
+
+def _reference(policy, features, mask, actions):
+    """The per-dimension head the vectorised one replaced, kept as its spec."""
+    uses = policy.uses[actions[:, 0]]
+    op_mask = mask[:, :OPS]
+    op_logits = policy.op_head(features).masked_fill(~op_mask, -1e8)
+    logp_all = torch.log_softmax(op_logits, -1)
+    logp = logp_all.gather(1, actions[:, :1]).squeeze(1)
+    entropy = -torch.where(op_mask, logp_all.exp() * logp_all, torch.zeros_like(logp_all)).sum(-1)
+    one_hot = torch.nn.functional.one_hot(actions[:, 0], OPS).float()
+    flat = policy.arg_head(torch.cat([features, one_hot], 1))
+    offset, greedy = OPS, [actions[:, 0]]
+    for j, (size, logits) in enumerate(zip(NVEC[1:], torch.split(flat, NVEC[1:], 1), strict=True)):
+        m = mask[:, offset : offset + size].clone()
+        offset += size
+        others = m[:, 1:].any(1, keepdim=True)
+        m[:, :1] &= ~others
+        sentinel = torch.zeros_like(m)
+        sentinel[:, 0] = True
+        m = torch.where(uses[:, j : j + 1], m, sentinel)
+        lp = torch.log_softmax(logits.masked_fill(~m, -1e8), -1)
+        logp = logp + lp.gather(1, actions[:, j + 1 : j + 2]).squeeze(1)
+        entropy = entropy - torch.where(m, lp.exp() * lp, torch.zeros_like(lp)).sum(-1)
+        greedy.append(lp.argmax(-1))
+    return logp, entropy
+
+
+def test_vectorised_head_matches_the_per_dimension_reference(batch):
+    t, mask, _ = batch
+    torch.manual_seed(1)
+    policy = Policy()
+    with torch.no_grad():
+        f = policy.features(*(t[k] for k in OBS_KEYS))
+        for _ in range(20):
+            actions, logp = policy.act(f, mask)
+            ref_logp, ref_entropy = _reference(policy, f, mask, actions)
+            again, entropy = policy.evaluate(f, mask, actions)
+            assert torch.allclose(logp, ref_logp, atol=1e-5)
+            assert torch.allclose(again, ref_logp, atol=1e-5)
+            assert torch.allclose(entropy, ref_entropy, atol=1e-4)
+
+
+def test_gumbel_sampling_follows_the_softmax():
+    from fsim.policy import _gumbel_argmax
+
+    torch.manual_seed(2)
+    logits = torch.tensor([[0.0, 1.0, -1e8, 2.0]]).repeat(200_000, 1)
+    counts = torch.bincount(_gumbel_argmax(logits), minlength=4).float() / len(logits)
+    expected = torch.softmax(logits[0], -1)
+    assert counts[2] == 0
+    assert torch.allclose(counts, expected, atol=0.005)
