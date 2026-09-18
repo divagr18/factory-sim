@@ -87,6 +87,48 @@ def backplay_window(progress: float) -> tuple[int, int]:
     return window
 
 
+#: The same ladder, climbed on evidence rather than on the clock.
+BACKPLAY_LADDER = tuple(window for _at, window in BACKPLAY_SCHEDULE)
+
+
+class GatedBackplay:
+    """Backplay's window, widened only once the policy can finish the last one.
+
+    The fixed schedule is open-loop: it slides the window back at a set
+    fraction of the budget whether or not the policy has learned to start from
+    where it already is. On an easy scene mix that tracked; on a harder one it
+    outruns the policy, which then loses the skill it had -- measured, a run
+    reached `line_built` 0.16 by 2M steps and 0.0 by 15M.
+
+    Advancing on measured success instead is the reverse curriculum as
+    Florensa et al. (2017) state it: keep starts whose success sits in a band,
+    and move outwards from the ones already solved.
+    """
+
+    def __init__(self, threshold: float = 0.5, minimum: int = 64) -> None:
+        self.threshold = threshold
+        self.minimum = minimum  # episodes needed before the window may move
+        self.index = 0
+        self.advanced_at: list[int] = []
+
+    @property
+    def window(self) -> tuple[int, int]:
+        return BACKPLAY_LADDER[self.index]
+
+    def update(self, demo: list[dict], steps: int) -> tuple[int, int]:
+        """Read the recent demonstration episodes; widen if they are solved."""
+        if self.index + 1 >= len(BACKPLAY_LADDER):
+            return self.window
+        lo, hi = self.window
+        at_window = [e for e in demo if e["start"] != "scene"]
+        if len(at_window) >= self.minimum:
+            solved = float(np.mean([e["success"] for e in at_window]))
+            if solved >= self.threshold:
+                self.index += 1
+                self.advanced_at.append(steps)
+        return self.window
+
+
 def parse(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--run", required=True)
@@ -144,9 +186,16 @@ def parse(argv=None) -> argparse.Namespace:
     p.add_argument("--start-curriculum", type=float, default=0.0)
     p.add_argument(
         "--demo-schedule",
-        choices=("uniform", "backplay"),
+        choices=("uniform", "backplay", "gated"),
         default="uniform",
-        help="uniform: a stage drawn uniformly; backplay: a window that slides back",
+        help="uniform: a stage drawn uniformly; backplay: a window sliding back "
+        "on the clock; gated: the same ladder, climbed on measured success",
+    )
+    p.add_argument(
+        "--gate",
+        type=float,
+        default=0.5,
+        help="success at the current window needed to widen it, with --demo-schedule gated",
     )
     p.add_argument(
         "--demo-starts",
@@ -409,6 +458,7 @@ def main(argv=None) -> int:
     step_np = host_step.numpy()
     next_done = torch.zeros(N, device=device)
     episodes: list[dict] = []
+    gate = GatedBackplay(threshold=args.gate)
     steps = 0
     start = time.perf_counter()
     next_eval = args.eval_every
@@ -423,6 +473,8 @@ def main(argv=None) -> int:
         began = clock()
         if args.demo_schedule == "backplay":
             env.demo_window = backplay_window((update - 1) / updates)
+        elif args.demo_schedule == "gated":
+            env.demo_window = gate.window
         frac = 1.0 - (update - 1) / updates
         for group in optimizer.param_groups:
             group["lr"] = frac * args.lr
@@ -528,9 +580,12 @@ def main(argv=None) -> int:
         elapsed = time.perf_counter() - start
         recent = [e for e in episodes[-2048:] if e["start"] == "scene"][-512:]
         demo = [e for e in episodes[-2048:] if e["start"] != "scene"][-512:]
+        if args.demo_schedule == "gated":
+            gate.update(demo, steps)
         row = {
             "update": update,
             "demo_window": list(env.demo_window) if env.demo_window else None,
+            "gate_rung": gate.index if args.demo_schedule == "gated" else None,
             "time_rollout": round(rolled - began, 4),
             "time_update": round(updated - rolled, 4),
             "steps": steps,
