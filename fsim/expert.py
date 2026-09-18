@@ -15,6 +15,12 @@ demonstration, and it is the demonstration-driven case of the reverse
 curriculum of Florensa et al. (2017). The policy never sees the builder's
 actions as labels; it only starts some episodes from where the builder
 stopped. A run that uses it is not a from-scratch run, and says so.
+
+`advance_decisions` cuts the build at any decision, which is what Backplay
+(Resnick et al. 2018, arXiv:1807.06919) needs: it samples starts from a window
+measured backwards from the end of the demonstration and slides that window
+back on a fixed schedule. Drawing uniformly from the whole demonstration
+instead is their "Uniform" baseline, which they measure as slower.
 """
 
 from __future__ import annotations
@@ -151,6 +157,48 @@ class Builder:
             target = target_index(rl, K_FURNACE, (cx, cy + 2))
             return [OP_GIVE, target, 0, 0, ITEM_COAL, AMOUNT_20]
         return None
+
+
+def plan_length(rl, patch) -> int:
+    """How many decisions the whole build takes from here, without stepping.
+
+    The walk is a deterministic function of the character's position, so its
+    length is arithmetic: no scene of a training family has anything between
+    the start and the standing spot. Four build decisions follow.
+    """
+    x, y = rl.env.char_pos.x / TILE, rl.env.char_pos.y / TILE
+    tile = (math.floor(patch[0]), math.floor(patch[1]))
+    goal = (tile[0] + 1 + 3.5, tile[1] + 1 + 0.5)
+    stride = 38 / 256
+    walk = 0
+    while walk < 200:
+        dx, dy = goal[0] - x, goal[1] - y
+        if abs(dx) <= 0.3 and abs(dy) <= 0.3:
+            break
+        if abs(dx) >= abs(dy):
+            distance, axis = abs(dx), 0
+        else:
+            distance, axis = abs(dy), 1
+        ticks = 30 if distance >= 30 * stride else (7 if distance >= 7 * stride else 2)
+        moved = min(distance, ticks * stride)
+        if axis == 0:
+            x += moved if dx > 0 else -moved
+        else:
+            y += moved if dy > 0 else -moved
+        walk += 1
+    return walk + 4
+
+
+def advance_decisions(rl, patch, count: int, step) -> int:
+    """Run the first `count` decisions of the build; returns how many ran."""
+    builder = Builder(rl, patch)
+    taken = 0
+    while taken < count:
+        vector = builder.next_vector()
+        if vector is None or step(vector):
+            break
+        taken += 1
+    return taken
 
 
 def advance_to(rl, patch, stage: str, step) -> int:
