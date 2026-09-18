@@ -127,18 +127,20 @@ def layouts(rl, patch) -> list[tuple[tuple[int, int], int]]:
 
 
 def choose_layout(rl, patch, rng=None) -> tuple[tuple[int, int], int]:
-    """One layout for this scene: the canonical one, or a random valid one.
+    """One layout for this scene: a random valid one, or the first valid one.
+
+    Without an `rng` this is the canonical layout wherever the scene allows it,
+    which is what the parity tests and `run_to_completion` want.
 
     Drawing a layout per episode is what stops demonstration starts teaching a
     single build pose. A policy trained on one pose memorises it, and any scene
     that blocks that pose -- an obstacle standing on it, an ore patch whose
     shape moves it -- leaves that policy with nothing to fall back on.
     """
-    canonical = ((math.floor(patch[0]), math.floor(patch[1])), 0)
-    if rng is None:
-        return canonical
     found = layouts(rl, patch)
-    return rng.choice(found) if found else canonical
+    if not found:
+        return ((math.floor(patch[0]), math.floor(patch[1])), 0)
+    return rng.choice(found) if rng is not None else found[0]
 
 
 def placement_index(rl, tx: int, ty: int) -> int:
