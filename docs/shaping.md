@@ -116,6 +116,65 @@ numbers. A pointer-style target head over the entity table, and a fixed
 121-slot placement grid with occupancy in the mask, are the changes that
 would make them learnable. They would be a `parameterized-v2`.
 
+## What the schedule of demonstration starts is worth
+
+`parameterized-v2` and the combined shaping got 14.8% sampled success on the
+training families at 20M steps, drawing each episode's demonstration start
+uniformly from the five stages of the build. Replacing that draw with
+Backplay's sliding window (Resnick et al. 2018) — a start sampled from `U[lo,
+hi]` decisions back from the *end* of the demonstration, with the window
+sliding backwards on a fixed schedule until, at 65% of training, every episode
+starts from the scene — is worth about five times that:
+
+| 40M steps, `--shaping both --action-space v2 --demo-starts 0.5` | 5M | 10M | 20M | 30M | 40M | final |
+|---|---|---|---|---|---|---|
+| Backplay window, seed 1 | 13.7% | 11.7% | 52.0% | 79.7% | 77.3% | **77.5%** |
+| Backplay window, seed 2 | 0.0% | 2.3% | 39.1% | 49.2% | 61.3% | **68.6%** |
+| uniform stages, seed 2 (20M run) | — | — | 14.8% | — | — | — |
+
+Backplay's own explanation fits what the curves show: a start one decision from
+the end is a task the policy can solve by chance, and every window the schedule
+opens is only one decision harder than the one the policy has already learned.
+The uniform draw spends a fifth of its episodes on a stage the policy cannot
+yet reach the end of, and the reward from those is noise.
+
+Three things are wrong with the resulting policy, and they are the same thing.
+
+**It does not generalise to an unseen family.** `obstructed_patch`, the
+held-out family, is 0.0% and 1.4% for the two seeds — below the 3.7-7.2% that
+the weaker uniform runs reached. The builder in `fsim/expert.py` can only
+demonstrate the two training families; a policy that spends half its episodes
+resuming those demonstrations learns their geometry, not the task.
+
+**Its greedy policy is worthless.** Sampled 77.5%, greedy 0.4%. The
+environment is deterministic, so an argmax policy that enters a loop never
+leaves it. Success comes from sampling, over 600 decisions, from a
+distribution that is merely well shaped.
+
+**Its entropy rises as it learns.** 3.32 nats at 5M, 3.60 at 10M, 3.56 at 20M,
+3.92 at 30M, 4.03 at the end, with the update KL falling to zero. The policy
+stops moving before it sharpens. `--ent 0.01` is the suspect, and this is the
+same objection VPT (Baker et al. 2022) raises against an entropy bonus on a
+sparse long-horizon task: it is exploration pressure that never expires, and
+they replace it outright with a KL term to a frozen behaviour-cloned prior,
+decayed 0.9995 per iteration from 0.2.
+
+## What PufferLib's sparse settings do here
+
+PufferLib 5.0's tuned configs for sparse, long-horizon tasks differ from this
+trainer's defaults in four places: rollout 128 rather than 64, GAE lambda 0.90
+rather than 0.95, value loss weight 2.0 rather than 0.5, and no advantage
+normalisation. Applied as a group, on top of the Backplay schedule, they do not
+train at all: 0.0% at every checkpoint of two seeds, `line_built` 0.0, the
+potential stuck at its initial 0.25, and a per-update KL of 1e-4 against the
+3e-3 of a run that is learning. The policy is frozen.
+
+Advantage normalisation is not the cause on its own — an arm that dropped only
+that flag froze the same way, and an arm that kept it and took the other three
+also froze. The remaining suspect is the value loss weight: 2.0 on a trunk
+shared with the policy head. The flags stay in the trainer, all defaulting to
+this trainer's own values.
+
 ## Sources
 
 - Ng, Harada, Russell (1999). Policy invariance under reward transformations.
@@ -127,4 +186,6 @@ would make them learnable. They would be a `parameterized-v2`.
 - Huang et al. (2021). Gym-muRTS. arXiv:2105.13807.
 - Salimans & Chen (2018). Learning Montezuma's Revenge from a single demonstration.
 - Florensa et al. (2017). Reverse curriculum generation for reinforcement learning. CoRL.
-- PufferLib 3.0/4.0 `config/default.ini`; CleanRL `ppo_atari.py`, `ppo_multidiscrete_mask.py`.
+- Resnick et al. (2018). Backplay: man muss immer umkehren. arXiv:1807.06919.
+- Baker et al. (2022). Video PreTraining (VPT). arXiv:2206.11795.
+- PufferLib 5.0 `config/`; CleanRL `ppo_atari.py`, `ppo_multidiscrete_mask.py`.
