@@ -132,3 +132,66 @@ At this rate a 20M-step run takes about 7 minutes.
 Other numbers on the same machine:
 - the simulator alone: 169k decisions/s on one core, 981k on 12 threads;
 - the RL path: 91k decisions/s on one core, 541k on 12 threads.
+
+## Where a v2 update's time actually goes (2026-09-18, RTX 3050, batch 4096)
+
+`bench/bench_heads.py` times the pieces apart. v2's update is 1.9x v1's, and
+the gap is the two extra heads and their backward, not the extractor:
+
+| | v1 | v2 |
+|---|---|---|
+| extractor | 22.35 ms | 21.31 ms |
+| forward | 21.88 ms | 30.57 ms |
+| forward + backward | 35.28 ms | 66.89 ms |
+| pointer head (forward) | - | 1.86 ms |
+| placement head (forward) | - | 5.62 ms |
+
+Inside the extractor, the grid path is 84% of it, and **moving the data costs
+more than the arithmetic**:
+
+| piece | ms | |
+|---|---|---|
+| uint8 -> bf16 and /255 | 5.46 | 2.72 of it is the `/255` pass alone |
+| `_grid` | 12.28 | 6.34 of it is unshuffle + permute + copy |
+| crop_net | 0.27 | |
+| entity_net | 0.84 | |
+| vector_net | 0.24 | |
+
+### What did not work, measured end to end
+
+Three rewrites that were faster in isolation and slower, or no better, in the
+whole policy step. The isolated numbers are real; they just do not survive
+contact with `channels_last`, which the policy is converted to as a whole.
+
+| variant | isolated | whole step |
+|---|---|---|
+| baseline | 14.99 ms (grid path) | **67.51 ms** |
+| `conv2d` stride 4 on the sliced grid | 9.15 ms | 78.65 ms |
+| explicit view + permute instead of `pixel_unshuffle` | 10.20 ms | 69.67 ms |
+| both, with `channels_last` off | - | 82.88 ms |
+
+The lesson is the one the grid path's own comment already recorded: the linear
+formulation is not obviously right, it is *measured* right, and it stays right
+only in the layout the rest of the policy runs in. `torch.compile` could fuse
+the conversion and the permute, but there is no working Triton on this
+platform, so it is not available to measure.
+
+### What did work
+
+Dropping the padding on the placement head's second convolution: only the
+middle 11x11 of the 13x13 crop names a slot, and a padded convolution's
+interior is exactly an unpadded one's whole output, so it is the same numbers
+over 121 positions instead of 169. Isolated, 1.96 ms -> 1.53 ms; in the whole
+step, 67.51 ms -> 65.60 ms. The end-to-end confirmation is within this
+laptop's thermal noise over a long benchmarking session, so it is claimed on
+the arithmetic -- strictly less work for identical output -- rather than on
+the wall clock.
+
+### The env side does not need work
+
+At 256 environments and 8 threads, 4.23 ms per vector step without
+demonstration starts and 4.63 ms with them at a 120-step episode cap. Real
+episodes are 600 steps, so the builder's per-reset cost -- enumerating the
+scene's layouts, 0.345 ms -- is about 2% of the rollout. The v2 action space is
+*faster* to step than v1 (0.62 ms against 0.68 ms per 64-environment step),
+so the entity-table ordering costs nothing.

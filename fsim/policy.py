@@ -222,14 +222,20 @@ class PlacementHead(nn.Module):
 
     The context enters as a per-channel bias after the first convolution rather
     than as broadcast input channels, so the convolutions run on the crop's six
-    planes alone.
+    planes alone. The output is the 11x11 of placement slots, not the 13x13 of
+    the crop it read.
     """
 
     def __init__(self, context_dim: int, channels: int = PLACE_CONTEXT) -> None:
         super().__init__()
         self.first = nn.Conv2d(6, channels, 3, padding=1)
         self.context = _layer(context_dim, channels, 1.0)
-        self.second = nn.Conv2d(channels, channels, 3, padding=1)
+        # No padding on the second convolution. Only the middle 11x11 of a
+        # 13x13 crop names a placement slot, and a padded convolution's
+        # interior is exactly an unpadded one's whole output -- every position
+        # it keeps reads the same nine inputs -- so this is the same numbers
+        # over 121 positions instead of 169.
+        self.second = nn.Conv2d(channels, channels, 3)
         self.out = nn.Conv2d(channels, 1, 1)
         nn.init.orthogonal_(self.out.weight, 0.01)
         nn.init.zeros_(self.out.bias)
@@ -349,7 +355,7 @@ class Policy(nn.Module):
         rows = features[:, start : start + width].reshape(batch, self.rows, self.row_dim)
         crop = features[:, start + width :].reshape(batch, 6, self.crop, self.crop)
         targets = self.target_head(rows, context)
-        cells = self.place_head(crop, context)[:, 1:12, 1:12]
+        cells = self.place_head(crop, context)
         # Grid rows are y and columns x; slot (dx + 5) * 11 + (dy + 5).
         placements = cells.transpose(1, 2).reshape(batch, 121)
         return torch.cat([flat[:, :1], targets, flat[:, 33:34], placements, flat[:, 155:]], dim=1)
