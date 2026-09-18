@@ -180,6 +180,12 @@ def parse(argv=None) -> argparse.Namespace:
     p.add_argument("--kl-coef", type=float, default=0.2, help="VPT's rho")
     p.add_argument("--kl-decay", type=float, default=0.9995, help="rho's decay per update")
     p.add_argument(
+        "--autoregressive",
+        action="store_true",
+        help="draw the target first and score direction, item and amount "
+        "conditioned on it, instead of drawing all five arguments independently",
+    )
+    p.add_argument(
         "--fixed-demo-layout",
         action="store_true",
         help="demonstrate the one canonical build pose rather than drawing one, "
@@ -430,6 +436,7 @@ def main(argv=None) -> int:
         # second convolution gets its input in that layout (fsim/policy.py).
         policy.extractor.input_dtype = torch.bfloat16
         policy = policy.to(memory_format=torch.channels_last)
+    policy.autoregressive = args.autoregressive
     prior = None
     if args.prior:
         prior = Policy(action_space=args.action_space).to(device)
@@ -437,6 +444,7 @@ def main(argv=None) -> int:
         if device.type == "cuda":
             prior.extractor.input_dtype = torch.bfloat16
             prior = prior.to(memory_format=torch.channels_last)
+        prior.autoregressive = args.autoregressive
         prior.eval()
         for parameter in prior.parameters():
             parameter.requires_grad_(False)

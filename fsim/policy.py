@@ -333,6 +333,21 @@ class Policy(nn.Module):
         self.arg_head = nn.Sequential(
             _layer(features_dim + OPS, 256), nn.ReLU(), _layer(256, sum(ARG_NVEC), 0.01)
         )
+        #: Autoregressive tail: direction, item and amount scored *after* the
+        #: target is known, conditioned on the row the policy chose. Five
+        #: arguments drawn independently have to hit a conjunction by luck --
+        #: giving twenty coal to the furnace is one draw in 22 x 3 x 15 x 4,
+        #: which a uniform policy finds in 15% of six-hundred-step episodes and
+        #: a committed one almost never. Conditioning is how AlphaStar and
+        #: Conditional Action Trees (arXiv:2104.07294) handle the same shape of
+        #: action; `train.py --autoregressive` turns it on.
+        self.autoregressive: bool = False
+        self.tail_sizes: list[int] = list(ARG_NVEC[2:])
+        self.after_target = nn.Sequential(
+            _layer(context + ROW_DIM, 128), nn.ReLU(), _layer(128, sum(ARG_NVEC[2:]), 0.01)
+        )
+        #: Stands in for the row embedding when no target was named.
+        self.absent_target = nn.Parameter(torch.zeros(ROW_DIM))
         self.value_head = nn.Sequential(_layer(features_dim, 256), nn.ReLU(), _layer(256, 1, 1.0))
         index, dim, sentinel = _layout()
         self.register_buffer("uses", argument_uses(), persistent=False)
@@ -355,8 +370,13 @@ class Policy(nn.Module):
         logits = self.op_head(features[:, : self.features_dim])
         return torch.where(op_mask, logits, torch.full_like(logits, self.masked)), op_mask
 
-    def _arguments(self, features: torch.Tensor, mask: torch.Tensor, op: torch.Tensor):
-        """Masked argument logits and masks for the chosen ops, as (B, 5, 122).
+    def _arg_parts(self, features: torch.Tensor, mask: torch.Tensor, op: torch.Tensor):
+        """Unscattered argument logits, their legality, and the op context.
+
+        Split out from `_arguments` because the autoregressive tail rescores
+        three of the five dimensions once the target is known, and the pointer
+        and placement heads that produce the other two are the expensive part:
+        they are computed once and the cheap tail is spliced onto them.
 
         An argument the op does not read may only be its sentinel; one it does
         read may not be, while anything else in its dimension is legal.
@@ -377,13 +397,43 @@ class Policy(nn.Module):
         flat = self.arg_head(context)  # B x 179
         if self.v2:
             flat = self._v2_logits(features, context, flat)
+        return flat, allowed, context
+
+    def _target_embedding(self, features: torch.Tensor, target: torch.Tensor):
+        """The row the policy named, or a learned stand-in for "none"."""
+        batch = features.shape[0]
+        absent = self.absent_target.to(features.dtype).expand(batch, self.row_dim)
+        if not self.v2:
+            return absent
+        width = self.rows * self.row_dim
+        rows = features[:, self.features_dim : self.features_dim + width]
+        rows = rows.reshape(batch, self.rows, self.row_dim)
+        index = (target - 1).clamp(min=0, max=self.rows - 1)
+        chosen = rows.gather(1, index.view(batch, 1, 1).expand(batch, 1, self.row_dim))
+        chosen = chosen.squeeze(1)
+        return torch.where((target > 0).unsqueeze(1), chosen, absent)
+
+    def _retail(self, features, context: torch.Tensor, flat: torch.Tensor, target: torch.Tensor):
+        """Rescore direction, item and amount now that the target is known."""
+        head = sum(self.arg_sizes[:2])
+        tail = self.after_target(
+            torch.cat([context, self._target_embedding(features, target)], dim=1)
+        )
+        return torch.cat([flat[:, :head], tail], dim=1)
+
+    def _scatter(self, flat: torch.Tensor, allowed: torch.Tensor):
+        batch = flat.shape[0]
         size = len(self.arg_sizes) * self.arg_width
         logits = torch.full((batch, size), self.masked, device=flat.device, dtype=flat.dtype)
         logits = logits.index_copy(1, self.pad_index, torch.where(allowed, flat, logits[:, :1]))
-        pad_mask = torch.zeros(batch, size, device=seg.device, dtype=torch.bool)
+        pad_mask = torch.zeros(batch, size, device=flat.device, dtype=torch.bool)
         pad_mask = pad_mask.index_copy(1, self.pad_index, allowed)
         shape = (batch, len(self.arg_sizes), self.arg_width)
         return logits.view(shape), pad_mask.view(shape)
+
+    def _arguments(self, features: torch.Tensor, mask: torch.Tensor, op: torch.Tensor):
+        flat, allowed, _context = self._arg_parts(features, mask, op)
+        return self._scatter(flat, allowed)
 
     def _v2_logits(self, features: torch.Tensor, context: torch.Tensor, flat: torch.Tensor):
         """Replace the target and placement segments with the v2 heads' scores.
@@ -421,14 +471,21 @@ class Policy(nn.Module):
         if greedy:
             roll = torch.rand(op_logits.shape[0], device=op_logits.device) < epsilon
             op = torch.where(roll, _gumbel_argmax(op_logits), op_logits.argmax(-1))
-            logits, _ = self._arguments(features, mask, op)
-            args = torch.where(
-                roll.unsqueeze(1), _gumbel_argmax(logits), logits.argmax(-1)
-            )
         else:
+            roll = torch.ones(op_logits.shape[0], device=op_logits.device, dtype=torch.bool)
             op = _gumbel_argmax(op_logits)
-            logits, _ = self._arguments(features, mask, op)
-            args = _gumbel_argmax(logits)
+        flat, allowed, context = self._arg_parts(features, mask, op)
+        logits, _ = self._scatter(flat, allowed)
+        if self.autoregressive:
+            # Draw the target first, then score what may be done with it.
+            first = logits[:, 0]
+            target = torch.where(roll, _gumbel_argmax(first), first.argmax(-1))
+            flat = self._retail(features, context, flat, target)
+            logits, _ = self._scatter(flat, allowed)
+            rest = torch.where(roll.unsqueeze(1), _gumbel_argmax(logits), logits.argmax(-1))
+            args = torch.cat([target.unsqueeze(1), rest[:, 1:]], dim=1)
+        else:
+            args = torch.where(roll.unsqueeze(1), _gumbel_argmax(logits), logits.argmax(-1))
         logp = torch.log_softmax(op_logits, -1).gather(1, op.unsqueeze(1)).squeeze(1)
         arg_logp = torch.log_softmax(logits, -1).gather(2, args.unsqueeze(2)).squeeze(2)
         return torch.cat([op.unsqueeze(1), args], dim=1), logp + arg_logp.sum(1)
@@ -440,7 +497,11 @@ class Policy(nn.Module):
         not the log-probability of one action.
         """
         op_logits, op_mask = self._op_logits(features, mask)
-        arg_logits, pad_mask = self._arguments(features, mask, op)
+        flat, allowed, context = self._arg_parts(features, mask, op)
+        if self.autoregressive:
+            # No target has been chosen here, so the tail sees the stand-in.
+            flat = self._retail(features, context, flat, torch.zeros_like(op))
+        arg_logits, pad_mask = self._scatter(flat, allowed)
         return op_logits, op_mask, arg_logits, pad_mask
 
     def evaluate(self, features: torch.Tensor, mask: torch.Tensor, actions: torch.Tensor):
@@ -451,7 +512,12 @@ class Policy(nn.Module):
         logp = op_logp.gather(1, op.unsqueeze(1)).squeeze(1)
         zero = torch.zeros_like(op_logp)
         entropy = -torch.where(op_mask, op_logp.exp() * op_logp, zero).sum(-1)
-        logits, pad_mask = self._arguments(features, mask, op)
+        flat, allowed, context = self._arg_parts(features, mask, op)
+        if self.autoregressive:
+            # Teacher forcing: score the tail under the target that was taken,
+            # which is what makes the summed factors the joint log-probability.
+            flat = self._retail(features, context, flat, actions[:, 1])
+        logits, pad_mask = self._scatter(flat, allowed)
         arg_logp = torch.log_softmax(logits, -1)
         logp = logp + arg_logp.gather(2, actions[:, 1:].unsqueeze(2)).squeeze(2).sum(1)
         p_log_p = torch.where(pad_mask, arg_logp.exp() * arg_logp, torch.zeros_like(arg_logp))
