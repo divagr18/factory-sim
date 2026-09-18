@@ -29,7 +29,7 @@ def test_every_family_is_covered():
 
 def test_sample_draws_only_the_requested_split():
     seen = {scenes.sample("construct_smelting_line", "train", s)[0] for s in range(64)}
-    assert seen == {"open_patch", "offset_patch"}
+    assert seen == {"open_patch", "offset_patch", "varied_patch", "cluttered_patch"}
     assert {scenes.sample("construct_smelting_line", "test", s)[0] for s in range(8)} == {
         "obstructed_patch"
     }

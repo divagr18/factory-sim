@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import random
+
 import numpy as np
 import pytest
 
@@ -11,8 +13,16 @@ from fsim.vec import VecEnv
 
 
 @pytest.mark.parametrize("seed", range(12))
-def test_builder_solves_training_scenes(seed):
+def test_builder_solves_the_training_scenes_it_demonstrates(seed):
+    """The builder walks in straight lines, so it only claims the clear scenes.
+
+    `VecEnv` starts an obstructed scene from scratch for the same reason; what
+    matters there is that a build site exists at all, which
+    `test_the_new_training_families_are_buildable` checks.
+    """
     family, scene = scenes.sample("construct_smelting_line", "train", seed)
+    if scene["entities"]:
+        pytest.skip(f"{family} has something in the way")
     env = RlEnv()
     env.reset("construct_smelting_line", scene)
     expert.run_to_completion(env.rl, scene["markers"]["patch"])
@@ -59,6 +69,34 @@ def test_all_four_turns_are_available_and_distinct():
     assert len(sides) == 4
     stands = {expert.Builder(env.rl, patch, layout=x).standing for x in found}
     assert len(stands) > len(found) // 2
+
+
+@pytest.mark.parametrize("family", ["varied_patch", "cluttered_patch"])
+def test_the_new_training_families_are_buildable(family):
+    """Diversity is worthless if some of it cannot be solved at all."""
+    for seed in range(24):
+        scene = scenes.GENERATORS["construct_smelting_line"](family, random.Random(seed))
+        env = RlEnv()
+        env.reset("construct_smelting_line", scene)
+        found = expert.layouts(env.rl, scene["markers"]["patch"])
+        assert found, (family, seed)
+        if scene["entities"]:
+            continue  # the walk is not straight; the policy has to find its own
+        env = RlEnv()
+        env.reset("construct_smelting_line", scene)
+        expert.run_to_completion(env.rl, scene["markers"]["patch"], layout=found[0])
+        assert env.rl.success, (family, seed, found[0])
+
+
+def test_obstructed_scenes_never_get_a_demonstration_start():
+    env = VecEnv(32, demo_starts=1.0, seed=7)
+    try:
+        env.reset()
+        obstructed = [i for i in range(32) if env.families[i] == "cluttered_patch"]
+        assert obstructed, "expected the cluttered family in a train split"
+        assert all(env.starts[i] == "scene" for i in obstructed)
+    finally:
+        env.close()
 
 
 def test_stages_raise_the_line_potential_in_order():

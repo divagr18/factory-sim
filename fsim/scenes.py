@@ -25,6 +25,8 @@ FAMILIES = {
         "open_patch": "train",
         "offset_patch": "train",
         "obstructed_patch": "test",
+        "varied_patch": "train",
+        "cluttered_patch": "train",
     },
     "build_line": {
         "square_patch": "train",
@@ -60,7 +62,17 @@ def construct_smelting_line(family: str, rng: random.Random) -> dict:
         ox, oy = rng.choice((-9, 9)), rng.choice((-9, 9))
     if family == "obstructed_patch":
         tiles = [(ox + x, oy + y) for x in range(-1, 2) for y in range(-5, 6)]
+    elif family == "varied_patch":
+        half_w, half_h = rng.randint(1, 4), rng.randint(1, 4)
+        ox, oy = rng.randint(-12, 12), rng.randint(-12, 12)
+        tiles = [
+            (ox + x, oy + y)
+            for x in range(-half_w, half_w + 1)
+            for y in range(-half_h, half_h + 1)
+        ]
     else:
+        if family == "cluttered_patch":
+            ox, oy = rng.randint(-9, 9), rng.randint(-9, 9)
         tiles = [(ox + x, oy + y) for x in range(-3, 4) for y in range(-3, 4)]
     cx = sum(x for x, _ in tiles) / len(tiles)
     cy = sum(y for _, y in tiles) / len(tiles)
@@ -73,6 +85,19 @@ def construct_smelting_line(family: str, rng: random.Random) -> dict:
     if family == "obstructed_patch":
         for y in range(int(cy) - 2, int(cy) + 3):
             entities.append(_wall(cx + 5, float(y)))
+    if family == "cluttered_patch":
+        seen: set[tuple[float, float]] = set()
+        for _ in range(rng.randint(1, 3)):
+            vertical = rng.random() < 0.5
+            away = rng.choice((-6, -5, -4, 4, 5, 6))
+            along = rng.randint(-6, 3)
+            length = rng.randint(2, 4)
+            for k in range(length):
+                x, y = (cx + away, cy + along + k) if vertical else (cx + along + k, cy + away)
+                if (x, y) in seen:
+                    continue
+                seen.add((x, y))
+                entities.append(_wall(float(x), float(y)))
     return _payload(entities, tiles, start, (cx, cy))
 
 

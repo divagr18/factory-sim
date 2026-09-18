@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import random
+
 import numpy as np
 import pytest
 
@@ -14,7 +16,8 @@ PLACEMENTS = slice(OPS + NVEC[1], OPS + NVEC[1] + NVEC[2])
 
 
 def built_env(seed=0, stage="furnace"):
-    _, scene = scenes.sample("construct_smelting_line", "train", seed)
+    # An open patch, so the entity table holds the two machines and nothing else.
+    scene = scenes.GENERATORS["construct_smelting_line"]("open_patch", random.Random(seed))
     env = RlEnv()
     env.reset("construct_smelting_line", scene, action_space="v2")
 
