@@ -96,3 +96,51 @@ def test_the_prior_pulls_the_policy_towards_it():
         loss.backward()
         optimizer.step()
     assert float(divergence()) < before * 0.5
+
+
+def _autoregressive(batch=32):
+    torch.manual_seed(0)
+    policy = Policy(action_space="v2")
+    policy.autoregressive = True
+    obs, mask = _inputs(batch)
+    return policy, policy.features(*obs), mask
+
+
+def test_the_tail_moves_with_the_target_that_was_chosen():
+    """The point of the whole thing: item depends on what you are giving to."""
+    policy, features, mask = _autoregressive()
+    flat, allowed, context = policy._arg_parts(features, mask, torch.full((32,), 16))
+    a = policy._retail(features, context, flat, torch.full((32,), 1))
+    b = policy._retail(features, context, flat, torch.full((32,), 7))
+    head = sum(policy.arg_sizes[:2])
+    assert torch.equal(a[:, :head], b[:, :head]), "target and placement must not move"
+    assert not torch.allclose(a[:, head:], b[:, head:]), "the tail must move"
+
+
+def test_evaluate_scores_exactly_what_act_drew():
+    """Summed factors are the joint log-probability only under teacher forcing."""
+    policy, features, mask = _autoregressive()
+    with torch.no_grad():
+        actions, logp = policy.act(features, mask)
+        scored, _entropy = policy.evaluate(features, mask, actions)
+    assert torch.allclose(logp, scored, atol=1e-5)
+
+
+def test_the_independent_head_still_scores_itself():
+    policy, features, mask = _autoregressive()
+    policy.autoregressive = False
+    with torch.no_grad():
+        actions, logp = policy.act(features, mask)
+        scored, _entropy = policy.evaluate(features, mask, actions)
+    assert torch.allclose(logp, scored, atol=1e-5)
+
+
+def test_conditioning_leaves_the_action_legal():
+    policy, features, mask = _autoregressive(64)
+    with torch.no_grad():
+        actions, _ = policy.act(features, mask)
+    offset = 0
+    for j, size in enumerate(NVEC):
+        assert (actions[:, j] < size).all()
+        assert mask[torch.arange(64), offset + actions[:, j]].all()
+        offset += size
