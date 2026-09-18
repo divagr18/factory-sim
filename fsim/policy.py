@@ -241,6 +241,18 @@ class PlacementHead(nn.Module):
         return self.out(h)[:, 0]
 
 
+def masked_kl(prior_logits: torch.Tensor, logits: torch.Tensor, valid: torch.Tensor):
+    """KL(prior || policy) over the legal actions, summed over the last axis.
+
+    Both sides are masked here rather than trusted to arrive masked: an illegal
+    entry left in the softmax moves the normaliser, and the divergence between
+    two policies that agree everywhere it is possible to act would not be zero.
+    """
+    p = torch.log_softmax(prior_logits.masked_fill(~valid, MASKED), -1)
+    q = torch.log_softmax(logits.masked_fill(~valid, MASKED), -1)
+    return torch.where(valid, p.exp() * (p - q), torch.zeros_like(p)).sum(-1)
+
+
 class Policy(nn.Module):
     """`action_space` "v1" is FactorioRL's parameterized-v1. "v2" is the
     simulator prototype (`csrc/fsim.h`, ACTION_SPACE_V2): its `target` names a
@@ -342,15 +354,46 @@ class Policy(nn.Module):
         placements = cells.transpose(1, 2).reshape(batch, 121)
         return torch.cat([flat[:, :1], targets, flat[:, 33:34], placements, flat[:, 155:]], dim=1)
 
-    def act(self, features: torch.Tensor, mask: torch.Tensor, greedy: bool = False):
-        """-> actions (B x 6, int64), log-probabilities (B)."""
+    def act(
+        self,
+        features: torch.Tensor,
+        mask: torch.Tensor,
+        greedy: bool = False,
+        epsilon: float = 0.0,
+    ):
+        """-> actions (B x 6, int64), log-probabilities (B).
+
+        `epsilon` is the chance a greedy decision samples instead. The task is
+        deterministic, so a pure argmax policy that enters a cycle never leaves
+        it -- measured, one action repeated for the last 200 decisions of an
+        episode. Mnih et al. (2015) evaluated with an epsilon of 0.05 for the
+        same reason. It has no effect unless `greedy`.
+        """
         op_logits, _ = self._op_logits(features, mask)
-        op = op_logits.argmax(-1) if greedy else _gumbel_argmax(op_logits)
-        logits, _ = self._arguments(features, mask, op)
-        args = logits.argmax(-1) if greedy else _gumbel_argmax(logits)
+        if greedy:
+            roll = torch.rand(op_logits.shape[0], device=op_logits.device) < epsilon
+            op = torch.where(roll, _gumbel_argmax(op_logits), op_logits.argmax(-1))
+            logits, _ = self._arguments(features, mask, op)
+            args = torch.where(
+                roll.unsqueeze(1), _gumbel_argmax(logits), logits.argmax(-1)
+            )
+        else:
+            op = _gumbel_argmax(op_logits)
+            logits, _ = self._arguments(features, mask, op)
+            args = _gumbel_argmax(logits)
         logp = torch.log_softmax(op_logits, -1).gather(1, op.unsqueeze(1)).squeeze(1)
         arg_logp = torch.log_softmax(logits, -1).gather(2, args.unsqueeze(2)).squeeze(2)
         return torch.cat([op.unsqueeze(1), args], dim=1), logp + arg_logp.sum(1)
+
+    def head_logits(self, features: torch.Tensor, mask: torch.Tensor, op: torch.Tensor):
+        """-> operation logits and legality, argument logits and legality.
+
+        What a KL against a frozen prior needs: the distributions themselves,
+        not the log-probability of one action.
+        """
+        op_logits, op_mask = self._op_logits(features, mask)
+        arg_logits, pad_mask = self._arguments(features, mask, op)
+        return op_logits, op_mask, arg_logits, pad_mask
 
     def evaluate(self, features: torch.Tensor, mask: torch.Tensor, actions: torch.Tensor):
         """-> log-probabilities and entropies (B) of stored actions."""

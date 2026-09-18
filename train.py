@@ -53,7 +53,7 @@ import torch
 from torch import nn
 
 from fsim import ffi, lib
-from fsim.policy import EXTRACTOR_VERSION, Policy, export
+from fsim.policy import EXTRACTOR_VERSION, Policy, export, masked_kl
 from fsim.vec import VecEnv, obs_layout, unpack_grid
 
 ROOT = Path(__file__).resolve().parent
@@ -102,7 +102,22 @@ def parse(argv=None) -> argparse.Namespace:
     p.add_argument("--gamma", type=float, default=0.999)
     p.add_argument("--lam", type=float, default=0.95)
     p.add_argument("--clip", type=float, default=0.2)
-    p.add_argument("--ent", type=float, default=0.01)
+    p.add_argument(
+        "--ent",
+        type=float,
+        default=None,
+        help="entropy bonus; defaults to 0.01, or to 0 with --prior, which is "
+        "VPT's arrangement: the KL to the prior replaces the bonus outright",
+    )
+    p.add_argument(
+        "--prior",
+        type=Path,
+        default=None,
+        help="a behaviour-cloned checkpoint to anchor to (tools/behaviour_clone.py). "
+        "A run that uses one is not a from-scratch run.",
+    )
+    p.add_argument("--kl-coef", type=float, default=0.2, help="VPT's rho")
+    p.add_argument("--kl-decay", type=float, default=0.9995, help="rho's decay per update")
     p.add_argument("--vf", type=float, default=0.5)
     p.add_argument(
         "--vf-clip",
@@ -139,6 +154,13 @@ def parse(argv=None) -> argparse.Namespace:
         nargs=2,
         metavar=("LO", "HI"),
         help="draw each training episode's decision budget from [LO, HI] (default: 600)",
+    )
+    p.add_argument(
+        "--eval-epsilon",
+        type=float,
+        default=0.05,
+        help="chance a greedy decision samples instead, in the final report's "
+        "`epsilon` mode; a deterministic policy in a deterministic task cycles",
     )
     p.add_argument("--eval-episodes", type=int, default=256)
     p.add_argument("--eval-every", type=int, default=2_000_000)
@@ -262,7 +284,9 @@ def wilson(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
 
 
 @torch.no_grad()
-def evaluate(policy, device, args, split: str, episodes: int, greedy: bool) -> dict:
+def evaluate(
+    policy, device, args, split: str, episodes: int, greedy: bool, epsilon: float = 0.0
+) -> dict:
     """Success over fresh evaluation seeds, disjoint from every training seed."""
     n = min(64, episodes)
     env = VecEnv(
@@ -278,7 +302,7 @@ def evaluate(policy, device, args, split: str, episodes: int, greedy: bool) -> d
     while len(done) < episodes:
         t = to_device(obs, device)
         mask = torch.from_numpy(masks).to(device).bool()
-        actions, _ = policy.act(features(policy, t), mask, greedy)
+        actions, _ = policy.act(features(policy, t), mask, greedy, epsilon)
         obs, masks, _, term, trunc, finished = env.step(actions.cpu().numpy())
         ended = np.flatnonzero(term | trunc)
         for i, record in zip(ended, finished, strict=True):
@@ -296,6 +320,7 @@ def evaluate(policy, device, args, split: str, episodes: int, greedy: bool) -> d
     return {
         "split": split,
         "greedy": greedy,
+        "epsilon": epsilon if greedy else None,
         "episodes": len(done),
         "success": wins / max(1, len(done)),
         "success_ci95": [low, high],
@@ -310,6 +335,8 @@ def evaluate(policy, device, args, split: str, episodes: int, greedy: bool) -> d
 
 def main(argv=None) -> int:
     args = parse(argv)
+    if args.ent is None:
+        args.ent = 0.0 if args.prior else 0.01
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -329,6 +356,16 @@ def main(argv=None) -> int:
         # second convolution gets its input in that layout (fsim/policy.py).
         policy.extractor.input_dtype = torch.bfloat16
         policy = policy.to(memory_format=torch.channels_last)
+    prior = None
+    if args.prior:
+        prior = Policy(action_space=args.action_space).to(device)
+        prior.load_state_dict(torch.load(args.prior, map_location=device, weights_only=True))
+        if device.type == "cuda":
+            prior.extractor.input_dtype = torch.bfloat16
+            prior = prior.to(memory_format=torch.channels_last)
+        prior.eval()
+        for parameter in prior.parameters():
+            parameter.requires_grad_(False)
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr, eps=1e-5)
     rollout = Rollout(policy, args.envs, device, graph=not args.no_graph)
     env = VecEnv(
@@ -423,7 +460,12 @@ def main(argv=None) -> int:
         b_logp, b_adv = logp_buf.reshape(-1), adv.reshape(-1)
         b_ret, b_val = returns.reshape(-1), val_buf.reshape(-1)
 
-        stats = {"pg": [], "v": [], "ent": [], "kl": [], "clipfrac": []}
+        stats = {"pg": [], "v": [], "ent": [], "kl": [], "clipfrac": [], "prior_kl": []}
+        # VPT decays rho by a fixed factor each iteration, so the prior protects
+        # the policy's skills early and stops constraining it later: "This method
+        # protects policy skills in early iterations while guaranteeing that the
+        # policy can eventually maximize the reward function."
+        rho = args.kl_coef * args.kl_decay ** (update - 1)
         for _epoch in range(args.epochs):
             order = torch.randperm(batch, device=device)
             for s in range(0, batch, mb):
@@ -444,6 +486,24 @@ def main(argv=None) -> int:
                 )
                 ent = entropy.mean()
                 loss = pg - args.ent * ent + args.vf * v_loss
+                prior_kl = torch.zeros((), device=device)
+                if prior is not None:
+                    op = b_actions[idx][:, 0]
+                    op_logits, op_mask, arg_logits, pad = policy.head_logits(
+                        f, b_masks[idx], op
+                    )
+                    with torch.no_grad():
+                        pf = features(prior, {k: v[idx] for k, v in flat.items()})
+                        p_op, _, p_arg, _ = prior.head_logits(pf, b_masks[idx], op)
+                    # The joint KL of a factored head is KL(op) plus the KL of
+                    # the arguments under each op, weighted by the prior. The
+                    # second term is taken at the op the rollout actually chose,
+                    # which is one sample of that expectation.
+                    prior_kl = (
+                        masked_kl(p_op, op_logits, op_mask)
+                        + masked_kl(p_arg, arg_logits, pad).sum(-1)
+                    ).mean()
+                    loss = loss + rho * prior_kl
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 nn.utils.clip_grad_norm_(policy.parameters(), args.max_grad_norm)
@@ -454,6 +514,7 @@ def main(argv=None) -> int:
                     stats["ent"].append(ent.detach())
                     stats["kl"].append(((ratio - 1) - ratio_log).mean())
                     stats["clipfrac"].append(((ratio - 1).abs() > args.clip).float().mean())
+                    stats["prior_kl"].append(prior_kl.detach())
 
         updated = clock()
         loss_means = torch.stack([torch.stack(v).mean() for v in stats.values()]).tolist()
@@ -513,15 +574,16 @@ def main(argv=None) -> int:
     log.close()
     if args.no_final:
         return 0
-    # The final report: both splits, sampled and greedy, from the best checkpoint.
+    # The final report: both splits, in all three decision modes, from the best
+    # checkpoint. `greedy` is pure argmax and is kept because it is the one that
+    # exposes cycling; `epsilon` is the honest deterministic-ish number.
     policy.load_state_dict(torch.load(out / "best.pt", weights_only=True))
     policy.eval()
+    modes = (("sampled", False, 0.0), ("epsilon", True, args.eval_epsilon), ("greedy", True, 0.0))
     final = {
-        f"{split}_{'greedy' if greedy else 'sampled'}": evaluate(
-            policy, device, args, split, 512, greedy
-        )
+        f"{split}_{name}": evaluate(policy, device, args, split, 512, greedy, epsilon)
         for split in ("train", "test")
-        for greedy in (False, True)
+        for name, greedy, epsilon in modes
     }
     (out / "final.json").write_text(json.dumps(final, indent=2), "utf-8")
     export(policy, out / "policy.ts")
