@@ -55,6 +55,33 @@ from fsim.vec import VecEnv, obs_layout, unpack_grid
 ROOT = Path(__file__).resolve().parent
 KEYS = ("grid", "entities", "entity_mask", "self", "inventory", "goal")
 
+#: Backplay's curriculum (Resnick et al. 2018, arXiv:1807.06919): a
+#: demonstration start is drawn from a window measured backwards from the end
+#: of the build, and the window slides back on a fixed schedule -- here at
+#: fractions of the training budget. The last window is past any build, so
+#: every episode starts at the scene's own start. Their practical findings:
+#: advancing too fast hurts and advancing slowly does not, adaptive
+#: success-thresholded advancement was slower than a fixed schedule, and a dip
+#: in success when the window reaches the start is expected.
+BACKPLAY_SCHEDULE = (
+    (0.00, (0, 2)),
+    (0.10, (1, 4)),
+    (0.20, (2, 6)),
+    (0.30, (4, 9)),
+    (0.40, (6, 13)),
+    (0.50, (9, 20)),
+    (0.65, (99, 99)),
+)
+
+
+def backplay_window(progress: float) -> tuple[int, int]:
+    """The window for this fraction of the training budget."""
+    window = BACKPLAY_SCHEDULE[0][1]
+    for at, value in BACKPLAY_SCHEDULE:
+        if progress >= at:
+            window = value
+    return window
+
 
 def parse(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -76,6 +103,12 @@ def parse(argv=None) -> argparse.Namespace:
     p.add_argument("--max-grad-norm", type=float, default=0.5)
     p.add_argument("--shaping", choices=("none", "potential", "progress", "both"), default="none")
     p.add_argument("--start-curriculum", type=float, default=0.0)
+    p.add_argument(
+        "--demo-schedule",
+        choices=("uniform", "backplay"),
+        default="uniform",
+        help="uniform: a stage drawn uniformly; backplay: a window that slides back",
+    )
     p.add_argument(
         "--demo-starts",
         type=float,
@@ -326,6 +359,8 @@ def main(argv=None) -> int:
 
     for update in range(1, updates + 1):
         began = clock()
+        if args.demo_schedule == "backplay":
+            env.demo_window = backplay_window((update - 1) / updates)
         frac = 1.0 - (update - 1) / updates
         for group in optimizer.param_groups:
             group["lr"] = frac * args.lr
@@ -407,6 +442,7 @@ def main(argv=None) -> int:
         demo = [e for e in episodes[-2048:] if e["start"] != "scene"][-512:]
         row = {
             "update": update,
+            "demo_window": list(env.demo_window) if env.demo_window else None,
             "time_rollout": round(rolled - began, 4),
             "time_update": round(updated - rolled, 4),
             "steps": steps,
