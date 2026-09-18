@@ -8,6 +8,13 @@ with twenty coal. It reads argument indices off the state the way the C
 domains lay them out (`rl_domains_build`), and `test_expert.py` checks that
 what it builds is a line that passes verification.
 
+That arrangement is one of many. `layouts` enumerates every drill anchor the
+patch's ore admits and all four turns of the layout about the drill's centre,
+and `choose_layout` draws one per episode. Building the same pose every time
+teaches a policy that pose rather than the task: measured, a policy trained on
+the single canonical layout reaches 84% on unseen scenes of the shape it was
+trained on and 0% once a wall stands where it expects to stand.
+
 It exists for one purpose: **demonstration starts**. Resetting an episode to a
 state partway along a demonstration, and letting the policy take over from
 there, is how Salimans & Chen (2018) learned Montezuma's Revenge from a single
@@ -47,6 +54,91 @@ STAGES = ("walked", "drill", "furnace", "drill_fuelled", "furnace_fuelled")
 
 def _floor_tile(v: int) -> int:
     return v // TILE  # Python floor division matches the C floordiv
+
+
+def _turn(offset: tuple[float, float], quarters: int) -> tuple[float, float]:
+    """`offset` turned `quarters` right angles clockwise (y grows southwards)."""
+    x, y = offset
+    for _ in range(quarters % 4):
+        x, y = -y, x
+    return x, y
+
+
+def _turn_direction(direction: int, quarters: int) -> int:
+    """A catalog direction (1 north, 2 east, 3 south, 4 west), turned clockwise."""
+    return (direction - 1 + quarters) % 4 + 1
+
+
+def _ore_tiles(env) -> set[tuple[int, int]]:
+    return {
+        (env.resources[i].tx, env.resources[i].ty)
+        for i in range(env.resource_count)
+        if env.resources[i].alive
+    }
+
+
+def _taken_tiles(env) -> set[tuple[int, int]]:
+    """Tiles nothing can be built on or stood in: obstacles and other machines."""
+    taken = {(env.blocked[2 * k], env.blocked[2 * k + 1]) for k in range(env.blocked_count)}
+    for k in range(env.seen_count):
+        e = env.entities[env.seen[k].entity]
+        if e.kind != K_PILE:
+            taken.add((_floor_tile(e.pos.x), _floor_tile(e.pos.y)))
+    return taken
+
+
+def _square(anchor: tuple[int, int]) -> list[tuple[int, int]]:
+    """The four tiles of a 2x2 machine anchored at its north-west tile."""
+    ax, ay = anchor
+    return [(ax, ay), (ax + 1, ay), (ax, ay + 1), (ax + 1, ay + 1)]
+
+
+def layouts(rl, patch) -> list[tuple[tuple[int, int], int]]:
+    """Every `(drill anchor, quarter-turns)` this scene can be built with.
+
+    The drill's four tiles must all be ore, the furnace's four and the tile the
+    builder stands in must be clear, and both machines must fall inside the
+    placement window around that tile. The canonical layout -- the drill on the
+    patch centre, the furnace due south, the builder standing to the east -- is
+    FactorioRL's `_build_at` reference, and comes first.
+    """
+    env = rl.env
+    ore, taken = _ore_tiles(env), _taken_tiles(env)
+    canonical = (math.floor(patch[0]), math.floor(patch[1]))
+    anchors = sorted(a for a in ore | {canonical} if set(_square(a)) <= ore)
+    anchors.sort(key=lambda a: (a != canonical, a))
+    found = []
+    for anchor in anchors:
+        centre = (anchor[0] + 1, anchor[1] + 1)
+        for quarters in range(4):
+            fx, fy = _turn((0.0, 2.0), quarters)
+            furnace = (round(centre[0] + fx) - 1, round(centre[1] + fy) - 1)
+            sx, sy = _turn((3.5, 0.5), quarters)
+            stand = (math.floor(centre[0] + sx), math.floor(centre[1] + sy))
+            if any(t in taken for t in _square(furnace) + [stand]):
+                continue
+            if any(
+                abs(t[0] - stand[0]) > PLACEMENT_RADIUS or abs(t[1] - stand[1]) > PLACEMENT_RADIUS
+                for t in (anchor, furnace)
+            ):
+                continue
+            found.append((anchor, quarters))
+    return found
+
+
+def choose_layout(rl, patch, rng=None) -> tuple[tuple[int, int], int]:
+    """One layout for this scene: the canonical one, or a random valid one.
+
+    Drawing a layout per episode is what stops demonstration starts teaching a
+    single build pose. A policy trained on one pose memorises it, and any scene
+    that blocks that pose -- an obstacle standing on it, an ore patch whose
+    shape moves it -- leaves that policy with nothing to fall back on.
+    """
+    canonical = ((math.floor(patch[0]), math.floor(patch[1])), 0)
+    if rng is None:
+        return canonical
+    found = layouts(rl, patch)
+    return rng.choice(found) if found else canonical
 
 
 def placement_index(rl, tx: int, ty: int) -> int:
@@ -123,19 +215,30 @@ def move_vector(rl, goal: tuple[float, float], tolerance: float = 0.3) -> list[i
 class Builder:
     """Drives one `fsim_rl` through the build, one decision at a time."""
 
-    def __init__(self, rl, patch: tuple[float, float], stop: int = len(STAGES)) -> None:
+    def __init__(self, rl, patch: tuple[float, float], stop: int = len(STAGES), layout=None) -> None:
         self.rl = rl
         self.stop = stop  # how many stages to complete
-        # The ore tile at the patch centre: its drill covers four ore tiles on
-        # every train-family patch.
-        tile = (math.floor(patch[0]), math.floor(patch[1]))
-        self.drill_centre = (tile[0] + 1, tile[1] + 1)
-        self.standing = (self.drill_centre[0] + 3.5, self.drill_centre[1] + 0.5)
+        anchor, quarters = layout if layout is not None else choose_layout(rl, patch)
+        self.quarters = quarters
+        # The drill covers four ore tiles; everything else is placed relative
+        # to the point at its centre, turned with it.
+        self.drill_anchor = anchor
+        self.drill_centre = (anchor[0] + 1, anchor[1] + 1)
+        fx, fy = _turn((0.0, 2.0), quarters)
+        self.furnace_centre = (self.drill_centre[0] + fx, self.drill_centre[1] + fy)
+        self.furnace_anchor = (
+            round(self.furnace_centre[0]) - 1,
+            round(self.furnace_centre[1]) - 1,
+        )
+        sx, sy = _turn((3.5, 0.5), quarters)
+        self.standing = (self.drill_centre[0] + sx, self.drill_centre[1] + sy)
+        self.drill_facing = _turn_direction(DIR_SOUTH, quarters)
+        self.furnace_facing = _turn_direction(DIR_NORTH, quarters)
         self.stage = 0  # index into STAGES of the next stage to finish
 
     def next_vector(self) -> list[int] | None:
         """The next decision, or None when the build is complete."""
-        rl, cx, cy = self.rl, *self.drill_centre
+        rl = self.rl
         if self.stage == 0:
             vector = move_vector(rl, self.standing)
             if vector is not None:
@@ -145,30 +248,32 @@ class Builder:
             return None
         if self.stage == 1:
             self.stage = 2
-            return [OP_PLACE, 0, placement_index(rl, cx - 1, cy - 1), DIR_SOUTH, ITEM_DRILL, 0]
+            slot = placement_index(rl, *self.drill_anchor)
+            return [OP_PLACE, 0, slot, self.drill_facing, ITEM_DRILL, 0]
         if self.stage == 2:
             self.stage = 3
-            return [OP_PLACE, 0, placement_index(rl, cx - 1, cy + 1), DIR_NORTH, ITEM_FURNACE, 0]
+            slot = placement_index(rl, *self.furnace_anchor)
+            return [OP_PLACE, 0, slot, self.furnace_facing, ITEM_FURNACE, 0]
         if self.stage == 3:
             self.stage = 4
-            return [OP_GIVE, target_index(rl, K_DRILL, (cx, cy)), 0, 0, ITEM_COAL, AMOUNT_20]
+            target = target_index(rl, K_DRILL, self.drill_centre)
+            return [OP_GIVE, target, 0, 0, ITEM_COAL, AMOUNT_20]
         if self.stage == 4:
             self.stage = 5
-            target = target_index(rl, K_FURNACE, (cx, cy + 2))
+            target = target_index(rl, K_FURNACE, self.furnace_centre)
             return [OP_GIVE, target, 0, 0, ITEM_COAL, AMOUNT_20]
         return None
 
 
-def plan_length(rl, patch) -> int:
+def plan_length(rl, patch, layout=None) -> int:
     """How many decisions the whole build takes from here, without stepping.
 
     The walk is a deterministic function of the character's position, so its
-    length is arithmetic: no scene of a training family has anything between
-    the start and the standing spot. Four build decisions follow.
+    length is arithmetic: no scene the builder demonstrates has anything
+    between the start and the standing spot. Four build decisions follow.
     """
     x, y = rl.env.char_pos.x / TILE, rl.env.char_pos.y / TILE
-    tile = (math.floor(patch[0]), math.floor(patch[1]))
-    goal = (tile[0] + 1 + 3.5, tile[1] + 1 + 0.5)
+    goal = Builder(rl, patch, layout=layout).standing
     stride = 38 / 256
     walk = 0
     while walk < 200:
@@ -189,9 +294,9 @@ def plan_length(rl, patch) -> int:
     return walk + 4
 
 
-def advance_decisions(rl, patch, count: int, step) -> int:
+def advance_decisions(rl, patch, count: int, step, layout=None) -> int:
     """Run the first `count` decisions of the build; returns how many ran."""
-    builder = Builder(rl, patch)
+    builder = Builder(rl, patch, layout=layout)
     taken = 0
     while taken < count:
         vector = builder.next_vector()
@@ -201,14 +306,14 @@ def advance_decisions(rl, patch, count: int, step) -> int:
     return taken
 
 
-def advance_to(rl, patch, stage: str, step) -> int:
+def advance_to(rl, patch, stage: str, step, layout=None) -> int:
     """Run the builder until `stage` is complete; returns decisions taken.
 
     `step(vector)` performs one decision (the caller's, so a batched
     environment can keep its own bookkeeping) and returns whether the episode
     ended. Stops early if it does.
     """
-    builder = Builder(rl, patch, stop=STAGES.index(stage) + 1)
+    builder = Builder(rl, patch, stop=STAGES.index(stage) + 1, layout=layout)
     taken = 0
     while (vector := builder.next_vector()) is not None:
         taken += 1
@@ -217,9 +322,9 @@ def advance_to(rl, patch, stage: str, step) -> int:
     return taken
 
 
-def run_to_completion(rl, patch, max_waits: int = 1000) -> None:
+def run_to_completion(rl, patch, max_waits: int = 1000, layout=None) -> None:
     """The whole build, then waits until the episode ends."""
-    builder = Builder(rl, patch)
+    builder = Builder(rl, patch, layout=layout)
     ints = ffi.new("int32_t[6]")
 
     def step(vector):

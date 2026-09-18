@@ -20,6 +20,47 @@ def test_builder_solves_training_scenes(seed):
     assert env.rl.decode_failures == 0
 
 
+@pytest.mark.parametrize("seed", range(6))
+def test_every_layout_the_builder_may_draw_builds_a_line(seed):
+    """The randomised build site is not a source of broken demonstrations."""
+    family, scene = scenes.sample("construct_smelting_line", "train", seed)
+    env = RlEnv()
+    env.reset("construct_smelting_line", scene)
+    found = expert.layouts(env.rl, scene["markers"]["patch"])
+    assert len(found) >= 8, (family, len(found))
+    assert found[0] == (
+        (int(scene["markers"]["patch"][0] // 1), int(scene["markers"]["patch"][1] // 1)),
+        0,
+    ), "the canonical layout comes first"
+    for layout in found:
+        env = RlEnv()
+        env.reset("construct_smelting_line", scene)
+        expert.run_to_completion(env.rl, scene["markers"]["patch"], layout=layout)
+        assert env.rl.success, (family, layout)
+        assert env.rl.decode_failures == 0, (family, layout)
+
+
+def test_all_four_turns_are_available_and_distinct():
+    _, scene = scenes.sample("construct_smelting_line", "train", 3)
+    env = RlEnv()
+    env.reset("construct_smelting_line", scene)
+    found = expert.layouts(env.rl, scene["markers"]["patch"])
+    assert {quarters for _, quarters in found} == {0, 1, 2, 3}
+    patch = scene["markers"]["patch"]
+    anchor = found[0][0]
+    # The four turns of one anchor put the builder on four different sides of
+    # the drill, facing the way the drill's output must travel.
+    sides = set()
+    for quarters in range(4):
+        builder = expert.Builder(env.rl, patch, layout=(anchor, quarters))
+        cx, cy = builder.drill_centre
+        sides.add((builder.standing[0] > cx, builder.standing[1] > cy))
+        assert builder.drill_facing == expert._turn_direction(expert.DIR_SOUTH, quarters)
+    assert len(sides) == 4
+    stands = {expert.Builder(env.rl, patch, layout=x).standing for x in found}
+    assert len(stands) > len(found) // 2
+
+
 def test_stages_raise_the_line_potential_in_order():
     _, scene = scenes.sample("construct_smelting_line", "train", 5)
     bands = {"walked": (0.09, 0.1), "drill": (0.29, 0.3), "furnace": (0.59, 0.6),
