@@ -175,6 +175,62 @@ also froze. The remaining suspect is the value loss weight: 2.0 on a trunk
 shared with the policy head. The flags stay in the trainer, all defaulting to
 this trainer's own values.
 
+## What the policy had actually learned
+
+Rolling the 77.5% policy on the held-out family shows it walking to the patch
+and then not building: it reaches the patch on 94-100% of episodes and places
+something on 4-9% of them. `place` is 16% of its decisions on a training scene
+and 1.7% on a held-out one. The held-out family changes two things at once, so
+each was rolled alone, 128 episodes each:
+
+| test-split scenes | success | reached the patch | built a drill | `place` share |
+|---|---|---|---|---|
+| neither change (7x7 patch, no wall) | **83.6%** | 86.7% | 86.7% | 13.3% |
+| the narrow patch alone | 0.8% | 84.4% | 84.4% | 8.6% |
+| the wall alone | 0.0% | 93.8% | 8.6% | 1.2% |
+| both, the real held-out family | 0.0% | 100% | 3.9% | 1.7% |
+
+**It generalises across unseen scene seeds perfectly well.** 83.6% on seeds it
+never trained on. What breaks it is the geometry, and the wall breaks it
+completely -- though the wall is three tiles from the ore and never stands on
+the canonical build site. What it does is put an entity on the map, and until
+then the policy had never seen one before placing its own.
+
+The cause is in `fsim/expert.py`: the builder stood in one place and built one
+arrangement, and half of every episode resumed one of its demonstrations. The
+policy learned that pose, not the task. Backplay did not make generalisation
+worse in any interesting sense -- it made the policy far better at copying a
+demonstration, and there was only one demonstration to copy.
+
+Three things follow, and they are the fixes.
+
+**The builder builds anywhere now.** `expert.layouts` enumerates every drill
+anchor the ore admits and all four turns of the layout about the drill's
+centre -- 144 on a training patch, each of which builds a line that verifies --
+and one is drawn per episode.
+
+**There are two more training families.** `varied_patch` draws the patch's
+dimensions and position; `cluttered_patch` scatters short walls in the ring
+just off the ore, which is the only way the policy meets an entity it did not
+build. `obstructed_patch` is untouched, and neither training family reproduces
+it, so the held-out family becomes a test of the two variations together.
+Cobbe et al. (2019) found agents overfitting CoinRun with 16,000 training
+levels; this task had two families and four discrete offsets.
+
+**The evaluation reports an epsilon.** The task is deterministic, so an argmax
+policy that enters a cycle never leaves it, and this one emits a single action
+for the last 200 decisions of an episode -- 1.1 distinct actions, against 71.4
+when sampling. Measured on the same checkpoint: sampled 78.9%, argmax 0.0%,
+epsilon 0.05 **28.1%**, epsilon 0.15 **45.3%**. Mnih et al. (2015) evaluated
+Atari with an epsilon of 0.05 to prevent exactly this. `train.py` now reports
+sampled, epsilon-greedy and argmax, and names the epsilon.
+
+The policy is also flat -- 0.26 probability on its own modal operation -- which
+is the entropy bonus still paying out once advantages shrink. `--prior` offers
+VPT's alternative: clone the builder (`tools/behaviour_clone.py`), then train
+with `rho * KL(prior, policy)`, rho decayed 0.9995 an update from 0.2, and no
+entropy bonus at all.
+
 ## Sources
 
 - Ng, Harada, Russell (1999). Policy invariance under reward transformations.
@@ -186,6 +242,8 @@ this trainer's own values.
 - Huang et al. (2021). Gym-muRTS. arXiv:2105.13807.
 - Salimans & Chen (2018). Learning Montezuma's Revenge from a single demonstration.
 - Florensa et al. (2017). Reverse curriculum generation for reinforcement learning. CoRL.
+- Cobbe et al. (2019). Quantifying generalization in RL. arXiv:1812.02341.
+- Mnih et al. (2015). Human-level control through deep RL. Nature 518.
 - Resnick et al. (2018). Backplay: man muss immer umkehren. arXiv:1807.06919.
 - Baker et al. (2022). Video PreTraining (VPT). arXiv:2206.11795.
 - PufferLib 5.0 `config/`; CleanRL `ppo_atari.py`, `ppo_multidiscrete_mask.py`.
