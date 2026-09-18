@@ -118,6 +118,12 @@ def parse(argv=None) -> argparse.Namespace:
     )
     p.add_argument("--kl-coef", type=float, default=0.2, help="VPT's rho")
     p.add_argument("--kl-decay", type=float, default=0.9995, help="rho's decay per update")
+    p.add_argument(
+        "--fixed-demo-layout",
+        action="store_true",
+        help="demonstrate the one canonical build pose rather than drawing one, "
+        "which is what produced a policy that memorised it (docs/shaping.md)",
+    )
     p.add_argument("--vf", type=float, default=0.5)
     p.add_argument(
         "--vf-clip",
@@ -375,6 +381,7 @@ def main(argv=None) -> int:
         demo_starts=args.demo_starts, compact=True, action_space=args.action_space,
         **rollout.memories(),
     )  # fmt: skip
+    env.demo_layouts = not args.fixed_demo_layout
 
     N, T = args.envs, args.horizon
     batch = N * T
