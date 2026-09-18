@@ -249,6 +249,43 @@ VPT's alternative: clone the builder (`tools/behaviour_clone.py`), then train
 with `rho * KL(prior, policy)`, rho decayed 0.9995 an update from 0.2, and no
 entropy bonus at all.
 
+## Drawing the target first
+
+Fuelling the furnace needs an operation, a target, an item and an amount to be
+right at once: one action in 22 x 3 x 15 x 4. Drawn independently of each
+other, a uniform policy finds it in 15% of six-hundred-step episodes, and a
+policy that has committed to anything else finds it almost never. Measured:
+`back0`, where the builder finishes the line and the policy need only not break
+it, reached 1.00 by four million steps while `back1`, one decision of the
+policy's own, sat at 0.00 for seven million.
+
+`--autoregressive` draws the target and then scores direction, item and amount
+conditioned on the row it named -- the entity's own embedding, not its index.
+Four seeds each, everything else identical, gated schedule:
+
+| held out | s1 | s2 | s3 | s4 | mean | spread |
+|---|---|---|---|---|---|---|
+| independent arguments | 66.0% | 73.4% | 24.6% | 75.8% | 60.0% | 51.2 |
+| **drawn in order** | **92.0%** | **85.5%** | **87.7%** | **82.0%** | **86.8%** | **10.0** |
+
+It moves the mean by 27 points and takes the spread from 51 points to 10: the
+worst autoregressive seed beats the best independent one. On the way there,
+`back1` reaches 0.39 at 4.1M steps instead of 6.5M and settles at 0.82 rather
+than 0.64.
+
+This is AlphaStar's arrangement -- "the action is sampled first, and then
+required parameters are sampled one by one from distributions conditioned on
+the selected action and previously sampled action parameters" -- and the shape
+of action Conditional Action Trees (arXiv:2104.07294) is about. FactorioRL's
+`parameterized.py` named it as the fix and called it blocked by stock sb3;
+this trainer is not stock sb3, and the blocker had not been true for some time.
+
+What it does not do is fix the masks. The item dimension is still a union over
+everything any operation could name, because the masks are built before the
+operation is drawn. Conditioning those on the chosen target is the other half
+of what Conditional Action Trees does, and it needs a change on the environment
+side of both repositories.
+
 ## Sources
 
 - Ng, Harada, Russell (1999). Policy invariance under reward transformations.
@@ -260,6 +297,8 @@ entropy bonus at all.
 - Huang et al. (2021). Gym-muRTS. arXiv:2105.13807.
 - Salimans & Chen (2018). Learning Montezuma's Revenge from a single demonstration.
 - Florensa et al. (2017). Reverse curriculum generation for reinforcement learning. CoRL.
+- Vinyals et al. (2019). Grandmaster level in StarCraft II (AlphaStar). Nature 575.
+- Bamford & Ovalle (2021). Generalising discrete action spaces with conditional action trees. arXiv:2104.07294.
 - Cobbe et al. (2019). Quantifying generalization in RL. arXiv:1812.02341.
 - Mnih et al. (2015). Human-level control through deep RL. Nature 518.
 - Resnick et al. (2018). Backplay: man muss immer umkehren. arXiv:1807.06919.
