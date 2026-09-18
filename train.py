@@ -105,10 +105,12 @@ class GatedBackplay:
     and move outwards from the ones already solved.
     """
 
-    def __init__(self, threshold: float = 0.5, minimum: int = 64) -> None:
+    def __init__(self, threshold: float = 0.5, minimum: int = 64, settle: int = 8) -> None:
         self.threshold = threshold
-        self.minimum = minimum  # episodes needed before the window may move
+        self.minimum = minimum  # episodes at the deepest cut before it may move
+        self.settle = settle  # updates to wait after moving, so the buffer refills
         self.index = 0
+        self.waited = settle
         self.advanced_at: list[int] = []
 
     @property
@@ -116,15 +118,32 @@ class GatedBackplay:
         return BACKPLAY_LADDER[self.index]
 
     def update(self, demo: list[dict], steps: int) -> tuple[int, int]:
-        """Read the recent demonstration episodes; widen if they are solved."""
+        """Read the recent demonstration episodes; widen if they are solved.
+
+        Judged on the *deepest* cut into the demonstration the window offers,
+        not on the average over it. Averaging is what the first version did,
+        and it read a window whose easiest start was solved 100% of the time
+        and whose next-easiest was solved 1% of the time as solved: one run
+        climbed from the first rung to the last in 400k steps having never
+        learned to make a single decision for itself.
+        """
         if self.index + 1 >= len(BACKPLAY_LADDER):
             return self.window
-        lo, hi = self.window
-        at_window = [e for e in demo if e["start"] != "scene"]
-        if len(at_window) >= self.minimum:
-            solved = float(np.mean([e["success"] for e in at_window]))
-            if solved >= self.threshold:
+        if self.waited < self.settle:  # the buffer still holds the old window
+            self.waited += 1
+            return self.window
+        cuts: dict[str, list[bool]] = {}
+        for episode in demo:
+            start = episode["start"]
+            if start.startswith("back"):
+                cuts.setdefault(start, []).append(episode["success"])
+        if not cuts:
+            return self.window
+        deepest = max(cuts, key=lambda name: int(name[4:]))
+        if len(cuts[deepest]) >= self.minimum:
+            if float(np.mean(cuts[deepest])) >= self.threshold:
                 self.index += 1
+                self.waited = 0
                 self.advanced_at.append(steps)
         return self.window
 
