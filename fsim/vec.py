@@ -148,6 +148,10 @@ class VecEnv:
         #: episode with a demonstration start runs all but `U[lo, hi]` of it.
         #: `None` draws a stage uniformly instead (Backplay's "Uniform").
         self.demo_window: tuple[int, int] | None = None
+        #: Draw the builder's layout per episode rather than always building
+        #: the one canonical arrangement. False reproduces the single-pose
+        #: demonstrations, which a policy memorises (`docs/shaping.md`).
+        self.demo_layouts: bool = True
         self.action_space = action_space
         self._step_vector = ffi.new("int32_t[6]")
 
@@ -240,16 +244,22 @@ class VecEnv:
         lib.fsim_rl_reset(rl, task, c_scene)
         start, taken = "scene", 0
         draw = random.Random(seed * 7 + 3)
-        if self.demo_starts and draw.random() < self.demo_starts:
+        # The builder walks in straight lines, so it can only demonstrate a
+        # scene with nothing in the way; an obstructed one starts from scratch.
+        obstructed = bool(scene["entities"])
+        if self.demo_starts and not obstructed and draw.random() < self.demo_starts:
             patch = scene["markers"]["patch"]
+            layout = expert.choose_layout(rl, patch, draw if self.demo_layouts else None)
             if self.demo_window is None:
                 start = draw.choice(expert.STAGES)
-                taken = expert.advance_to(rl, patch, start, self._demo_step(rl))
+                taken = expert.advance_to(rl, patch, start, self._demo_step(rl), layout)
             else:
-                length = expert.plan_length(rl, patch)
+                length = expert.plan_length(rl, patch, layout)
                 lo, hi = self.demo_window
                 back = draw.randint(min(lo, length), min(hi, length))
-                taken = expert.advance_decisions(rl, patch, length - back, self._demo_step(rl))
+                taken = expert.advance_decisions(
+                    rl, patch, length - back, self._demo_step(rl), layout
+                )
                 start = "scene" if back >= length else f"back{back}"
         self._encode(self.rls[i], ffi.addressof(self._obs_c, i))
         lib.fsim_rl_mask(self.rls[i], ffi.addressof(self._masks_c, i * lib.RL_MASK_SIZE))
