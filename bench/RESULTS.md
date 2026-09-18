@@ -236,3 +236,31 @@ Two things that will not help, measured rather than assumed:
 - **`torch.compile`** would be the obvious way to fuse the same three passes
   without writing CUDA, and it cannot run here: there is no working Triton on
   this platform.
+
+## On the desktop, where the runs happen (2026-09-19, RTX 4060, 512 envs)
+
+Interleaved and repeated, so a warming machine could not pass for a result.
+
+| | overall steps/s | update s |
+|---|---|---|
+| epochs 2, kernel off | 26,804 / 26,798 | 0.907 |
+| epochs 2, kernel on | 26,528 / 26,538 | 0.914 |
+| epochs 1, kernel off | **41,904 / 41,905** | 0.467 |
+| epochs 1, kernel on | 41,756 / 41,880 | 0.466 |
+
+**`--epochs 1` is worth 1.56x**, which is the arithmetic: the update is 16
+minibatch steps or 8, and the rollout does not move (103k steps/s either way).
+Whether it *learns* as well per environment step is a separate question this
+does not answer.
+
+**The fused kernel is worth nothing here, and slightly less than nothing.**
+26,804 -> 26,528, repeated. On the laptop's 3050 it took 14.4% off the policy
+step in isolation, measured carefully and interleaved; on the 4060 that gain
+does not survive into the trainer. The most likely reason is the one the
+isolated benchmark could not see: the 4060 has half again the memory bandwidth,
+so the three passes the kernel replaces are cheaper there to begin with, and
+what is left does not pay for the extra launch.
+
+It stays opt-in and stays off. The lesson is the one this file keeps
+recording: a kernel measured on one card, in isolation, against a microbenchmark
+is not a speedup until it is measured in the trainer on the card that runs it.
