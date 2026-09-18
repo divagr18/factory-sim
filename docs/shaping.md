@@ -159,6 +159,24 @@ sparse long-horizon task: it is exploration pressure that never expires, and
 they replace it outright with a KL term to a frozen behaviour-cloned prior,
 decayed 0.9995 per iteration from 0.2.
 
+## The entropy bonus was not the problem
+
+The policy's entropy rising as it learned looked like the bonus outweighing a
+shrinking advantage, so the coefficient was swept at 40M steps, everything else
+held at the Backplay configuration:
+
+| `--ent` | train sampled | train argmax | held out |
+|---|---|---|---|
+| 0.01 (the default) | **77.5%** | 0.4% | 0.0% |
+| 0.003 | 56.4% | 2.9% | 0.0% |
+| 0.001 | 63.5% | 0.0% | 1.8% |
+| 0.0 | 37.9% | 0.2% | 0.0% |
+
+Lowering it costs success and buys almost no sharpness: the argmax policy stays
+near zero at every value, because what breaks it is cycling in a deterministic
+task, not the width of the distribution. The default stays 0.01, and the
+epsilon in the evaluation is what makes a near-deterministic policy readable.
+
 ## What PufferLib's sparse settings do here
 
 PufferLib 5.0's tuned configs for sparse, long-horizon tasks differ from this
@@ -171,8 +189,8 @@ potential stuck at its initial 0.25, and a per-update KL of 1e-4 against the
 
 Advantage normalisation is not the cause on its own — an arm that dropped only
 that flag froze the same way, and an arm that kept it and took the other three
-also froze. The remaining suspect is the value loss weight: 2.0 on a trunk
-shared with the policy head. The flags stay in the trainer, all defaulting to
+also froze. An arm taking the value loss weight alone -- 2.0 on a trunk shared with the
+policy head -- froze the same way, which identifies it. The flags stay in the trainer, all defaulting to
 this trainer's own values.
 
 ## What the policy had actually learned
