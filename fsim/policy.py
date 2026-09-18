@@ -33,6 +33,8 @@ import copy
 import torch
 from torch import nn
 
+from fsim import patchify
+
 NVEC = (22, 33, 122, 5, 15, 4)
 ARG_NVEC = NVEC[1:]
 OPS = NVEC[0]
@@ -100,6 +102,10 @@ class Extractor(nn.Module):
         #: v2: also return the per-row entity embeddings and the placement
         #: crop, flattened after the features, for the pointer and spatial heads.
         self.expose: bool = False
+        #: The fused grid prologue (`fsim/patchify.py`), looked up on the first
+        #: forward that could use one so a CPU run never builds a kernel.
+        self.fused = None
+        self.fused_tried: bool = False
 
     def _grid(self, grid: torch.Tensor) -> torch.Tensor:
         """`grid_net`, with its first layer computed as what it is.
@@ -121,6 +127,38 @@ class Extractor(nn.Module):
                 h = layer(h)
         return h
 
+    @torch.jit.unused
+    def _patched(self, grid: torch.Tensor):
+        """`(g, crop)` from the fused kernel, or `(None, None)` without it.
+
+        The kernel builds the projection's input straight from the bytes, so
+        the whole grid is never materialised in the compute dtype -- only the
+        13x13 the crop reads. What it produces is bit-identical to what the
+        portable path builds; the features that come out differ in the last
+        bfloat16 places all the same, because the matmul now reads a contiguous
+        tensor rather than a permuted view and cuBLAS accumulates it in a
+        different order. That is the size of difference a library version bump
+        makes, not a change of model.
+        """
+        if not self.fused_tried:
+            self.fused_tried = True
+            if grid.is_cuda and grid.dtype == torch.uint8:
+                self.fused = patchify.load()
+        if self.fused is None or not grid.is_cuda or grid.dtype != torch.uint8:
+            return None, None
+        first = self.grid_net[0]
+        patches = self.fused.patchify(grid, 4)
+        batch, cells = grid.shape[0], grid.shape[2] // 4
+        h = torch.nn.functional.linear(
+            patches.to(self.input_dtype), first.weight.flatten(1), first.bias
+        )
+        h = h.view(batch, cells, cells, -1).permute(0, 3, 1, 2)
+        for index, layer in enumerate(self.grid_net):
+            if index >= 1:
+                h = layer(h)
+        crop = grid[:, :, 26:39, 26:39].to(self.input_dtype).div_(255.0)
+        return h, crop
+
     def forward(self, grid, entities, entity_mask, self_, inventory, goal):
         # Every grid value is read at 1/255 resolution, so the float grid the
         # engine's encoder produces and the byte grid a trainer ships to the GPU
@@ -128,13 +166,18 @@ class Extractor(nn.Module):
         # straight to the compute dtype: at a 4096-sample minibatch the grid is
         # 104M elements, and every extra full-size pass over it showed up in the
         # update's wall time.
-        if grid.dtype == torch.uint8:
-            grid = grid.to(self.input_dtype)
-        else:
-            grid = torch.round(grid * 255.0).to(self.input_dtype)
-        grid = grid.div_(255.0)
-        g = self._grid(grid)
-        c = self.crop_net(grid[:, :, 26:39, 26:39])
+        g, crop_raw = None, None
+        if not torch.jit.is_scripting():  # an exported policy carries no kernel
+            g, crop_raw = self._patched(grid)
+        if g is None:
+            if grid.dtype == torch.uint8:
+                grid = grid.to(self.input_dtype)
+            else:
+                grid = torch.round(grid * 255.0).to(self.input_dtype)
+            grid = grid.div_(255.0)
+            g = self._grid(grid)
+            crop_raw = grid[:, :, 26:39, 26:39]
+        c = self.crop_net(crop_raw)
         e = self.entity_net(entities)
         mask = entity_mask.float().unsqueeze(-1)
         counts = mask.sum(dim=1).clamp(min=1.0)
@@ -146,8 +189,7 @@ class Extractor(nn.Module):
         if not self.expose:
             return f
         rows = (e * mask).flatten(1)
-        crop = grid[:, :, 26:39, 26:39].to(f.dtype).flatten(1)
-        return torch.cat([f, rows, crop], dim=1)
+        return torch.cat([f, rows, crop_raw.to(f.dtype).flatten(1)], dim=1)
 
 
 def _layer(i: int, o: int, std: float = 2**0.5) -> nn.Linear:

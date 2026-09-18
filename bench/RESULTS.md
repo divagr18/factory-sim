@@ -195,3 +195,44 @@ episodes are 600 steps, so the builder's per-reset cost -- enumerating the
 scene's layouts, 0.345 ms -- is about 2% of the rollout. The v2 action space is
 *faster* to step than v1 (0.62 ms against 0.68 ms per 64-environment step),
 so the entity-table ordering costs nothing.
+
+## A fused kernel for the grid prologue (2026-09-18)
+
+`fsim/patchify.py`. The extractor's first layer is a 4x4 stride-4 projection,
+and reaching its input costs three full passes over a 104M-element tensor:
+convert to bfloat16, scale by 1/255, unshuffle and permute and copy. One kernel
+does all three, reading the 65x65 grid where it already lies:
+
+| at batch 4096 | ms |
+|---|---|
+| convert + scale + unshuffle + permute | 7.93 |
+| the kernel, strided read of the 65x65 | **1.94** |
+| the kernel on a contiguous 64x64 copy | 1.92, plus 2.17 for the copy |
+
+What it writes is **bit-identical** to what the portable path builds, at every
+batch size tested and at the extremes (0, 1, 254, 255). The features that come
+out of the extractor are not: feeding the *same* values to the matmul as a
+contiguous tensor rather than a permuted view changes the result by up to 0.125
+on logits of order 10, because cuBLAS accumulates it in a different order. That
+is a library-version-sized difference, not a change of model, and the kernel is
+opt-in (`FSIM_FUSED_GRID=1`) partly so that it never lands in the middle of a
+comparison.
+
+Measured on the policy step alone, interleaved within one process: 65.44 and
+66.90 ms without, 55.65 and 57.68 ms with -- **14.4% faster**.
+
+**The whole-trainer number is not yet trustworthy.** Four interleaved runs gave
+21724, 17715, 12837 and 7196 update samples/s in that order: the kernel wins
+within each round, but throughput falls monotonically across them, which is
+this laptop thermally throttling after an hour of benchmarking rather than
+anything about the kernel. It needs re-measuring on the desktop.
+
+Two things that will not help, measured rather than assumed:
+
+- **A bigger minibatch does nothing.** 1024 -> 54187 samples/s, 2048 -> 59792,
+  4096 -> 62800, 8192 -> 62187, 16384 -> 61987. The GPU is saturated at 4096,
+  which is what the training configuration already uses. Larger minibatches are
+  free to try for *learning* reasons; they are not a throughput lever.
+- **`torch.compile`** would be the obvious way to fuse the same three passes
+  without writing CUDA, and it cannot run here: there is no working Triton on
+  this platform.
