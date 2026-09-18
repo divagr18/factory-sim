@@ -180,11 +180,16 @@ def parse(argv=None) -> argparse.Namespace:
     p.add_argument("--kl-coef", type=float, default=0.2, help="VPT's rho")
     p.add_argument("--kl-decay", type=float, default=0.9995, help="rho's decay per update")
     p.add_argument(
-        "--autoregressive",
-        action="store_true",
-        help="draw the target first and score direction, item and amount "
-        "conditioned on it, instead of drawing all five arguments independently",
+        "--independent-arguments",
+        dest="autoregressive",
+        action="store_false",
+        help="draw all five arguments at once instead of drawing the target "
+        "first and scoring the rest conditioned on it. Measured over four seeds "
+        "each, drawing them in order moved held-out success from 60.0%% to "
+        "86.8%% and took the spread from 51 points to 10 (docs/shaping.md)",
     )
+    p.add_argument("--autoregressive", dest="autoregressive", action="store_true")
+    p.set_defaults(autoregressive=True)
     p.add_argument(
         "--fixed-demo-layout",
         action="store_true",
