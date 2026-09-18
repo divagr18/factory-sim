@@ -12,6 +12,10 @@ CleanRL's layout (one file, one loop, no framework) with PufferLib's scale
 * Clipped surrogate and clipped value loss, advantage normalisation per
   minibatch, gradient-norm clipping and a linearly annealed learning rate: the
   CleanRL `ppo_atari` defaults (clip 0.2 as Huang et al. use for masked PPO).
+  PufferLib's tuned configs for sparse, long-horizon tasks differ: horizon
+  128-256, minibatch 8192-65536, vf 2-6, lambda 0.8-0.94, and no advantage
+  normalisation. --horizon, --minibatches, --vf, --vf-clip, --lam and
+  --no-adv-norm exist to test that.
 * Entropy 0.01 (CleanRL, Huang et al.) rather than PufferLib's 0.001: the masks
   already remove most of the action space, and early exploration is the
   bottleneck here.
@@ -100,6 +104,20 @@ def parse(argv=None) -> argparse.Namespace:
     p.add_argument("--clip", type=float, default=0.2)
     p.add_argument("--ent", type=float, default=0.01)
     p.add_argument("--vf", type=float, default=0.5)
+    p.add_argument(
+        "--vf-clip",
+        type=float,
+        default=None,
+        help="value-clip range; defaults to --clip. PufferLib's sparse configs "
+        "use 3.5-5 (effectively unclipped) against a 0.1-0.2 policy clip",
+    )
+    p.add_argument(
+        "--no-adv-norm",
+        action="store_true",
+        help="do not standardise advantages per minibatch, as PufferLib 5.0 does not: "
+        "on a terminal-only reward most segments carry no signal, and standardising "
+        "inflates those into full-size gradients",
+    )
     p.add_argument("--max-grad-norm", type=float, default=0.5)
     p.add_argument("--shaping", choices=("none", "potential", "progress", "both"), default="none")
     p.add_argument("--start-curriculum", type=float, default=0.0)
@@ -416,9 +434,11 @@ def main(argv=None) -> int:
                 ratio_log = logp - b_logp[idx]
                 ratio = ratio_log.exp()
                 a = b_adv[idx]
-                a = (a - a.mean()) / (a.std() + 1e-8)
+                if not args.no_adv_norm:
+                    a = (a - a.mean()) / (a.std() + 1e-8)
                 pg = torch.max(-a * ratio, -a * ratio.clamp(1 - args.clip, 1 + args.clip)).mean()
-                v_clipped = b_val[idx] + (value - b_val[idx]).clamp(-args.clip, args.clip)
+                vf_clip = args.clip if args.vf_clip is None else args.vf_clip
+                v_clipped = b_val[idx] + (value - b_val[idx]).clamp(-vf_clip, vf_clip)
                 v_loss = (
                     0.5 * torch.max((value - b_ret[idx]) ** 2, (v_clipped - b_ret[idx]) ** 2).mean()
                 )
