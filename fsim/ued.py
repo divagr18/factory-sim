@@ -336,7 +336,17 @@ def family_params(task: str, family: str, rng: random.Random) -> Level:
 @dataclass
 class _Entry:
     level: Level
+    #: The level's standing among the levels scored in the same rollout, in
+    #: [0, 1]. Not the raw positive value loss: that is measured against a
+    #: moving critic and drifts, so two raw scores from different updates are
+    #: not comparable -- and the buffer compares them directly when it decides
+    #: what to evict. Measured on a 20M-step run, raw score tracked *recency*
+    #: (r = -0.170 against staleness, recently scored levels averaging 0.0231
+    #: against 0.0168) more strongly than it tracked anything about the level:
+    #: walls r = -0.064, patch size r = +0.010, start distance r = +0.000.
     score: float = 0.0
+    #: What that standing was computed from, kept only for reporting.
+    raw: float = 0.0
     staleness: float = 0.0
     seen: int = 0
 
@@ -375,17 +385,18 @@ class LevelBuffer:
     def levels(self) -> list[Level]:
         return [entry.level for entry in self.entries]
 
-    def consider(self, level: Level, score: float) -> bool:
+    def consider(self, level: Level, score: float, raw: float | None = None) -> bool:
         """Offer a scored level. Kept if the buffer has room or it beats the
         worst level in it -- which is how ACCEL's edits compound: an edit only
         survives if it is harder than something already held."""
+        raw = score if raw is None else raw
         key = level.key()
         if key in self._index:
-            self.update(self._index[key], score)
+            self.update(self._index[key], score, raw)
             return False
         if len(self.entries) < self.capacity:
             self._index[key] = len(self.entries)
-            self.entries.append(_Entry(level, score))
+            self.entries.append(_Entry(level, score, raw))
             self.inserted += 1
             return True
         worst = min(range(len(self.entries)), key=lambda i: self.entries[i].score)
@@ -393,15 +404,16 @@ class LevelBuffer:
             self.rejected += 1
             return False
         del self._index[self.entries[worst].level.key()]
-        self.entries[worst] = _Entry(level, score)
+        self.entries[worst] = _Entry(level, score, raw)
         self._index[key] = worst
         self.inserted += 1
         return True
 
-    def update(self, index: int, score: float) -> None:
+    def update(self, index: int, score: float, raw: float | None = None) -> None:
         """A replayed level's score, after it was trained on."""
         entry = self.entries[index]
         entry.score = score
+        entry.raw = score if raw is None else raw
         entry.seen += 1
 
     def weights(self) -> list[float]:
@@ -437,10 +449,14 @@ class LevelBuffer:
         if not self.entries:
             return {"size": 0, "score_mean": 0.0, "score_max": 0.0, "walls_mean": 0.0}
         scores = [entry.score for entry in self.entries]
+        raws = [entry.raw for entry in self.entries]
         return {
             "size": len(self.entries),
             "score_mean": round(sum(scores) / len(scores), 5),
             "score_max": round(max(scores), 5),
+            # What the standings were computed from, so the drift that made
+            # raw scores incomparable stays visible.
+            "raw_mean": round(sum(raws) / len(raws), 5),
             # Complexity, as ACCEL reports it: does the curriculum get harder?
             "walls_mean": round(
                 sum(len(e.level.walls) for e in self.entries) / len(self.entries), 3
@@ -556,23 +572,44 @@ class Curriculum:
         self.generated += 1
         return random_level(self.task, self.rng)
 
+    @staticmethod
+    def standings(scores) -> list[float]:
+        """Each score's standing among the scores measured beside it, in [0, 1].
+
+        Raw positive value loss is measured against a critic that is still
+        learning, so its scale drifts: over one 20M-step run the mean rose
+        from 0.0031 to 0.0172. The buffer compares scores directly when it
+        decides what to keep, so on raw values it was ranking levels by *when*
+        they happened to be measured -- staleness correlated with score at
+        r = -0.170, more strongly than walls at -0.064 or patch size at
+        +0.010. A standing is comparable across updates because it is relative
+        to the levels that ran in the same one.
+        """
+        order = sorted(range(len(scores)), key=lambda i: scores[i])
+        out = [0.0] * len(scores)
+        last = len(scores) - 1
+        for rank, i in enumerate(order):
+            out[i] = rank / last if last else 0.5
+        return out
+
     def report(self, scores) -> None:
         """One score per slot, after the rollout that produced them.
 
-        A replayed level's score is updated in place. A proposed level is
-        offered to the buffer, and kept only if it is harder than something
-        already held -- which is how ACCEL's edits compound instead of
-        drifting.
+        A replayed level's standing is updated in place. A proposed level is
+        offered to the buffer, and kept only if it beats something already
+        held -- which is how ACCEL's edits compound instead of drifting, and
+        why the comparison has to be between comparable numbers.
         """
-        for i, score in enumerate(scores):
+        ranked = self.standings(list(scores))
+        for i, (standing, raw) in enumerate(zip(ranked, scores, strict=True)):
             level = self.slot_level[i]
             if level is None:
                 continue
             index = self.slot_index[i]
             if index is not None:
-                self.buffer.update(index, float(score))
+                self.buffer.update(index, float(standing), float(raw))
             else:
-                self.buffer.consider(level, float(score))
+                self.buffer.consider(level, float(standing), float(raw))
 
     def training_mask(self) -> list[bool]:
         """Which slots this rollout may train on, after levels were assigned."""
@@ -609,6 +646,7 @@ def save_buffer(buffer: LevelBuffer, path) -> None:
     rows = [
         {
             "score": entry.score,
+            "raw": entry.raw,
             "seen": entry.seen,
             "staleness": entry.staleness,
             "level": {
@@ -643,7 +681,7 @@ def load_buffer(path, seed: int = 0) -> LevelBuffer:
     for row in blob["levels"]:
         spec = dict(row["level"])
         spec["walls"] = tuple(tuple(w) for w in spec["walls"])
-        buffer.consider(Level(**spec), row["score"])
+        buffer.consider(Level(**spec), row["score"], row.get("raw", row["score"]))
         # consider() only carries the score. Restoring seen and staleness is
         # the point of loading at all: without them a resumed run reports
         # every level as never replayed and restarts the staleness clock.

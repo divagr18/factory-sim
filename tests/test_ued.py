@@ -307,3 +307,45 @@ def test_a_stuck_demonstration_is_rolled_back():
                     assert env.lengths[i] == 0, (start, env.lengths[i])
     finally:
         env.close()
+
+
+def test_a_standing_is_comparable_across_updates():
+    """Raw positive value loss is measured against a critic that is still
+    learning, so its scale drifts -- over one 20M-step run the mean rose from
+    0.0031 to 0.0172. The buffer compares scores directly when it decides what
+    to evict, so on raw values it ranked levels by *when* they were measured:
+    staleness correlated at r = -0.170, against -0.064 for wall count and
+    +0.010 for patch size."""
+    early = [0.10, 0.05, 0.02, 0.01]
+    late = [0.010, 0.005, 0.002, 0.001]
+    assert ued.Curriculum.standings(early) == ued.Curriculum.standings(late)
+    assert ued.Curriculum.standings(early) == [1.0, 2 / 3, 1 / 3, 0.0]
+
+
+def test_a_late_easy_level_does_not_evict_an_early_hard_one():
+    """The failure the standings fix: with raw scores, a level measured late
+    beat one measured early simply because the critic's error had grown."""
+    levels = ued.Curriculum("build_line", n=4, train_slots=0, mode="plr", seed=0)
+    for i in range(4):
+        levels.level_for(i, i)
+    levels.report([0.10, 0.05, 0.02, 0.01])  # an early rollout
+    hardest = levels.buffer.entries[0].level.key()
+
+    for i in range(4):
+        levels.level_for(i, 100 + i)
+    # A later rollout whose raw scores are all larger, but whose levels are
+    # no harder relative to each other.
+    levels.report([0.90, 0.85, 0.80, 0.75])
+
+    kept = {entry.level.key() for entry in levels.buffer.entries}
+    assert hardest in kept, "the hardest early level was evicted by a drifting scale"
+
+
+def test_the_raw_measurement_is_kept_for_reporting():
+    levels = ued.Curriculum("build_line", n=2, train_slots=0, mode="plr", seed=0)
+    for i in range(2):
+        levels.level_for(i, i)
+    levels.report([0.25, 0.75])
+    raws = sorted(entry.raw for entry in levels.buffer.entries)
+    assert raws == [0.25, 0.75]
+    assert sorted(entry.score for entry in levels.buffer.entries) == [0.0, 1.0]

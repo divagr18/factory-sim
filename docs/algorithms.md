@@ -125,6 +125,18 @@ the episode -- high where the policy is still learning, low both where it has
 mastered a level and where it never gets anywhere, which makes it a frontier
 detector rather than a difficulty meter.
 
+What the buffer stores is not that number but its **standing among the levels
+scored in the same rollout**, in [0, 1]. Raw positive value loss is measured
+against a critic that is still learning and its scale drifts: over one
+20M-step run the buffer's mean raw score rose from 0.0031 to 0.0172. The
+buffer compares scores directly when it decides what to evict, so on raw
+values it ranked levels by *when* they were measured rather than by what they
+were -- staleness correlated with score at r = -0.170, against -0.064 for wall
+count, +0.010 for patch size and +0.000 for start distance, and levels
+sampled recently averaged 0.0231 against 0.0168 for those long unsampled. A
+standing is comparable across updates; a raw score is not. `raw_mean` in the
+logged `ued` block keeps the underlying drift visible.
+
 **Sampling** mixes rank over score with staleness:
 
     P = (1 - rho) * P_score + rho * P_staleness,  P_score ~ 1 / rank ** (1/beta)
