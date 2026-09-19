@@ -1598,6 +1598,13 @@ void fsim_reset(fsim_env *env, const fsim_scene *scene) {
         };
         new_entity(env, K_WALL, p, 0, 1);
     }
+    /* Machines the scene places rather than the agent (fsim.h). They arrive
+     * empty, which `new_entity` already does: a drill or a furnace with no
+     * fuel is ST_NO_FUEL. */
+    for (int32_t i = 0; i < scene->machine_count; i++) {
+        fsim_pos p = {scene->machine_x[i], scene->machine_y[i]};
+        new_entity(env, scene->machine_kind[i], p, scene->machine_dir[i], 0);
+    }
     env->char_pos = scene->character;
     for (int32_t i = 0; i < scene->inventory_count; i++)
         insert_main(env, scene->inventory_item[i], scene->inventory_amount[i]);

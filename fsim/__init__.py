@@ -87,6 +87,9 @@ VERB_NAME = {
     lib.V_TRANSFER: "transfer",
 }
 DIRECTIONS = ("north", "east", "south", "west")
+#: Machines a scene may place itself, rather than the agent building them --
+#: plate_line is handed an aligned drill and furnace, both empty.
+SCENE_MACHINES = {"burner-mining-drill": lib.K_DRILL, "stone-furnace": lib.K_FURNACE}
 STRIDES = {"move": 30, "step": 7, "nudge": 2}
 
 BASE_RECIPES = (
@@ -160,10 +163,14 @@ def _endpoint(value) -> int:
 def scene_struct(blueprint: dict):
     """The C scene for a FactorioRL blueprint payload, and what keeps it alive."""
     resources = blueprint.get("resources") or []
-    walls = [e for e in blueprint.get("entities") or [] if e["name"] == "stone-wall"]
-    others = [e for e in blueprint.get("entities") or [] if e["name"] != "stone-wall"]
-    if others:
-        raise NotImplementedError(f"scene entities beyond walls: {others[:1]}")
+    walls, machines = [], []
+    for e in blueprint.get("entities") or []:
+        if e["name"] == "stone-wall":
+            walls.append(e)
+        elif e["name"] in SCENE_MACHINES:
+            machines.append(e)
+        else:
+            raise NotImplementedError(f"scene entity: {e!r}")
     keep = []
     scene = ffi.new("fsim_scene *")
     keep.append(scene)
@@ -181,6 +188,15 @@ def scene_struct(blueprint: dict):
     scene.wall_count = len(walls)
     scene.wall_x = array(fixed(w["position"][0]) for w in walls)
     scene.wall_y = array(fixed(w["position"][1]) for w in walls)
+    # A 2x2 machine's declared position is already the integer centre it snaps
+    # to, so it is used as given rather than pushed to a tile centre.
+    scene.machine_count = len(machines)
+    scene.machine_kind = array(SCENE_MACHINES[m["name"]] for m in machines)
+    scene.machine_x = array(fixed(m["position"][0]) for m in machines)
+    scene.machine_y = array(fixed(m["position"][1]) for m in machines)
+    scene.machine_dir = array(
+        DIRECTIONS.index(m.get("direction") or "north") * 4 for m in machines
+    )
     character = blueprint.get("character") or {}
     position = character.get("position") or [0, 0]
     scene.character.x = fixed(position[0])
