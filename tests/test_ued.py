@@ -349,3 +349,36 @@ def test_the_raw_measurement_is_kept_for_reporting():
     raws = sorted(entry.raw for entry in levels.buffer.entries)
     assert raws == [0.25, 0.75]
     assert sorted(entry.score for entry in levels.buffer.entries) == [0.0, 1.0]
+
+
+def test_ued_no_longer_forces_whole_episodes():
+    """Forcing it pinned every UED run to 128 environments at horizon 600,
+    where seeds range over a hundredfold and no curriculum effect is
+    detectable. Scoring a rollout segment instead is what PLR's own
+    implementation does, and it runs at the tuned 512 x 64."""
+    import train
+
+    assert not train.parse(["--run", "x", "--ued", "accel"]).whole_episodes
+    # grpo still cannot opt out: a return needs a whole episode.
+    assert train.parse(["--run", "x", "--algo", "grpo"]).whole_episodes
+
+
+def test_a_snapshot_survives_autoreset():
+    """A rollout shorter than an episode hands a finished slot a new level
+    part-way through, so by the time advantages are known `slot_level` no
+    longer says which level earned them."""
+    levels = ued.Curriculum("build_line", n=4, train_slots=4, mode="plr", seed=0, warm_start=8)
+    for i in range(4):
+        levels.level_for(i, i)
+    before = levels.snapshot()
+
+    # Two slots finish mid-rollout and are handed new levels.
+    for i in (1, 3):
+        levels.level_for(i, 100 + i)
+    assert levels.slot_level[1].key() != before["level"][1].key()
+
+    # Scoring against the snapshot credits the levels that earned it.
+    levels.report([0.1, 0.9, 0.2, 0.8], at=before)
+    scored = {e.level.key(): e.raw for e in levels.buffer.entries}
+    assert scored[before["level"][1].key()] == 0.9
+    assert scored[before["level"][3].key()] == 0.8

@@ -400,10 +400,12 @@ def parse(argv=None) -> argparse.Namespace:
     # arguments sees a coherent pair.
     if args.algo == "grpo":
         args.whole_episodes = True
-    if args.ued != "off":
-        # One episode per level per rollout, so a level's score is the mean
-        # positive advantage over that episode and nothing else.
-        args.whole_episodes = True
+    # UED does *not* force whole episodes. It did, so that a level's score
+    # was the mean positive advantage over exactly one episode -- but that
+    # pinned every UED run to 128 environments at horizon 600, where seeds
+    # range over a hundredfold and no curriculum effect is detectable. Scoring
+    # a rollout segment instead is what PLR's own implementation does, and it
+    # runs at the tuned 512 x 64 whose seeds span ten points.
     return args
 
 
@@ -814,6 +816,9 @@ def main(argv=None) -> int:
             env.reset()
             next_done = torch.zeros(N, device=device)
         live = torch.ones(N, device=device)
+        # Whose levels these advantages will belong to, before autoreset can
+        # reassign any of them.
+        pending = curriculum.snapshot() if curriculum is not None else None
         for t in range(T):
             obs, action, logp, value = rollout()
             for k in KEYS:
@@ -831,7 +836,11 @@ def main(argv=None) -> int:
             host = host_step.to(device, non_blocking=True)
             rew_buf[t].copy_(host[0])
             next_done = host[1]
-            live = live * (1.0 - next_done)
+            if args.whole_episodes:
+                # Only there does a finished slot stay finished. Under
+                # autoreset it starts another episode in place, and zeroing it
+                # would drop the slot from every later rollout.
+                live = live * (1.0 - next_done)
         steps += batch
         rolled = clock()
 
@@ -871,10 +880,11 @@ def main(argv=None) -> int:
 
         if curriculum is not None:
             # Read per rollout, not once: a slot that could not replay ran a
-            # generated level and must not be trained on.
-            trains = torch.tensor(
-                curriculum.training_mask(), dtype=torch.float32, device=device
-            )
+            # generated level and must not be trained on. Under autoreset the
+            # snapshot taken before the rollout is what the advantages belong
+            # to, because a finished slot has since been handed a new level.
+            mask = pending["trains"] if pending else curriculum.training_mask()
+            trains = torch.tensor(mask, dtype=torch.float32, device=device)
             with torch.no_grad():
                 # PLR's score: the mean positive advantage over the episode
                 # this slot just ran. Slots whose episode was empty are not
@@ -884,7 +894,8 @@ def main(argv=None) -> int:
                 slot_scores = (paid / lived.clamp(min=1.0)).tolist()
                 counts = lived.tolist()
             curriculum.report(
-                [score if count > 0 else 0.0 for score, count in zip(slot_scores, counts)]
+                [score if count > 0 else 0.0 for score, count in zip(slot_scores, counts)],
+                at=pending,
             )
 
         flat = {k: v.reshape(batch, *v.shape[2:]) for k, v in buf.items()}
@@ -897,9 +908,14 @@ def main(argv=None) -> int:
         # group member finishes, and belong to no episode at all. This follows
         # the rollout shape, not the learner: a PPO arm run with
         # --whole-episodes has exactly the same dead tail.
-        usable = torch.nonzero((live_buf * trains).reshape(-1), as_tuple=False).squeeze(1)
-        if not args.whole_episodes:
-            usable = torch.arange(batch, device=device)
+        # Two independent reasons a timestep does not train: it belonged to no
+        # episode (only possible with whole episodes), or its slot was running
+        # a proposed level (Robust PLR). The second applies either way, and
+        # replacing `usable` wholesale for the autoreset case silently threw
+        # it away -- decisions came back at 1.000 of steps instead of the
+        # training fraction.
+        alive = live_buf if args.whole_episodes else torch.ones_like(live_buf)
+        usable = torch.nonzero((alive * trains).reshape(-1), as_tuple=False).squeeze(1)
         n_usable = usable.numel()
         decisions += n_usable
         mb = max(1, n_usable // args.minibatches)

@@ -592,8 +592,11 @@ class Curriculum:
             out[i] = rank / last if last else 0.5
         return out
 
-    def report(self, scores) -> None:
+    def report(self, scores, at: dict | None = None) -> None:
         """One score per slot, after the rollout that produced them.
+
+        `at` is a `snapshot` taken before the rollout, for the case where a
+        rollout is shorter than an episode and slots changed level inside it.
 
         A replayed level's standing is updated in place. A proposed level is
         offered to the buffer, and kept only if it beats something already
@@ -601,11 +604,13 @@ class Curriculum:
         why the comparison has to be between comparable numbers.
         """
         ranked = self.standings(list(scores))
+        levels = at["level"] if at else self.slot_level
+        indices = at["index"] if at else self.slot_index
         for i, (standing, raw) in enumerate(zip(ranked, scores, strict=True)):
-            level = self.slot_level[i]
+            level = levels[i]
             if level is None:
                 continue
-            index = self.slot_index[i]
+            index = indices[i]
             if index is not None:
                 self.buffer.update(index, float(standing), float(raw))
             else:
@@ -614,6 +619,23 @@ class Curriculum:
     def training_mask(self) -> list[bool]:
         """Which slots this rollout may train on, after levels were assigned."""
         return list(self.slot_trains)
+
+    def snapshot(self) -> dict:
+        """What each slot was running at this moment.
+
+        Needed when the rollout is shorter than an episode. Autoreset hands a
+        finished slot a new level part-way through, so by the time advantages
+        are known `slot_level` no longer says which level earned them. The
+        snapshot is taken before the rollout and scored afterwards; a slot that
+        changed level inside the rollout has its segment credited to the level
+        it started with, which is the approximation PLR's own implementation
+        makes for partial segments.
+        """
+        return {
+            "level": list(self.slot_level),
+            "index": list(self.slot_index),
+            "trains": list(self.slot_trains),
+        }
 
     def stats(self) -> dict:
         out = self.buffer.stats()

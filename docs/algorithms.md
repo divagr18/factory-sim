@@ -154,5 +154,15 @@ fresh random one, so complexity compounds from the frontier. `walls_mean`,
 is working: a curriculum that is doing its job leaves the hand-written
 families behind.
 
-UED implies `--whole-episodes`, so each level gets exactly one episode and its
-score needs no attribution across episode boundaries.
+UED does **not** imply `--whole-episodes`. It did, so a level's score was the
+mean positive advantage over exactly one episode -- but that pinned every UED
+run to 128 environments at horizon 600, where three seeds of the *hand-written*
+control came back at 0.244, 0.088 and 0.002 held-out. A hundredfold spread
+hides any curriculum effect, so the comparison could not have detected one.
+
+Scoring a rollout segment instead is what PLR's own implementation does, and
+it runs at the tuned 512 x 64 whose four seeds span ten points. The cost is an
+approximation: autoreset hands a finished slot a new level part-way through a
+rollout, so `Curriculum.snapshot` is taken before the rollout and the whole
+segment is credited to the level the slot started with. At horizon 64 against
+600-decision episodes, about a tenth of slots change level inside a rollout.
