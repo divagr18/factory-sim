@@ -32,6 +32,8 @@ FAMILIES = {
         "square_patch": "train",
         "offset_patch": "val",
         "narrow_patch": "test",
+        "varied_patch": "train",
+        "cluttered_patch": "train",
     },
 }
 
@@ -111,8 +113,19 @@ def build_line(family: str, rng: random.Random) -> dict:
         ox = rng.choice([-8, 8])
         oy = rng.choice([-8, 8])
         tiles = [(0.0 + ox + dx, 0.0 + oy + dy) for dx in range(-3, 4) for dy in range(-3, 4)]
+    elif family == "varied_patch":
+        half_w, half_h = rng.randint(1, 4), rng.randint(1, 4)
+        ox, oy = rng.randint(-12, 12), rng.randint(-12, 12)
+        tiles = [
+            (0.0 + ox + dx, 0.0 + oy + dy)
+            for dx in range(-half_w, half_w + 1)
+            for dy in range(-half_h, half_h + 1)
+        ]
     else:
-        tiles = [(0.0 + dx, 0.0 + dy) for dx in range(-3, 4) for dy in range(-3, 4)]
+        ox = oy = 0
+        if family == "cluttered_patch":
+            ox, oy = rng.randint(-9, 9), rng.randint(-9, 9)
+        tiles = [(0.0 + ox + dx, 0.0 + oy + dy) for dx in range(-3, 4) for dy in range(-3, 4)]
     cx = sum(x for x, _ in tiles) / len(tiles)
     cy = sum(y for _, y in tiles) / len(tiles)
     angle = rng.uniform(0, 2 * math.pi)
@@ -126,6 +139,19 @@ def build_line(family: str, rng: random.Random) -> dict:
         side = 1 if math.cos(angle) >= 0 else -1
         for offset in range(-1, 2):
             entities.append(_wall(float(int(cx) + side * 6), float(int(cy) + offset)))
+    if family == "cluttered_patch":
+        seen: set[tuple[float, float]] = set()
+        for _ in range(rng.randint(1, 3)):
+            vertical = rng.random() < 0.5
+            away = rng.choice((-6, -5, -4, 4, 5, 6))
+            along = rng.randint(-6, 3)
+            length = rng.randint(2, 4)
+            for step in range(length):
+                x, y = (cx + away, cy + along + step) if vertical else (cx + along + step, cy + away)
+                if (x, y) in seen:
+                    continue
+                seen.add((x, y))
+                entities.append(_wall(float(x), float(y)))
     return _payload(entities, tiles, start, (round(cx, 1), round(cy, 1)))
 
 

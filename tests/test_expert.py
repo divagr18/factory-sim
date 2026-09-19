@@ -155,10 +155,15 @@ def test_the_builder_solves_build_line_too():
 
 
 def test_build_line_may_have_demonstration_starts():
-    env = VecEnv(16, "build_line", demo_starts=1.0, shaping="both", seed=3)
+    """Every scene the builder can walk to gets one; the cluttered ones cannot."""
+    env = VecEnv(32, "build_line", demo_starts=1.0, shaping="both", seed=3)
     env.demo_window = (0, 0)
     try:
         env.reset()
-        assert set(env.starts) == {"back0"}, env.starts
+        starts = dict(zip(env.families, env.starts, strict=True))
+        assert "cluttered_patch" in starts, "expected the cluttered family in a train split"
+        for i in range(32):
+            expected = "scene" if env.families[i] == "cluttered_patch" else "back0"
+            assert env.starts[i] == expected, (env.families[i], env.starts[i])
     finally:
         env.close()
