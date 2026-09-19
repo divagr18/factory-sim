@@ -54,10 +54,18 @@ from fsim import scenes
 PATCH_TASKS = ("construct_smelting_line", "build_line")
 
 #: A wall segment: (vertical, away, along, length). `away` is its offset from
-#: the patch centre on the axis it does not run along, and is never within 3
-#: tiles -- a screen on top of the patch makes the scene unsolvable rather
-#: than hard, and UED will happily find those if allowed to.
+#: the patch's *anchor* on the axis the wall does not run along.
+#:
+#: A screen laid across the ore makes a scene unsolvable rather than hard, and
+#: a regret-seeking search will happily find those. A constant minimum of 4
+#: was not enough: it assumed patches no wider than the hand-written families,
+#: and `_resize` grows them to thirteen tiles, so `away = 4` landed inside.
+#: Measured before the fix, 688 of 4,000 mutated levels had walls sitting on
+#: ore. `clear_walls` pushes each wall out past the patch's actual extent.
 WALL_AWAY = tuple(v for v in range(-6, 7) if abs(v) >= 4)
+#: Tiles of clearance between the patch's edge and a wall, so a machine still
+#: fits beside the ore it is mining.
+WALL_MARGIN = 1
 WALL_ALONG = range(-6, 4)
 WALL_LENGTH = range(2, 6)
 
@@ -99,6 +107,28 @@ class Level:
             for x in range(self.x_lo, self.x_hi + 1)
             for y in range(self.y_lo, self.y_hi + 1)
         ]
+
+    def clear_walls(self) -> Level:
+        """The same level with every wall pushed clear of the ore.
+
+        `build` anchors walls at `int(cx), int(cy)`, so a wall on the axis it
+        crosses is clear when `|away|` exceeds that axis's half-extent plus a
+        margin. Pushing outward rather than dropping the wall keeps the edit
+        that produced it meaningful -- the screen stays, it just stops being
+        laid over the patch.
+        """
+        if not self.walls:
+            return self
+        half_x = max(abs(self.x_lo), abs(self.x_hi)) + WALL_MARGIN
+        half_y = max(abs(self.y_lo), abs(self.y_hi)) + WALL_MARGIN
+        walls = []
+        for vertical, away, along, length in self.walls:
+            # A vertical wall runs along y and is offset in x.
+            floor = half_x if vertical else half_y
+            if abs(away) < floor:
+                away = floor if away >= 0 else -floor
+            walls.append((vertical, away, along, length))
+        return replace(self, walls=tuple(walls))
 
     def key(self) -> tuple:
         """Identity for deduplication: the parameters, not the origin."""
@@ -159,7 +189,7 @@ def random_level(task: str, rng: random.Random) -> Level:
         ox=rng.randint(-OFFSET_LIMIT, OFFSET_LIMIT),
         oy=rng.randint(-OFFSET_LIMIT, OFFSET_LIMIT),
         angle=angle, rx=rx, ry=ry, walls=walls,
-    )  # fmt: skip
+    ).clear_walls()  # fmt: skip
 
 
 #: How `mutate` may change a level. Each is a small step, because ACCEL assumes
@@ -244,6 +274,9 @@ def mutate(level: Level, rng: random.Random, edits: int = 2) -> Level:
     out = level
     for _ in range(edits):
         out = rng.choice(EDITS)(out, rng)
+    # After the edits, not between them: resizing the patch can swallow a wall
+    # that was clear when it was placed.
+    out = out.clear_walls()
     return replace(out, origin=f"edit:{level.origin.split(':')[-1]}")
 
 
@@ -477,6 +510,11 @@ class Curriculum:
         #: The level each slot is running, and its buffer index when replayed.
         self.slot_level: list[Level | None] = [None] * n
         self.slot_index: list[int | None] = [None] * n
+        #: Whether each slot may be trained on this rollout. A training slot
+        #: whose buffer was empty fell through to the generator, and training
+        #: on a generated level is exactly what Robust PLR forbids -- so the
+        #: mask is read per rollout rather than fixed at the slot split.
+        self.slot_trains: list[bool] = [False] * n
         self.replayed = 0
         self.generated = 0
         self.edited = 0
@@ -507,6 +545,7 @@ class Curriculum:
             level = self._propose(seed)
         self.slot_level[i] = level
         self.slot_index[i] = index
+        self.slot_trains[i] = index is not None
         return level.origin, build(level)
 
     def _propose(self, seed: int) -> Level:
@@ -534,6 +573,10 @@ class Curriculum:
                 self.buffer.update(index, float(score))
             else:
                 self.buffer.consider(level, float(score))
+
+    def training_mask(self) -> list[bool]:
+        """Which slots this rollout may train on, after levels were assigned."""
+        return list(self.slot_trains)
 
     def stats(self) -> dict:
         out = self.buffer.stats()
@@ -601,6 +644,11 @@ def load_buffer(path, seed: int = 0) -> LevelBuffer:
         spec = dict(row["level"])
         spec["walls"] = tuple(tuple(w) for w in spec["walls"])
         buffer.consider(Level(**spec), row["score"])
+        # consider() only carries the score. Restoring seen and staleness is
+        # the point of loading at all: without them a resumed run reports
+        # every level as never replayed and restarts the staleness clock.
+        buffer.entries[-1].seen = int(row.get("seen", 0))
+        buffer.entries[-1].staleness = float(row.get("staleness", 0.0))
     return buffer
 
 

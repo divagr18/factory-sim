@@ -199,3 +199,55 @@ def test_only_the_replay_slots_are_meant_to_train():
     assert all(name.startswith("edit:") for name in origins[12:])
     assert levels.replayed == 12
     assert levels.edited == 4
+
+
+def test_a_wall_is_never_laid_across_the_ore():
+    """A screen over the patch makes a scene unsolvable rather than hard, and
+    a regret-seeking search will find those. A constant minimum offset was not
+    enough -- it assumed patches no wider than the hand-written families, and
+    resizing grows them to thirteen tiles. Measured before the fix: 688 of
+    4,000 mutated levels had walls sitting on ore."""
+    rng = random.Random(0)
+    for _ in range(600):
+        level = ued.random_level("construct_smelting_line", rng)
+        for _ in range(12):
+            level = ued.mutate(level, rng, edits=2)
+        scene = ued.build(level)
+        ore = {(math.floor(x), math.floor(y)) for x, y in
+               (r["position"] for r in scene["resources"])}  # fmt: skip
+        walls = {(math.floor(x), math.floor(y)) for x, y in
+                 (e["position"] for e in scene["entities"])}  # fmt: skip
+        assert not (ore & walls), (level.walls, sorted(ore & walls))
+
+
+def test_an_empty_buffer_does_not_get_trained_on():
+    """Robust PLR's whole point: a generated level is scored, never learned
+    from. A training slot whose buffer was empty fell through to the
+    generator and was trained on anyway."""
+    levels = ued.Curriculum("build_line", n=8, train_slots=6, mode="plr", seed=0, warm_start=0)
+    for i in range(8):
+        levels.level_for(i, i)
+    assert not any(levels.training_mask()), levels.training_mask()
+
+    warmed = ued.Curriculum("build_line", n=8, train_slots=6, mode="plr", seed=0, warm_start=16)
+    for i in range(8):
+        warmed.level_for(i, i)
+    assert warmed.training_mask() == [True] * 6 + [False] * 2
+
+
+def test_loading_a_buffer_keeps_its_replay_history(tmp_path):
+    buffer = ued.LevelBuffer(capacity=32, seed=0)
+    rng = random.Random(0)
+    for i in range(6):
+        buffer.consider(ued.random_level("build_line", rng), score=i / 6)
+    for index in (0, 0, 3):
+        buffer.update(index, 0.5)
+    buffer.entries[2].staleness = 17.0
+
+    path = tmp_path / "levels.json"
+    ued.save_buffer(buffer, path)
+    back = ued.load_buffer(path)
+
+    assert [e.seen for e in back.entries] == [e.seen for e in buffer.entries]
+    assert [e.staleness for e in back.entries] == [e.staleness for e in buffer.entries]
+    assert [e.level.key() for e in back.entries] == [e.level.key() for e in buffer.entries]

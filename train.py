@@ -762,8 +762,6 @@ def main(argv=None) -> int:
     #: Under UED, only the replay slots train. The rest run proposed levels
     #: purely to score them -- Robust PLR's defining constraint.
     trains = torch.ones(N, device=device)
-    if curriculum is not None:
-        trains[curriculum.train_slots :] = 0.0
 
     env.reset()
     host_step = torch.empty((2, N), dtype=torch.float32, pin_memory=device.type == "cuda")
@@ -859,6 +857,11 @@ def main(argv=None) -> int:
                 spread = 0.0
 
         if curriculum is not None:
+            # Read per rollout, not once: a slot that could not replay ran a
+            # generated level and must not be trained on.
+            trains = torch.tensor(
+                curriculum.training_mask(), dtype=torch.float32, device=device
+            )
             with torch.no_grad():
                 # PLR's score: the mean positive advantage over the episode
                 # this slot just ran. Slots whose episode was empty are not
@@ -898,6 +901,15 @@ def main(argv=None) -> int:
             order = usable[torch.randperm(n_usable, device=device)]
             for s in range(0, n_usable, mb):
                 idx = order[s : s + mb]
+                if idx.numel() < 2:
+                    # A trailing minibatch of one. torch.std over a single
+                    # element divides by n - 1 and returns NaN, so advantage
+                    # normalisation poisons the gradient and the policy never
+                    # recovers. It cost a whole UED pilot: NaN from update 7,
+                    # thirty-six further updates of garbage, and nothing in the
+                    # metrics to say why. A one-sample minibatch teaches
+                    # nothing anyway.
+                    continue
                 f = features(policy, {k: v[idx] for k, v in flat.items()})
                 logp, entropy = policy.evaluate(f, b_masks[idx], b_actions[idx])
                 ratio_log = logp - b_logp[idx]
@@ -906,7 +918,11 @@ def main(argv=None) -> int:
                 if not args.no_adv_norm and args.algo != "grpo":
                     # GRPO has already standardised, against the group rather
                     # than against whatever else landed in this minibatch.
-                    a = (a - a.mean()) / (a.std() + 1e-8)
+                    # Not `spread`: that name holds the group spread reported
+                    # in the metrics row, and shadowing it made the row fail to
+                    # serialise after the first update.
+                    deviation = a.std() if a.numel() > 1 else torch.zeros((), device=a.device)
+                    a = (a - a.mean()) / (deviation + 1e-8)
                 pg = torch.max(-a * ratio, -a * ratio.clamp(1 - args.clip, 1 + args.clip)).mean()
                 ent = entropy.mean()
                 v_loss = torch.zeros((), device=device)
