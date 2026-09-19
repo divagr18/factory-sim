@@ -298,17 +298,16 @@ def parse(argv=None) -> argparse.Namespace:
     p.add_argument("--autoregressive", dest="autoregressive", action="store_true")
     p.set_defaults(autoregressive=True)
     p.add_argument(
-        "--no-demo-obstructed",
-        dest="demo_obstructed",
-        action="store_false",
-        help="refuse to demonstrate on any scene containing walls, as every "
-        "run before 2026-09-20 did. The builder walks in straight lines so "
-        "this looked safe, but it completes the line on 92%% of cluttered "
-        "scenes, and refusing cost a quarter of the hand-written arm's "
-        "demonstrations and a rising share of a UED arm's. Kept only so an "
-        "older run can be reproduced",
+        "--demo-obstructed",
+        action="store_true",
+        help="demonstrate on scenes containing walls too. The builder finishes "
+        "92%% of them, so refusing looked like a bug -- but measured over three "
+        "seeds it costs thirty points of held-out success (0.836/0.486/0.383 "
+        "against 0.920/0.856/0.877/0.820) while climbing the backplay ladder "
+        "twice as far. More demonstrations of one expert arrangement buy "
+        "progress on that arrangement, not generalisation (fsim/vec.py)",
     )
-    p.set_defaults(demo_obstructed=True)
+    p.set_defaults(demo_obstructed=False)
     p.add_argument(
         "--fixed-demo-layout",
         action="store_true",

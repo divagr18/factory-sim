@@ -119,7 +119,7 @@ class VecEnv:
         group: int = 1,
         autoreset: bool = True,
         level_source=None,
-        demo_obstructed: bool = True,
+        demo_obstructed: bool = False,
     ) -> None:
         """`obs_memory`, if given, is `(address, owner)`: `n * sizeof(fsim_obs)`
         bytes the observations are written into instead of a fresh block -- a
@@ -173,16 +173,29 @@ class VecEnv:
         # The builder puts the same line down for either task -- it solves
         # every build_line training scene it is given -- so both may use it.
         self.demo_starts = demo_starts
-        #: Demonstrate on scenes that contain walls too. The builder walks in
-        #: straight lines, so this was refused outright -- but measured, it
-        #: completes the line on 92% of `cluttered_patch` scenes and 91% of the
-        #: walled levels UED generates. Refusing cost the hand-written arm a
-        #: quarter of its demonstrations and the UED arm three fifths of them,
-        #: which is the difference between a curriculum that advances and one
-        #: that sits on its first rung. An attempt that gets stuck is rolled
-        #: back to the scene's own start, so the 8% that fail cost a reset and
-        #: nothing else. False restores the old behaviour for comparison with
-        #: runs made before 2026-09-20.
+        #: Demonstrate on scenes that contain walls too. **Off by default, and
+        #: the reason is a measurement rather than caution.**
+        #:
+        #: The builder walks in straight lines, so walled scenes were refused a
+        #: demonstration outright. That looked like a bug: the builder in fact
+        #: completes the line on 92% of `cluttered_patch` and 91% of the walled
+        #: levels UED generates, and refusing cost the hand-written split a
+        #: quarter of its demonstrations.
+        #:
+        #: Turning it on does exactly what it should to the curriculum and the
+        #: wrong thing to the result. Over three seeds at the tuned config,
+        #: held-out success went 0.836 / 0.486 / 0.383 against 0.920 / 0.856 /
+        #: 0.877 / 0.820 for four seeds without it -- thirty points worse, with
+        #: two seeds below every run that preceded them. Meanwhile fix-s1
+        #: reached backplay rung 4 by 20M steps, solving thirteen-decision cuts
+        #: at 67%, where ar-s1 was on rung 2 solving six-decision cuts at 33%.
+        #:
+        #: So climbing the ladder is not generalising. Every demonstration ends
+        #: in the same two-machine arrangement, and more of them is more of the
+        #: same: the policy gets better at finishing the expert's build and no
+        #: better at starting an unseen one. Kept as an option because the
+        #: mechanism is sound and a more varied builder would change the
+        #: answer -- see `docs/shaping.md`.
         self.demo_obstructed = demo_obstructed
         #: Backplay's window, in decisions back from the end of the build: an
         #: episode with a demonstration start runs all but `U[lo, hi]` of it.

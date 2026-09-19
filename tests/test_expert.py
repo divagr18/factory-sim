@@ -88,13 +88,12 @@ def test_the_new_training_families_are_buildable(family):
         assert env.rl.success, (family, seed, found[0])
 
 
-def test_obstructed_scenes_are_demonstrated_too():
-    """They were not, until 2026-09-20. The builder walks in straight lines so
-    refusing looked safe, but it completes the line on 92% of cluttered scenes
-    -- and refusing cost a quarter of the demonstrations on the hand-written
-    split and a rising share on a generated one, which is what kept a backplay
-    gate on its first rung for 20M steps."""
-    env = VecEnv(32, demo_starts=1.0, seed=7)
+def test_obstructed_scenes_are_demonstrated_only_on_request():
+    """The builder finishes 92% of cluttered scenes, so refusing looked like a
+    bug. Measured, allowing it costs thirty points of held-out success --
+    0.836/0.486/0.383 against 0.920/0.856/0.877/0.820 -- while climbing the
+    backplay ladder twice as far. It stays available and stays off."""
+    env = VecEnv(32, demo_starts=1.0, seed=7, demo_obstructed=True)
     try:
         env.reset()
         obstructed = [i for i in range(32) if env.families[i] == "cluttered_patch"]
@@ -106,9 +105,9 @@ def test_obstructed_scenes_are_demonstrated_too():
         env.close()
 
 
-def test_the_old_refusal_is_still_reachable():
-    """`--no-demo-obstructed` reproduces a run made before the fix."""
-    env = VecEnv(32, demo_starts=1.0, seed=7, demo_obstructed=False)
+def test_by_default_a_walled_scene_is_left_alone():
+    """The default, and the setting every published number was measured on."""
+    env = VecEnv(32, demo_starts=1.0, seed=7)
     try:
         env.reset()
         obstructed = [i for i in range(32) if env.families[i] == "cluttered_patch"]
@@ -174,10 +173,10 @@ def test_the_builder_solves_build_line_too():
 
 
 def test_build_line_may_have_demonstration_starts():
-    """Every scene the builder can finish gets one, walls or not. The few it
-    gets stuck on are rolled back to the scene's own start rather than left
-    part-built, so a start is either a full demonstration to its cut or
-    nothing at all."""
+    """Every unwalled scene gets one. A start is either a full demonstration
+    to its cut or nothing: an attempt the builder cannot finish is rolled back
+    rather than left part-built, because a half-demonstration starts the
+    policy from a state the expert never reaches."""
     env = VecEnv(32, "build_line", demo_starts=1.0, shaping="both", seed=3)
     env.demo_window = (0, 0)
     try:
@@ -185,9 +184,10 @@ def test_build_line_may_have_demonstration_starts():
         starts = dict(zip(env.families, env.starts, strict=True))
         assert "cluttered_patch" in starts, "expected the cluttered family in a train split"
         assert all(s in ("scene", "back0") for s in env.starts), env.starts
-        demonstrated = sum(1 for s in env.starts if s == "back0")
-        assert demonstrated >= 28, f"only {demonstrated}/32 demonstrated"
-        cluttered = [env.starts[i] for i in range(32) if env.families[i] == "cluttered_patch"]
-        assert any(s == "back0" for s in cluttered), cluttered
+        # By default a walled scene is left alone, so cluttered_patch shows as
+        # "scene" and everything else as a full demonstration to its cut.
+        for i in range(32):
+            expected = "scene" if env.families[i] == "cluttered_patch" else "back0"
+            assert env.starts[i] == expected, (env.families[i], env.starts[i])
     finally:
         env.close()

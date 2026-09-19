@@ -269,6 +269,7 @@ def test_a_walled_scene_is_still_demonstrated():
             48, "construct_smelting_line", threads=4, shaping="both",
             action_space="v2", demo_starts=0.5, demo_obstructed=allow,
         )  # fmt: skip
+        # Both settings are exercised; only the default ships.
         env.demo_window = (0, 2)
         try:
             demonstrated = total = 0

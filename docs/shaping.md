@@ -404,3 +404,45 @@ diversified one -- which is why the seeds are reported here individually.
 - Resnick et al. (2018). Backplay: man muss immer umkehren. arXiv:1807.06919.
 - Baker et al. (2022). Video PreTraining (VPT). arXiv:2206.11795.
 - PufferLib 5.0 `config/`; CleanRL `ppo_atari.py`, `ppo_multidiscrete_mask.py`.
+
+## 7. More demonstrations, worse generalisation
+
+Until 2026-09-20 a scene containing walls was never demonstrated: the builder
+walks in straight lines, so `VecEnv` refused outright. That looked like a
+defect, and by one measure it was -- the builder completes the line on 92% of
+`construct_smelting_line`'s `cluttered_patch`, 91% of `build_line`'s and 91%
+of the levels UED generates, and `cluttered_patch` is a *training* family in
+both tasks. Refusing cost the training split a quarter of its demonstrations,
+39% against the 50% `--demo-starts 0.5` asks for.
+
+Allowing them does what it should to the curriculum:
+
+| | backplay rung at 20M | demonstration success there |
+|---|---|---|
+| `ar-s1`, refusing | 2 | back2-back6, 0.31-0.46 |
+| `fix-s1`, allowing | **4** | back6-back13, **0.53-0.67** |
+
+`fix-s1` is solving thirteen-decision cuts at 67% where `ar-s1` manages
+six-decision cuts at 33%. And held-out success is worse, across three seeds
+against four:
+
+| | held-out sampled | mean |
+|---|---|---|
+| refusing (`ar-s1..s4`) | 0.920 / 0.856 / 0.877 / 0.820 | **0.868** |
+| allowing (`fix-s1..s3`) | 0.836 / 0.486 / 0.383 | **0.568** |
+
+Thirty points, with two seeds below every run that preceded them, and a spread
+of 45 points against the earlier 10.
+
+**Climbing the ladder is not generalising.** Every demonstration ends in the
+same two-machine arrangement, so more of them is more of the same thing: the
+policy gets better at finishing the expert's build and no better at starting
+an unseen one. `fix-s2` shows the other edge -- it reached rung 2 at 3.3M
+steps, earliest of any run, then collapsed to back3 = 0.06. More
+demonstrations fill the gate's 64-episode minimum on a shorter, noisier
+sample, so it advances on evidence it should not trust.
+
+The capability is kept as `--demo-obstructed` and defaults off. The mechanism
+is sound; what is wrong is the expert behind it. A builder with genuinely
+different arrangements to show would likely reverse this, and that -- not more
+demonstrations of one arrangement -- is where the next gain is.
