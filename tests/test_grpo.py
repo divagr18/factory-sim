@@ -54,8 +54,32 @@ def test_dead_timesteps_neither_count_nor_train():
 
 def test_a_tied_group_has_nothing_to_say():
     rewards = torch.full((3, 4), 0.25)
-    adv = _group_advantage(rewards, torch.ones(3, 4), 4)
-    assert torch.allclose(adv, torch.zeros(3, 4), atol=1e-6)
+    for baseline in ("group", "loo"):
+        adv = _group_advantage(rewards, torch.ones(3, 4), 4, baseline)
+        assert torch.allclose(adv, torch.zeros(3, 4), atol=1e-6), baseline
+
+
+def test_leave_one_out_judges_against_the_others():
+    rewards = torch.zeros(1, 4)
+    rewards[0] = torch.tensor([0.0, 0.0, 0.0, 4.0])
+    adv = _group_advantage(rewards, torch.ones(1, 4), 4, "loo")
+    # The winner beat the other three, who averaged 0; each loser trailed a
+    # field averaging 4/3.
+    assert adv[0, 3] == pytest.approx(4.0)
+    assert adv[0, 0] == pytest.approx(-4.0 / 3.0)
+    assert float(adv.sum()) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_leave_one_out_does_not_inflate_a_near_tie():
+    # Three failures and a marginally better failure: GRPO divides by a spread
+    # that is nearly zero and reports a full-size advantage; RLOO reports a
+    # small one, because the difference really was small.
+    rewards = torch.zeros(1, 4)
+    rewards[0] = torch.tensor([0.0, 0.0, 0.0, 1e-3])
+    standardised = _group_advantage(rewards, torch.ones(1, 4), 4, "group")
+    leave_one_out = _group_advantage(rewards, torch.ones(1, 4), 4, "loo")
+    assert standardised[0, 3] > 1.0
+    assert leave_one_out[0, 3] < 1e-2
 
 
 def test_a_group_shares_one_scene():
