@@ -88,12 +88,31 @@ def test_the_new_training_families_are_buildable(family):
         assert env.rl.success, (family, seed, found[0])
 
 
-def test_obstructed_scenes_never_get_a_demonstration_start():
+def test_obstructed_scenes_are_demonstrated_too():
+    """They were not, until 2026-09-20. The builder walks in straight lines so
+    refusing looked safe, but it completes the line on 92% of cluttered scenes
+    -- and refusing cost a quarter of the demonstrations on the hand-written
+    split and a rising share on a generated one, which is what kept a backplay
+    gate on its first rung for 20M steps."""
     env = VecEnv(32, demo_starts=1.0, seed=7)
     try:
         env.reset()
         obstructed = [i for i in range(32) if env.families[i] == "cluttered_patch"]
         assert obstructed, "expected the cluttered family in a train split"
+        assert any(env.starts[i] != "scene" for i in obstructed), [
+            env.starts[i] for i in obstructed
+        ]
+    finally:
+        env.close()
+
+
+def test_the_old_refusal_is_still_reachable():
+    """`--no-demo-obstructed` reproduces a run made before the fix."""
+    env = VecEnv(32, demo_starts=1.0, seed=7, demo_obstructed=False)
+    try:
+        env.reset()
+        obstructed = [i for i in range(32) if env.families[i] == "cluttered_patch"]
+        assert obstructed
         assert all(env.starts[i] == "scene" for i in obstructed)
     finally:
         env.close()
@@ -155,15 +174,20 @@ def test_the_builder_solves_build_line_too():
 
 
 def test_build_line_may_have_demonstration_starts():
-    """Every scene the builder can walk to gets one; the cluttered ones cannot."""
+    """Every scene the builder can finish gets one, walls or not. The few it
+    gets stuck on are rolled back to the scene's own start rather than left
+    part-built, so a start is either a full demonstration to its cut or
+    nothing at all."""
     env = VecEnv(32, "build_line", demo_starts=1.0, shaping="both", seed=3)
     env.demo_window = (0, 0)
     try:
         env.reset()
         starts = dict(zip(env.families, env.starts, strict=True))
         assert "cluttered_patch" in starts, "expected the cluttered family in a train split"
-        for i in range(32):
-            expected = "scene" if env.families[i] == "cluttered_patch" else "back0"
-            assert env.starts[i] == expected, (env.families[i], env.starts[i])
+        assert all(s in ("scene", "back0") for s in env.starts), env.starts
+        demonstrated = sum(1 for s in env.starts if s == "back0")
+        assert demonstrated >= 28, f"only {demonstrated}/32 demonstrated"
+        cluttered = [env.starts[i] for i in range(32) if env.families[i] == "cluttered_patch"]
+        assert any(s == "back0" for s in cluttered), cluttered
     finally:
         env.close()

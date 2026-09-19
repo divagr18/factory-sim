@@ -251,3 +251,59 @@ def test_loading_a_buffer_keeps_its_replay_history(tmp_path):
     assert [e.seen for e in back.entries] == [e.seen for e in buffer.entries]
     assert [e.staleness for e in back.entries] == [e.staleness for e in buffer.entries]
     assert [e.level.key() for e in back.entries] == [e.level.key() for e in buffer.entries]
+
+
+def test_a_walled_scene_is_still_demonstrated():
+    """The builder walks in straight lines, so scenes containing walls were
+    refused a demonstration outright. Measured, it completes the line on 92%
+    of `cluttered_patch` and 91% of the walled levels UED generates -- and
+    refusing cost the UED arm a rising share of its demonstrations as the
+    curriculum filled with walls, which is why its backplay gate never left
+    rung 0 in 20M steps.
+    """
+    from fsim.vec import VecEnv
+
+    rates = {}
+    for allow in (False, True):
+        env = VecEnv(
+            48, "construct_smelting_line", threads=4, shaping="both",
+            action_space="v2", demo_starts=0.5, demo_obstructed=allow,
+        )  # fmt: skip
+        env.demo_window = (0, 2)
+        try:
+            demonstrated = total = 0
+            for _ in range(8):
+                env.reset()
+                demonstrated += sum(1 for s in env.starts if s != "scene")
+                total += len(env.starts)
+            rates[allow] = demonstrated / total
+        finally:
+            env.close()
+    # --demo-starts 0.5 should mean about half, and only a stuck builder
+    # should cost one.
+    assert rates[True] > rates[False] + 0.07, rates
+    assert 0.44 < rates[True] < 0.56, rates
+
+
+def test_a_stuck_demonstration_is_rolled_back():
+    """A half-finished demonstration is worse than none: it starts the policy
+    from a state the expert never reaches, and labels it as though the expert
+    had. Every episode is either a full demonstration to its cut or a plain
+    scene start."""
+    from fsim.vec import VecEnv
+
+    env = VecEnv(
+        64, "construct_smelting_line", threads=4, shaping="both",
+        action_space="v2", demo_starts=1.0, demo_obstructed=True,
+    )  # fmt: skip
+    env.demo_window = (0, 2)
+    try:
+        for _ in range(6):
+            env.reset()
+            for i, start in enumerate(env.starts):
+                assert start == "scene" or start.startswith("back"), start
+                # A rolled-back attempt reports no decisions taken.
+                if start == "scene":
+                    assert env.lengths[i] == 0, (start, env.lengths[i])
+    finally:
+        env.close()

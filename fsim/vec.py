@@ -119,6 +119,7 @@ class VecEnv:
         group: int = 1,
         autoreset: bool = True,
         level_source=None,
+        demo_obstructed: bool = True,
     ) -> None:
         """`obs_memory`, if given, is `(address, owner)`: `n * sizeof(fsim_obs)`
         bytes the observations are written into instead of a fresh block -- a
@@ -172,6 +173,17 @@ class VecEnv:
         # The builder puts the same line down for either task -- it solves
         # every build_line training scene it is given -- so both may use it.
         self.demo_starts = demo_starts
+        #: Demonstrate on scenes that contain walls too. The builder walks in
+        #: straight lines, so this was refused outright -- but measured, it
+        #: completes the line on 92% of `cluttered_patch` scenes and 91% of the
+        #: walled levels UED generates. Refusing cost the hand-written arm a
+        #: quarter of its demonstrations and the UED arm three fifths of them,
+        #: which is the difference between a curriculum that advances and one
+        #: that sits on its first rung. An attempt that gets stuck is rolled
+        #: back to the scene's own start, so the 8% that fail cost a reset and
+        #: nothing else. False restores the old behaviour for comparison with
+        #: runs made before 2026-09-20.
+        self.demo_obstructed = demo_obstructed
         #: Backplay's window, in decisions back from the end of the build: an
         #: episode with a demonstration start runs all but `U[lo, hi]` of it.
         #: `None` draws a stage uniformly instead (Backplay's "Uniform").
@@ -311,20 +323,33 @@ class VecEnv:
         # The builder walks in straight lines, so it can only demonstrate a
         # scene with nothing in the way; an obstructed one starts from scratch.
         obstructed = bool(scene["entities"])
-        if self.demo_starts and not obstructed and draw.random() < self.demo_starts:
+        eligible = self.demo_obstructed or not obstructed
+        if self.demo_starts and eligible and draw.random() < self.demo_starts:
             patch = scene["markers"]["patch"]
-            layout = expert.choose_layout(rl, patch, draw if self.demo_layouts else None)
-            if self.demo_window is None:
-                start = draw.choice(expert.STAGES)
-                taken = expert.advance_to(rl, patch, start, self._demo_step(rl), layout)
-            else:
-                length = expert.plan_length(rl, patch, layout)
-                lo, hi = self.demo_window
-                back = draw.randint(min(lo, length), min(hi, length))
-                taken = expert.advance_decisions(
-                    rl, patch, length - back, self._demo_step(rl), layout
-                )
-                start = "scene" if back >= length else f"back{back}"
+            # No buildable arrangement at all: nothing to demonstrate.
+            if expert.layouts(rl, patch):
+                layout = expert.choose_layout(rl, patch, draw if self.demo_layouts else None)
+                if self.demo_window is None:
+                    stage = draw.choice(expert.STAGES)
+                    taken = expert.advance_to(rl, patch, stage, self._demo_step(rl), layout)
+                    start = stage if taken else "scene"
+                else:
+                    length = expert.plan_length(rl, patch, layout)
+                    lo, hi = self.demo_window
+                    back = draw.randint(min(lo, length), min(hi, length))
+                    wanted = length - back
+                    taken = expert.advance_decisions(
+                        rl, patch, wanted, self._demo_step(rl), layout
+                    )
+                    if taken < wanted:
+                        # The builder walks in straight lines and something was
+                        # in the way. A half-finished demonstration is worse
+                        # than none -- it starts the policy from a state the
+                        # expert never reaches -- so put the scene back.
+                        lib.fsim_rl_reset(rl, task, c_scene)
+                        start, taken = "scene", 0
+                    else:
+                        start = "scene" if back >= length else f"back{back}"
         self._encode(self.rls[i], ffi.addressof(self._obs_c, i))
         lib.fsim_rl_mask(self.rls[i], ffi.addressof(self._masks_c, i * lib.RL_MASK_SIZE))
         self.families[i] = family

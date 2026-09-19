@@ -298,6 +298,18 @@ def parse(argv=None) -> argparse.Namespace:
     p.add_argument("--autoregressive", dest="autoregressive", action="store_true")
     p.set_defaults(autoregressive=True)
     p.add_argument(
+        "--no-demo-obstructed",
+        dest="demo_obstructed",
+        action="store_false",
+        help="refuse to demonstrate on any scene containing walls, as every "
+        "run before 2026-09-20 did. The builder walks in straight lines so "
+        "this looked safe, but it completes the line on 92%% of cluttered "
+        "scenes, and refusing cost a quarter of the hand-written arm's "
+        "demonstrations and a rising share of a UED arm's. Kept only so an "
+        "older run can be reproduced",
+    )
+    p.set_defaults(demo_obstructed=True)
+    p.add_argument(
         "--fixed-demo-layout",
         action="store_true",
         help="demonstrate the one canonical build pose rather than drawing one, "
@@ -722,6 +734,7 @@ def main(argv=None) -> int:
         max_steps=tuple(args.horizon_curriculum) if args.horizon_curriculum else args.max_steps,
         tick_limit=args.tick_limit,
         demo_starts=args.demo_starts, compact=True, action_space=args.action_space,
+        demo_obstructed=args.demo_obstructed,
         group=args.group, autoreset=not args.whole_episodes,
         level_source=curriculum.level_for if curriculum is not None else None,
         **rollout.memories(),
