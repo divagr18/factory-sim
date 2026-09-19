@@ -151,6 +151,21 @@ class GatedBackplay:
 def parse(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--run", required=True)
+    p.add_argument(
+        "--algo",
+        choices=("ppo", "grpo"),
+        default="ppo",
+        help="grpo drops the critic: --group environments share a scene, each "
+        "runs one whole episode, and an episode's advantage is its return "
+        "standardised against its group's (Shao et al. 2024, and RLOO before "
+        "it). --horizon must then cover a whole episode and --vf is ignored",
+    )
+    p.add_argument(
+        "--group",
+        type=int,
+        default=8,
+        help="attempts per scene under --algo grpo; the baseline is their mean",
+    )
     p.add_argument("--task", default="construct_smelting_line")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--steps", type=int, default=20_000_000)
@@ -347,6 +362,26 @@ def unpacked(obs: dict) -> dict:
     return {**obs, "grid": grid}
 
 
+def group_advantage(rewards: torch.Tensor, live: torch.Tensor, group: int) -> torch.Tensor:
+    """GRPO's advantage: one number per episode, worn by all of its decisions.
+
+    `rewards` and `live` are `(horizon, envs)`; consecutive blocks of `group`
+    environments ran the same scene, so an episode's return is judged against
+    its group's mean and spread rather than against a critic's guess (Shao et
+    al. 2024). Timesteps after an episode ended are not part of it and get
+    zero, so they contribute no gradient.
+
+    A group whose members all scored the same gets zero advantage throughout,
+    which is the honest answer: nothing in it distinguishes a better attempt
+    from a worse one.
+    """
+    totals = (rewards * live).sum(0)
+    by_group = totals.view(-1, group)
+    centred = by_group - by_group.mean(1, keepdim=True)
+    scaled = centred / (by_group.std(1, keepdim=True) + 1e-8)
+    return scaled.reshape(1, -1) * live
+
+
 def features(policy: Policy, obs: dict) -> torch.Tensor:
     """The extractor under bf16 autocast; the heads run in float32.
 
@@ -460,14 +495,22 @@ def main(argv=None) -> int:
         shaping=args.shaping, gamma=args.gamma, start_curriculum=args.start_curriculum,
         max_steps=tuple(args.horizon_curriculum) if args.horizon_curriculum else 600,
         demo_starts=args.demo_starts, compact=True, action_space=args.action_space,
+        group=args.group if args.algo == "grpo" else 1, autoreset=args.algo != "grpo",
         **rollout.memories(),
     )  # fmt: skip
     env.demo_layouts = not args.fixed_demo_layout
 
     N, T = args.envs, args.horizon
     batch = N * T
-    mb = batch // args.minibatches
     updates = args.steps // batch
+    if args.algo == "grpo":
+        longest = max(args.horizon_curriculum) if args.horizon_curriculum else 600
+        if T < longest:
+            raise SystemExit(
+                f"--algo grpo needs --horizon >= {longest}, the longest episode: a "
+                "group's returns are its episodes' returns, and an episode cut at "
+                f"the horizon has none. Got --horizon {T}."
+            )
     buf = {
         # The byte grid, unpacked once in the rollout graph: the update reads it
         # every epoch, and unpacking per minibatch cost more than it saved.
@@ -484,6 +527,10 @@ def main(argv=None) -> int:
     rew_buf = torch.zeros((T, N), device=device)
     done_buf = torch.zeros((T, N), device=device)
     val_buf = torch.zeros((T, N), device=device)
+    #: GRPO only: whether the timestep belongs to an episode still running. An
+    #: environment that finishes early keeps producing observations, and none
+    #: of them are part of any episode.
+    live_buf = torch.zeros((T, N), device=device)
 
     env.reset()
     host_step = torch.empty((2, N), dtype=torch.float32, pin_memory=device.type == "cuda")
@@ -492,6 +539,9 @@ def main(argv=None) -> int:
     episodes: list[dict] = []
     gate = GatedBackplay(threshold=args.gate)
     steps = 0
+    decisions = 0
+    unfinished = 0.0
+    spread = 0.0
     start = time.perf_counter()
     next_eval = args.eval_every
     best = -1.0
@@ -510,12 +560,19 @@ def main(argv=None) -> int:
         frac = 1.0 - (update - 1) / updates
         for group in optimizer.param_groups:
             group["lr"] = frac * args.lr
+        if args.algo == "grpo":
+            # Every rollout is a fresh set of episodes: a group's returns are
+            # only comparable if its members started together.
+            env.reset()
+            next_done = torch.zeros(N, device=device)
+        live = torch.ones(N, device=device)
         for t in range(T):
             obs, action, logp, value = rollout()
             for k in KEYS:
                 buf[k][t].copy_(obs[k])
             masks_buf[t].copy_(rollout.mask)
             done_buf[t].copy_(next_done)
+            live_buf[t].copy_(live)
             actions_buf[t].copy_(action)
             logp_buf[t].copy_(logp)
             val_buf[t].copy_(value)
@@ -526,30 +583,51 @@ def main(argv=None) -> int:
             host = host_step.to(device, non_blocking=True)
             rew_buf[t].copy_(host[0])
             next_done = host[1]
+            live = live * (1.0 - next_done)
         steps += batch
         rolled = clock()
 
         with torch.no_grad():
-            next_value = rollout()[3].clone()
-            adv = torch.zeros_like(rew_buf)
-            last = torch.zeros(N, device=device)
-            for t in reversed(range(T)):
-                if t == T - 1:
-                    nonterminal = 1.0 - next_done
-                    value_next = next_value
-                else:
-                    nonterminal = 1.0 - done_buf[t + 1]
-                    value_next = val_buf[t + 1]
-                delta = rew_buf[t] + args.gamma * value_next * nonterminal - val_buf[t]
-                last = delta + args.gamma * args.lam * nonterminal * last
-                adv[t] = last
-            returns = adv + val_buf
+            if args.algo == "grpo":
+                adv = group_advantage(rew_buf, live_buf, args.group)
+                returns = torch.zeros_like(adv)
+                unfinished = float(live.sum())
+                # The number to watch: a group whose attempts all score the
+                # same teaches nothing, and GRPO stalls without ever erroring.
+                totals = (rew_buf * live_buf).sum(0).view(-1, args.group)
+                spread = float(totals.std(1).mean())
+            else:
+                next_value = rollout()[3].clone()
+                adv = torch.zeros_like(rew_buf)
+                last = torch.zeros(N, device=device)
+                for t in reversed(range(T)):
+                    if t == T - 1:
+                        nonterminal = 1.0 - next_done
+                        value_next = next_value
+                    else:
+                        nonterminal = 1.0 - done_buf[t + 1]
+                        value_next = val_buf[t + 1]
+                    delta = rew_buf[t] + args.gamma * value_next * nonterminal - val_buf[t]
+                    last = delta + args.gamma * args.lam * nonterminal * last
+                    adv[t] = last
+                returns = adv + val_buf
+                unfinished = 0.0
+                spread = 0.0
 
         flat = {k: v.reshape(batch, *v.shape[2:]) for k, v in buf.items()}
         b_masks = masks_buf.reshape(batch, -1)
         b_actions = actions_buf.reshape(batch, -1)
         b_logp, b_adv = logp_buf.reshape(-1), adv.reshape(-1)
         b_ret, b_val = returns.reshape(-1), val_buf.reshape(-1)
+        # GRPO trains on the decisions that were actually part of an episode.
+        # The rest are an artefact of holding the horizon open until the last
+        # group member finishes.
+        usable = torch.nonzero(live_buf.reshape(-1), as_tuple=False).squeeze(1)
+        if args.algo != "grpo":
+            usable = torch.arange(batch, device=device)
+        n_usable = usable.numel()
+        decisions += n_usable
+        mb = max(1, n_usable // args.minibatches)
 
         stats = {"pg": [], "v": [], "ent": [], "kl": [], "clipfrac": [], "prior_kl": []}
         # VPT decays rho by a fixed factor each iteration, so the prior protects
@@ -558,25 +636,31 @@ def main(argv=None) -> int:
         # policy can eventually maximize the reward function."
         rho = args.kl_coef * args.kl_decay ** (update - 1)
         for _epoch in range(args.epochs):
-            order = torch.randperm(batch, device=device)
-            for s in range(0, batch, mb):
+            order = usable[torch.randperm(n_usable, device=device)]
+            for s in range(0, n_usable, mb):
                 idx = order[s : s + mb]
                 f = features(policy, {k: v[idx] for k, v in flat.items()})
                 logp, entropy = policy.evaluate(f, b_masks[idx], b_actions[idx])
-                value = policy.value(f)
                 ratio_log = logp - b_logp[idx]
                 ratio = ratio_log.exp()
                 a = b_adv[idx]
-                if not args.no_adv_norm:
+                if not args.no_adv_norm and args.algo != "grpo":
+                    # GRPO has already standardised, against the group rather
+                    # than against whatever else landed in this minibatch.
                     a = (a - a.mean()) / (a.std() + 1e-8)
                 pg = torch.max(-a * ratio, -a * ratio.clamp(1 - args.clip, 1 + args.clip)).mean()
-                vf_clip = args.clip if args.vf_clip is None else args.vf_clip
-                v_clipped = b_val[idx] + (value - b_val[idx]).clamp(-vf_clip, vf_clip)
-                v_loss = (
-                    0.5 * torch.max((value - b_ret[idx]) ** 2, (v_clipped - b_ret[idx]) ** 2).mean()
-                )
                 ent = entropy.mean()
-                loss = pg - args.ent * ent + args.vf * v_loss
+                v_loss = torch.zeros((), device=device)
+                if args.algo == "grpo":
+                    loss = pg - args.ent * ent
+                else:
+                    value = policy.value(f)
+                    vf_clip = args.clip if args.vf_clip is None else args.vf_clip
+                    v_clipped = b_val[idx] + (value - b_val[idx]).clamp(-vf_clip, vf_clip)
+                    v_loss = 0.5 * torch.max(
+                        (value - b_ret[idx]) ** 2, (v_clipped - b_ret[idx]) ** 2
+                    ).mean()
+                    loss = pg - args.ent * ent + args.vf * v_loss
                 prior_kl = torch.zeros((), device=device)
                 if prior is not None:
                     op = b_actions[idx][:, 0]
@@ -621,6 +705,12 @@ def main(argv=None) -> int:
             "time_rollout": round(rolled - began, 4),
             "time_update": round(updated - rolled, 4),
             "steps": steps,
+            # Under GRPO the horizon is held open until the last member of a
+            # group finishes, so some of the steps executed belong to no
+            # episode. `decisions` is the count that actually trained.
+            "decisions": decisions,
+            "unfinished": unfinished,
+            "group_spread": round(spread, 5),
             "sps": round(steps / elapsed),
             "lr": optimizer.param_groups[0]["lr"],
             "episodes": len(episodes),

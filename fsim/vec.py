@@ -115,6 +115,8 @@ class VecEnv:
         compact: bool = False,
         mask_memory=None,
         action_space: str = "v1",
+        group: int = 1,
+        autoreset: bool = True,
     ) -> None:
         """`obs_memory`, if given, is `(address, owner)`: `n * sizeof(fsim_obs)`
         bytes the observations are written into instead of a fresh block -- a
@@ -126,6 +128,18 @@ class VecEnv:
         begin at the scene's own start.
 
         `mask_memory` is the same for the `n * 201` mask bytes.
+
+        `group` makes consecutive environments share a scene: `i` and `j` draw
+        the same seed when `i // group == j // group`, so a group is `group`
+        attempts at one episode. GRPO's baseline is the group's own mean return,
+        which only means anything if the group faces the same scene.
+
+        `autoreset=False` leaves a finished environment finished: `step` reports
+        it once and then reports nothing more from it, and its rewards read
+        zero. A group-relative learner needs one whole episode per environment
+        per rollout, not a stream cut at the horizon. The environment is still
+        reset underneath (to its own scene again, not a new one) so its action
+        mask stays legal -- everything it produces afterwards is discarded.
 
         `compact` writes `fsim_obs8` observations: the grid's flag planes as
         bits and its amount plane as bytes, round(255 * value) -- which the
@@ -153,6 +167,14 @@ class VecEnv:
         #: demonstrations, which a policy memorises (`docs/shaping.md`).
         self.demo_layouts: bool = True
         self.action_space = action_space
+        if n % group:
+            raise ValueError(f"{n} environments do not divide into groups of {group}")
+        self.group = group
+        self.autoreset = autoreset
+        self._group_seeds = [0] * (n // group)
+        self._seed_of = [0] * n
+        #: False once an episode ends under `autoreset=False`, until `reset`.
+        self.alive = np.ones(n, dtype=bool)
         self._step_vector = ffi.new("int32_t[6]")
 
         self._sim = Sim()  # owns the map's water; `env` dies with it
@@ -223,9 +245,23 @@ class VecEnv:
     def __del__(self) -> None:
         self.close()
 
-    def _reset_one(self, i: int) -> None:
-        seed = self.seed_base + self.episodes_started
-        self.episodes_started += 1
+    def _seed_for(self, i: int) -> int:
+        """The scene seed for environment `i`, drawn once per group.
+
+        `reset` walks the environments in order, so the group's first member
+        draws and the rest read what it drew. With `group == 1` every member is
+        a first member and this is the plain per-episode counter.
+        """
+        g = i // self.group
+        if i % self.group == 0:
+            self._group_seeds[g] = self.seed_base + self.episodes_started
+            self.episodes_started += 1
+        return self._group_seeds[g]
+
+    def _reset_one(self, i: int, seed: int | None = None) -> None:
+        if seed is None:
+            seed = self._seed_for(i)
+        self._seed_of[i] = seed
         family, scene = scenes.sample(self.task, self.split, seed, self.start_curriculum)
         c_scene, keep = scene_struct(scene)
         budget = self.max_steps
@@ -283,6 +319,7 @@ class VecEnv:
     def reset(self) -> tuple[dict, np.ndarray]:
         for i in range(self.n):
             self._reset_one(i)
+        self.alive[:] = True
         return self.obs, self.masks
 
     def _run(self, bounds) -> None:
@@ -310,6 +347,13 @@ class VecEnv:
         rewards = self.rewards.copy()
         terminated = self.flags[:, 0].astype(bool)
         truncated = self.flags[:, 1].astype(bool)
+        if not self.autoreset:
+            # An environment that has already finished keeps being stepped --
+            # the C side walks a contiguous range -- but nothing it produces
+            # counts. Zero its reward and never report it a second time.
+            terminated &= self.alive
+            truncated &= self.alive
+            rewards[~self.alive] = 0.0
         self.returns += rewards
         self.lengths += 1
         np.maximum(self.peak_potential, self.potentials, out=self.peak_potential)
@@ -329,5 +373,12 @@ class VecEnv:
                     "peak_potential": float(self.peak_potential[i]),
                 }
             )
-            self._reset_one(i)
+            if self.autoreset:
+                self._reset_one(i)
+            else:
+                # Park it on its own scene again rather than drawing the next
+                # one: a fresh scene would consume a group's seed out of turn,
+                # and the environment only needs a legal mask from here on.
+                self.alive[i] = False
+                self._reset_one(i, seed=self._seed_of[i])
         return self.obs, self.masks, rewards, terminated, truncated, episodes
