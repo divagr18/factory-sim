@@ -123,11 +123,28 @@ def test_shaping_leaves_the_sparse_reward_alone():
         assert extra == pytest.approx(0.0, abs=1e-12)
 
 
-def test_shaping_is_refused_for_build_line():
+def test_build_line_is_shaped_after_its_own_components():
+    """The same potential describes both tasks; it is reported after the
+    task's own components, which build_line fills three of."""
+    from fsim.rl import component_names, SHAPING
+
+    assert component_names("build_line", SHAPING["both"]) == (
+        "constructed", "plates_produced", "step_cost", "line_progress", "line_potential",
+    )  # fmt: skip
+    assert component_names("construct_smelting_line", SHAPING["both"]) == (
+        "verified_output", "line_progress", "line_potential",
+    )  # fmt: skip
+    assert component_names("build_line", SHAPING["none"]) == (
+        "constructed", "plates_produced", "step_cost",
+    )  # fmt: skip
+
     env = RlEnv()
     _, scene = scenes.sample("build_line", "train", 0)
-    with pytest.raises(ValueError):
-        env.reset("build_line", scene, shaping="progress")
+    env.reset("build_line", scene, shaping="both")
+    _obs, _reward, _term, _trunc, info = env.step([21, 0, 0, 0, 0, 0])
+    named = info["reward_components"]
+    assert set(named) == set(component_names("build_line", SHAPING["both"]))
+    assert named["step_cost"] == pytest.approx(-0.001)
 
 
 def test_progress_pays_each_rise_of_the_potential_once():

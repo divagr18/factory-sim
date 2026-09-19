@@ -123,7 +123,7 @@ class VecEnv:
 
         `demo_starts` is the fraction of episodes that begin partway along the
         scripted build (`fsim.expert`), at a stage drawn uniformly; the rest
-        begin at the scene's own start. construct_smelting_line only.
+        begin at the scene's own start.
 
         `mask_memory` is the same for the `n * 201` mask bytes.
 
@@ -141,8 +141,8 @@ class VecEnv:
         self.max_steps = max_steps
         self.seed_base = (EVAL_SEED_BASE if eval_seeds else 0) + seed * 1_000_003
         self.episodes_started = 0
-        if demo_starts and task != "construct_smelting_line":
-            raise ValueError("demonstration starts exist for construct_smelting_line only")
+        # The builder puts the same line down for either task -- it solves
+        # every build_line training scene it is given -- so both may use it.
         self.demo_starts = demo_starts
         #: Backplay's window, in decisions back from the end of the build: an
         #: episode with a demonstration start runs all but `U[lo, hi]` of it.

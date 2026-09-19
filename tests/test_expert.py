@@ -144,6 +144,21 @@ def test_demo_starts_are_reported_and_evaluation_is_untouched():
     assert set(plain.starts) == {"scene"} and not np.any(plain.lengths)
 
 
-def test_demo_starts_are_refused_for_build_line():
-    with pytest.raises(ValueError):
-        VecEnv(2, "build_line", demo_starts=0.5)
+def test_the_builder_solves_build_line_too():
+    """Both tasks build the same line, so one builder demonstrates both."""
+    for seed in range(8):
+        family, scene = scenes.sample("build_line", "train", seed)
+        env = RlEnv()
+        env.reset("build_line", scene)
+        expert.run_to_completion(env.rl, scene["markers"]["patch"])
+        assert env.rl.success, (family, seed)
+
+
+def test_build_line_may_have_demonstration_starts():
+    env = VecEnv(16, "build_line", demo_starts=1.0, shaping="both", seed=3)
+    env.demo_window = (0, 0)
+    try:
+        env.reset()
+        assert set(env.starts) == {"back0"}, env.starts
+    finally:
+        env.close()

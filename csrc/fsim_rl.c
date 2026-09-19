@@ -723,7 +723,13 @@ double fsim_rl_step(fsim_rl *rl, const int32_t *vector) {
     int succeeded = rl_succeeded(rl);
     int terminated = succeeded;
     double reward = rl_rewards(rl, succeeded);
-    int shaping = rl->task.task == TASK_CONSTRUCT_SMELTING_LINE ? rl->task.shaping : SHAPING_NONE;
+    /* Both tasks build the same line, so the same potential describes both.
+     * build_line's own reward already pays for plates on a high-water mark,
+     * but nothing pays for walking to the patch and putting the machines down,
+     * and a policy that never produces a plate sees a constant return: measured
+     * over forty million steps from scratch, exactly -0.6 at every checkpoint,
+     * which is six hundred steps of step cost and no gradient at all. */
+    int shaping = rl->task.shaping;
     /* The transition is scored before the verification window runs, as
      * `FactorioEnv.step` scores it; `run_verification` then scores a second
      * transition, from s' to the state after the window, which is terminal. */
@@ -733,11 +739,14 @@ double fsim_rl_step(fsim_rl *rl, const int32_t *vector) {
         /* components: [verified_output, line_progress or line_potential]
          * for one mode, [verified_output, line_progress, line_potential] for
          * both. */
+        /* After the task's own components: build_line fills three, the other
+         * task fills one. */
+        int32_t at = rl->task.task == TASK_BUILD_LINE ? 3 : 1;
         if (shaping == SHAPING_BOTH) {
-            rl->components[1] = parts[0];
-            rl->components[2] = parts[1];
+            rl->components[at] = parts[0];
+            rl->components[at + 1] = parts[1];
         } else {
-            rl->components[1] = shaped;
+            rl->components[at] = shaped;
         }
         reward += shaped;
     }
