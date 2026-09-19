@@ -26,7 +26,7 @@ def test_advantage_is_relative_to_the_group():
     rewards = torch.zeros(4, 6)
     rewards[0] = torch.tensor([0.0, 1.0, 2.0, 10.0, 20.0, 30.0])
     live = torch.ones(4, 6)
-    adv = _group_advantage(rewards, live, 3)
+    adv = _group_advantage(rewards, live, 3, 1.0)
 
     assert adv.shape == (4, 6)
     # Every timestep of an episode carries that episode's single number.
@@ -44,7 +44,7 @@ def test_dead_timesteps_neither_count_nor_train():
     rewards = torch.ones(4, 2)
     live = torch.ones(4, 2)
     live[2:, 0] = 0.0  # the first episode ended after two decisions
-    adv = _group_advantage(rewards, live, 2)
+    adv = _group_advantage(rewards, live, 2, 1.0)
 
     # Return 2 against return 4: the shorter episode is the worse one here.
     assert adv[0, 0] < 0 < adv[0, 1]
@@ -55,14 +55,14 @@ def test_dead_timesteps_neither_count_nor_train():
 def test_a_tied_group_has_nothing_to_say():
     rewards = torch.full((3, 4), 0.25)
     for baseline in ("group", "loo"):
-        adv = _group_advantage(rewards, torch.ones(3, 4), 4, baseline)
+        adv = _group_advantage(rewards, torch.ones(3, 4), 4, 1.0, baseline)
         assert torch.allclose(adv, torch.zeros(3, 4), atol=1e-6), baseline
 
 
 def test_leave_one_out_judges_against_the_others():
     rewards = torch.zeros(1, 4)
     rewards[0] = torch.tensor([0.0, 0.0, 0.0, 4.0])
-    adv = _group_advantage(rewards, torch.ones(1, 4), 4, "loo")
+    adv = _group_advantage(rewards, torch.ones(1, 4), 4, 1.0, "loo")
     # The winner beat the other three, who averaged 0; each loser trailed a
     # field averaging 4/3.
     assert adv[0, 3] == pytest.approx(4.0)
@@ -76,8 +76,8 @@ def test_leave_one_out_does_not_inflate_a_near_tie():
     # small one, because the difference really was small.
     rewards = torch.zeros(1, 4)
     rewards[0] = torch.tensor([0.0, 0.0, 0.0, 1e-3])
-    standardised = _group_advantage(rewards, torch.ones(1, 4), 4, "group")
-    leave_one_out = _group_advantage(rewards, torch.ones(1, 4), 4, "loo")
+    standardised = _group_advantage(rewards, torch.ones(1, 4), 4, 1.0, "group")
+    leave_one_out = _group_advantage(rewards, torch.ones(1, 4), 4, 1.0, "loo")
     assert standardised[0, 3] > 1.0
     assert leave_one_out[0, 3] < 1e-2
 
@@ -145,7 +145,7 @@ def test_reward_to_go_credits_the_decision_that_earned_it():
     rewards[2, 1] = 1.0  # paid late
     live = torch.ones(3, 2)
 
-    flat = _group_advantage(rewards, live, 2)
+    flat = _group_advantage(rewards, live, 2, 1.0)
     # Same total, so the episode-return baseline has nothing to say at all.
     assert torch.allclose(flat, torch.zeros(3, 2), atol=1e-5)
 
@@ -156,7 +156,7 @@ def test_reward_to_go_credits_the_decision_that_earned_it():
     assert togo[1, 1] > 0 > togo[1, 0]
 
 
-def test_reward_to_go_discounts_and_stays_inside_the_episode():
+def test_reward_to_go_stays_inside_the_episode():
     rewards = torch.zeros(4, 2)
     rewards[3, 0] = 1.0
     live = torch.ones(4, 2)
@@ -164,9 +164,57 @@ def test_reward_to_go_discounts_and_stays_inside_the_episode():
     togo = _togo_advantage(rewards, live, 2, 0.5)
     # The dead tail of the second episode contributes nothing and is silent.
     assert torch.equal(togo[2:, 1], torch.zeros(2))
-    # The first episode's payment is discounted back: 0.5^3, 0.5^2, 0.5, 1.
-    assert togo[0, 0] != 0.0
-    assert abs(float(togo[3, 0])) > abs(float(togo[0, 0]))
+    # And once it has died its sibling has nobody left to be judged against,
+    # so the group says nothing rather than crediting the survivor for having
+    # outlived it.
+    assert torch.equal(togo[2:, 0], torch.zeros(2))
+    # While both ran, the one still owed a payment is ahead of the one that is not.
+    assert togo[0, 0] > 0 > togo[0, 1]
+
+
+def test_a_dead_sibling_is_not_a_zero_in_the_baseline():
+    """Four attempts at one scene, each paid exactly 1.0 at its own last
+    decision -- three early, one late. Nothing distinguishes them, so nothing
+    should be credited. Counting the finished three as zeros instead hands the
+    survivor a large advantage for merely still being alive, and here success
+    is what ends an episode, so the survivors are the failures."""
+    rewards = torch.zeros(4, 4)
+    live = torch.ones(4, 4)
+    for n in range(3):
+        live[2:, n] = 0.0
+        rewards[1, n] = 1.0
+    rewards[3, 3] = 1.0
+    togo = _togo_advantage(rewards, live, 4, 1.0)
+    assert togo.abs().max() < 1e-5, togo
+
+
+def test_the_episode_return_is_discounted_so_shaping_still_telescopes():
+    """A potential-based term is gamma * phi(s') - phi(s). Summed under the
+    same gamma it telescopes to -phi(s_0), which every member of a group
+    shares because they share a scene, so the baseline removes it. Summed
+    undiscounted it leaves (gamma - 1) * sum_t phi(s_t) -- a penalty for
+    having been in a high-potential state at all."""
+    gamma, horizon = 0.999, 600
+    live = torch.ones(horizon, 2)
+    rewards = torch.zeros(horizon, 2)
+    # Member 0 walks in and builds; member 1 never leaves the start.
+    climbs = [min(0.9, t / 200 * 0.9) for t in range(horizon)] + [0.0]
+    flat = [0.05] * horizon + [0.0]
+    for n, phi in enumerate((climbs, flat)):
+        for t in range(horizon):
+            rewards[t, n] = gamma * phi[t + 1] - phi[t]
+
+    # Undiscounted, the builder's return is the *worse* of the two by a wide
+    # margin: the shaping has been turned upside down.
+    undiscounted = float(rewards[:, 0].sum()), float(rewards[:, 1].sum())
+    assert undiscounted[0] < undiscounted[1] - 0.3, undiscounted
+
+    # Discounted and judged leave-one-out, which does not divide the magnitude
+    # away, the builder is ahead -- and only by the difference in phi(s_0),
+    # because everything else telescoped.
+    adv = _group_advantage(rewards, live, 2, gamma, "loo")
+    assert float(adv[0, 0]) > 0 > float(adv[0, 1])
+    assert abs(float(adv[0, 0])) < 0.1, adv[0]
 
 
 def test_whole_episodes_is_a_rollout_shape_not_a_learner():

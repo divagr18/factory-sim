@@ -399,9 +399,31 @@ def unpacked(obs: dict) -> dict:
     return {**obs, "grid": grid}
 
 
+def _group_stats(values: torch.Tensor, live: torch.Tensor, group: int, baseline: str):
+    """Centre `values` on their group, counting only the members still running.
+
+    A member whose episode has ended contributes nothing to `values` at that
+    timestep, and must not be averaged in either: with a plain mean over the
+    block, four dead siblings scoring a nominal zero halve the baseline and
+    hand the survivor a large advantage for no reason. Here, success ends an
+    episode, so the attempts that run longest are the failures -- averaging the
+    dead in pays the policy to fail.
+    """
+    counts = live.sum(-1, keepdim=True)
+    mean = (values * live).sum(-1, keepdim=True) / counts.clamp(min=1.0)
+    centred = (values - mean) * live
+    if baseline == "loo":
+        # R_i against the mean of the others = (n / (n - 1)) * (R_i - mean),
+        # over the n that were actually running.
+        return centred * torch.where(counts > 1, counts / (counts - 1).clamp(min=1.0), counts * 0)
+    variance = (centred * centred).sum(-1, keepdim=True) / counts.clamp(min=1.0)
+    return centred / (variance.sqrt() + 1e-8)
+
+
 def group_advantage(
-    rewards: torch.Tensor, live: torch.Tensor, group: int, baseline: str = "group"
-) -> torch.Tensor:
+    rewards: torch.Tensor, live: torch.Tensor, group: int, gamma: float,
+    baseline: str = "group",
+) -> torch.Tensor:  # fmt: skip
     """A critic-free advantage: one number per episode, worn by all of its
     decisions.
 
@@ -425,15 +447,25 @@ def group_advantage(
     A group whose members all scored the same gets zero advantage under either,
     which is the honest answer: nothing in it distinguishes a better attempt
     from a worse one.
+
+    **The return is discounted**, and with potential-based shaping it has to
+    be. A shaped reward is gamma * phi(s') - phi(s), and those terms telescope
+    to a constant only under the same gamma they were written with. Summed
+    undiscounted they leave a residue of (gamma - 1) * sum_t phi(s_t): a
+    penalty proportional to how much potential the policy spent the episode
+    in. Measured at gamma 0.999 over 600 decisions, an episode that builds
+    the line scores -0.45 against -0.08 for one that never leaves the start,
+    so the shaping is not merely diluted but inverted -- the return pays the
+    policy to stay away from the patch. Discounted, every one of those
+    telescopes to exactly -phi(s_0), which is the same for every member of a
+    group because they share a scene, and the baseline removes it outright.
     """
-    totals = (rewards * live).sum(0)
-    by_group = totals.view(-1, group)
-    centred = by_group - by_group.mean(1, keepdim=True)
-    if baseline == "loo":
-        # R_i - mean of the others = (G / (G - 1)) * (R_i - mean of all).
-        scaled = centred * (group / (group - 1)) if group > 1 else centred
-    else:
-        scaled = centred / (by_group.std(1, keepdim=True) + 1e-8)
+    horizon = rewards.shape[0]
+    discount = gamma ** torch.arange(horizon, device=rewards.device, dtype=rewards.dtype)
+    totals = (rewards * live * discount.unsqueeze(1)).sum(0).view(-1, group)
+    # Every member has a whole episode's return, whenever its episode ended,
+    # so every member counts towards the baseline.
+    scaled = _group_stats(totals, torch.ones_like(totals), group, baseline)
     return scaled.reshape(1, -1) * live
 
 
@@ -450,7 +482,15 @@ def togo_advantage(
 
     This is the control for the obvious reading of GRPO's failure here: our
     reward is shaped per decision, and collapsing an episode to one number
-    keeps only its sum.
+    keeps only its sum. It is also what Sutton & Barto's REINFORCE actually
+    uses -- G_t, the return from t, against a baseline that "should vary with
+    state" (2nd ed. 13.4). A single episode return is G_0 worn by all six
+    hundred decisions, which is neither.
+
+    The baseline at each decision counts only the members still running. A
+    member that has finished contributes nothing at that timestep and must not
+    be averaged in as a zero: success ends an episode here, so the longest
+    survivors are the failures, and averaging the dead in pays for failing.
     """
     horizon = rewards.shape[0]
     masked = rewards * live
@@ -459,12 +499,9 @@ def togo_advantage(
     for t in reversed(range(horizon)):
         running = masked[t] + gamma * running
         togo[t] = running
-    by_group = togo.view(horizon, -1, group)
-    centred = by_group - by_group.mean(2, keepdim=True)
-    if baseline == "loo":
-        scaled = centred * (group / (group - 1)) if group > 1 else centred
-    else:
-        scaled = centred / (by_group.std(2, keepdim=True) + 1e-8)
+    scaled = _group_stats(
+        togo.view(horizon, -1, group), live.view(horizon, -1, group), group, baseline
+    )
     return scaled.reshape(horizon, -1) * live
 
 
@@ -684,7 +721,9 @@ def main(argv=None) -> int:
                         rew_buf, live_buf, args.group, args.gamma, args.baseline
                     )
                 else:
-                    adv = group_advantage(rew_buf, live_buf, args.group, args.baseline)
+                    adv = group_advantage(
+                        rew_buf, live_buf, args.group, args.gamma, args.baseline
+                    )
                 returns = torch.zeros_like(adv)
                 unfinished = float(live.sum())
                 # The number to watch: a group whose attempts all score the
