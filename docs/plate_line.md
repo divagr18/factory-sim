@@ -52,8 +52,34 @@ small: the agent sees two machines and carries one item, so
 `give_to(target, item, count)` has roughly six to ten viable combinations
 against the other task's 3,960.
 
-A sharper test needs a bigger conjunction and still no placement: more
-machines in the entity table and several item types in the inventory, so the
-target, item and amount each carry real choice. That is a new scene family
-rather than a new task, but it has to be added to FactorioRL first and the
-holdout re-frozen, as `construct_smelting_line` 1.2.0 was.
+Run anyway, three seeds per arm, to say so with numbers rather than a guess:
+
+| arm | steps to 99% train | held-out sampled | held-out eps-greedy |
+|---|---|---|---|
+| ordered arguments | 0.13 / 0.13 / 0.16M | 0.982 / 1.000 / 0.990 | 0.926 / 1.000 / 0.650 |
+| independent arguments | 0.13 / 0.16 / 0.13M | 0.961 / 0.988 / 0.996 | 0.947 / 0.559 / 0.986 |
+
+Indistinguishable on every measure. This does **not** undo the
+`construct_smelting_line` result -- ordered arguments took held-out success
+there from 60% to 87% over four seeds each, with the give action's reward
+component pinned at exactly 0.00 for 7M steps beforehand. It says the effect
+disappears when the conjunction is small, which is what the mechanism
+predicts and why this task could not test it.
+
+## commissioning_crowded (1.3.0)
+
+The sharper test, added rather than left as a note. Four decoy machines join
+the entity table and two decoy items join the inventory, so
+`give(target, item, amount)` has 6 x 3 x 4 = 72 combinations against 8. Coal
+drops to 50, because with 120 the agent can simply fuel everything and the
+choice of target stops mattering. The decoy drills sit off the ore and the
+decoy furnaces have nothing feeding them, so none can produce a plate however
+it is fuelled: the family enlarges the decision and changes nothing about
+what the task rewards. No placement is added.
+
+It is a **train** family, so the 100 held-out scenes are untouched -- their
+digests hash to `e8e4b86403c5f11e496a82d11a6fba6f` before and after -- and a
+1.2.0 held-out rate and a 1.3.0 one describe the same scenes.
+
+Not yet trained on. The comparison to run is the same one, ordered against
+independent, on a task where the conjunction is real.
