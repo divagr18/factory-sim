@@ -118,6 +118,7 @@ class VecEnv:
         action_space: str = "v1",
         group: int = 1,
         autoreset: bool = True,
+        level_source=None,
     ) -> None:
         """`obs_memory`, if given, is `(address, owner)`: `n * sizeof(fsim_obs)`
         bytes the observations are written into instead of a fresh block -- a
@@ -141,6 +142,14 @@ class VecEnv:
         per rollout, not a stream cut at the horizon. The environment is still
         reset underneath (to its own scene again, not a new one) so its action
         mask stays legal -- everything it produces afterwards is discarded.
+
+        `level_source`, if given, is called as `level_source(i, seed)` when
+        environment `i` resets and returns `(name, blueprint)` in place of
+        drawing one from `scenes.sample`. That is how unsupervised environment
+        design feeds the trainer: the curriculum decides which scene a slot
+        runs, rather than a seed deciding it (`fsim/ued.py`). `families[i]`
+        then reports whatever name the source gave, so metrics can tell a
+        replayed level from a freshly generated one.
 
         `compact` writes `fsim_obs8` observations: the grid's flag planes as
         bits and its amount plane as bytes, round(255 * value) -- which the
@@ -172,12 +181,17 @@ class VecEnv:
         #: demonstrations, which a policy memorises (`docs/shaping.md`).
         self.demo_layouts: bool = True
         self.action_space = action_space
+        #: Where a resetting environment gets its scene. None draws from the
+        #: task's own families, which is every run that is not a UED run.
+        self.level_source = level_source
         if n % group:
             raise ValueError(f"{n} environments do not divide into groups of {group}")
         self.group = group
         self.autoreset = autoreset
         self._group_seeds = [0] * (n // group)
         self._seed_of = [0] * n
+        #: The scene each slot is running, so parking can reuse it.
+        self._scene_of: list[tuple[str, dict] | None] = [None] * n
         #: False once an episode ends under `autoreset=False`, until `reset`.
         self.alive = np.ones(n, dtype=bool)
         self._step_vector = ffi.new("int32_t[6]")
@@ -263,11 +277,20 @@ class VecEnv:
             self.episodes_started += 1
         return self._group_seeds[g]
 
-    def _reset_one(self, i: int, seed: int | None = None) -> None:
+    def _reset_one(self, i: int, seed: int | None = None, reuse: bool = False) -> None:
         if seed is None:
             seed = self._seed_for(i)
         self._seed_of[i] = seed
-        family, scene = scenes.sample(self.task, self.split, seed, self.start_curriculum)
+        if reuse and self._scene_of[i] is not None:
+            # Parking a finished environment must not ask the curriculum for a
+            # new level: the slot's score has not been attributed yet, and
+            # replacing the level first would credit it to the wrong one.
+            family, scene = self._scene_of[i]
+        elif self.level_source is None:
+            family, scene = scenes.sample(self.task, self.split, seed, self.start_curriculum)
+        else:
+            family, scene = self.level_source(i, seed)
+        self._scene_of[i] = (family, scene)
         c_scene, keep = scene_struct(scene)
         budget = self.max_steps
         if not isinstance(budget, int):
@@ -385,5 +408,5 @@ class VecEnv:
                 # one: a fresh scene would consume a group's seed out of turn,
                 # and the environment only needs a legal mask from here on.
                 self.alive[i] = False
-                self._reset_one(i, seed=self._seed_of[i])
+                self._reset_one(i, seed=self._seed_of[i], reuse=True)
         return self.obs, self.masks, rewards, terminated, truncated, episodes

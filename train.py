@@ -54,6 +54,7 @@ from torch import nn
 
 from fsim import ffi, lib
 from fsim.policy import EXTRACTOR_VERSION, Policy, export, masked_kl
+from fsim.ued import Curriculum, LevelBuffer, positive_value_loss
 from fsim.vec import VecEnv, obs_layout, unpack_grid
 
 ROOT = Path(__file__).resolve().parent
@@ -196,6 +197,42 @@ def parse(argv=None) -> argparse.Namespace:
         "RLOO's: centre on the mean of the other attempts and do not divide, "
         "which drops the difficulty bias Liu et al. (2025) attribute to that "
         "division (docs/algorithms.md)",
+    )
+    p.add_argument(
+        "--ued",
+        choices=("off", "plr", "accel"),
+        default="off",
+        help="curate the training scenes instead of drawing them from the "
+        "hand-written families. plr keeps a buffer of high-regret levels and "
+        "draws fresh random ones to test; accel mutates levels already held "
+        "instead, so complexity compounds from the policy's frontier "
+        "(Jiang et al. 2021; Parker-Holder et al. 2022). Implies "
+        "--whole-episodes, so each level gets exactly one episode and its "
+        "score needs no attribution across boundaries",
+    )
+    p.add_argument(
+        "--ued-train-frac",
+        type=float,
+        default=0.75,
+        help="fraction of environment slots that replay curated levels and are "
+        "trained on. The rest run proposed levels, are scored, and take no "
+        "gradient step at all -- that is Robust PLR, and it is what stops the "
+        "policy being updated on whatever the generator happened to emit",
+    )
+    p.add_argument("--ued-buffer", type=int, default=4000)
+    p.add_argument(
+        "--ued-beta", type=float, default=0.3, help="rank temperature: P ~ 1/rank**(1/beta)"
+    )
+    p.add_argument(
+        "--ued-rho", type=float, default=0.3, help="share of the draw that is staleness"
+    )
+    p.add_argument("--ued-edits", type=int, default=2, help="edits per mutation under accel")
+    p.add_argument(
+        "--ued-warm-start",
+        type=int,
+        default=256,
+        help="levels taken from the hand-written training families to start the "
+        "buffer, so the curriculum begins where the project already is",
     )
     p.add_argument("--task", default="construct_smelting_line")
     p.add_argument(
@@ -342,6 +379,10 @@ def parse(argv=None) -> argparse.Namespace:
     # shape. Applied here rather than in main, so anything reading the parsed
     # arguments sees a coherent pair.
     if args.algo == "grpo":
+        args.whole_episodes = True
+    if args.ued != "off":
+        # One episode per level per rollout, so a level's score is the mean
+        # positive advantage over that episode and nothing else.
         args.whole_episodes = True
     return args
 
@@ -654,6 +695,16 @@ def main(argv=None) -> int:
         else None
     )
     rollout = Rollout(policy, args.envs, device, graph=not args.no_graph)
+    curriculum = None
+    if args.ued != "off":
+        train_slots = max(1, int(round(args.envs * args.ued_train_frac)))
+        curriculum = Curriculum(
+            args.task, n=args.envs, train_slots=train_slots, mode=args.ued,
+            buffer=LevelBuffer(
+                capacity=args.ued_buffer, beta=args.ued_beta, rho=args.ued_rho, seed=args.seed
+            ),
+            seed=args.seed, edits=args.ued_edits, warm_start=args.ued_warm_start,
+        )  # fmt: skip
     env = VecEnv(
         args.envs, args.task, split="train", seed=args.seed, threads=args.threads,
         shaping=args.shaping, gamma=args.gamma, start_curriculum=args.start_curriculum,
@@ -661,6 +712,7 @@ def main(argv=None) -> int:
         tick_limit=args.tick_limit,
         demo_starts=args.demo_starts, compact=True, action_space=args.action_space,
         group=args.group, autoreset=not args.whole_episodes,
+        level_source=curriculum.level_for if curriculum is not None else None,
         **rollout.memories(),
     )  # fmt: skip
     env.demo_layouts = not args.fixed_demo_layout
@@ -696,6 +748,11 @@ def main(argv=None) -> int:
     #: environment that finishes early keeps producing observations, and none
     #: of them are part of any episode.
     live_buf = torch.zeros((T, N), device=device)
+    #: Under UED, only the replay slots train. The rest run proposed levels
+    #: purely to score them -- Robust PLR's defining constraint.
+    trains = torch.ones(N, device=device)
+    if curriculum is not None:
+        trains[curriculum.train_slots :] = 0.0
 
     env.reset()
     host_step = torch.empty((2, N), dtype=torch.float32, pin_memory=device.type == "cuda")
@@ -790,6 +847,19 @@ def main(argv=None) -> int:
                 unfinished = 0.0
                 spread = 0.0
 
+        if curriculum is not None:
+            with torch.no_grad():
+                # PLR's score: the mean positive advantage over the episode
+                # this slot just ran. Slots whose episode was empty are not
+                # scored at all rather than scored zero.
+                lived = live_buf.sum(0)
+                paid = (adv.clamp(min=0.0) * live_buf).sum(0)
+                slot_scores = (paid / lived.clamp(min=1.0)).tolist()
+                counts = lived.tolist()
+            curriculum.report(
+                [score if count > 0 else 0.0 for score, count in zip(slot_scores, counts)]
+            )
+
         flat = {k: v.reshape(batch, *v.shape[2:]) for k, v in buf.items()}
         b_masks = masks_buf.reshape(batch, -1)
         b_actions = actions_buf.reshape(batch, -1)
@@ -800,7 +870,7 @@ def main(argv=None) -> int:
         # group member finishes, and belong to no episode at all. This follows
         # the rollout shape, not the learner: a PPO arm run with
         # --whole-episodes has exactly the same dead tail.
-        usable = torch.nonzero(live_buf.reshape(-1), as_tuple=False).squeeze(1)
+        usable = torch.nonzero((live_buf * trains).reshape(-1), as_tuple=False).squeeze(1)
         if not args.whole_episodes:
             usable = torch.arange(batch, device=device)
         n_usable = usable.numel()
@@ -903,6 +973,7 @@ def main(argv=None) -> int:
             "decisions": decisions,
             "unfinished": unfinished,
             "group_spread": round(spread, 5),
+            "ued": curriculum.stats() if curriculum is not None else None,
             "sps": round(steps / elapsed),
             "lr": optimizer.param_groups[0]["lr"],
             "episodes": len(episodes),

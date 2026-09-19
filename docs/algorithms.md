@@ -101,3 +101,46 @@ identically either way.
 
 The reason to care is local rather than borrowed. `--vf 2.0` froze three runs
 here, and the critic was the suspect; this is the knob that tests it.
+
+## UED: curating the scenes instead of hand-writing them
+
+`--ued {plr,accel}` replaces the hand-written training families with a
+curriculum that follows the policy's own frontier. `fsim/ued.py` holds it.
+
+A **level is a parameter vector**, not a seed: patch bounds, offset, start
+angle and two radii, and up to three wall segments. The five hand-written
+families are points in that space, and `tests/test_ued.py` pins the property
+the design rests on -- `family_params` reproduces every one of the ten
+task-family pairs as a **byte-identical payload**, same tiles, same walls,
+same start, drawn in the same order from the same seed. Without that, a UED
+run and a hand-written run would be measured against different worlds.
+
+Two radii rather than one distance, because `construct_smelting_line` draws a
+fresh `uniform(9, 13)` for x and another for y: its starts lie on an
+axis-aligned ellipse. A single distance desynchronised the generator's rng and
+silently changed every scene after the start.
+
+**Scoring** is PLR's positive value loss, `mean(clamp(GAE advantage, 0))` over
+the episode -- high where the policy is still learning, low both where it has
+mastered a level and where it never gets anywhere, which makes it a frontier
+detector rather than a difficulty meter.
+
+**Sampling** mixes rank over score with staleness:
+
+    P = (1 - rho) * P_score + rho * P_staleness,  P_score ~ 1 / rank ** (1/beta)
+
+**Robust PLR** is the constraint that matters, and it lives in the trainer:
+`--ued-train-frac` of the environment slots replay curated levels and are
+trained on; the rest run proposed levels, are scored, and **take no gradient
+step at all**. Training on whatever the generator emitted is what biases
+vanilla PLR. `decisions` in the metrics row is the check -- it comes out at
+exactly the training fraction of `steps`.
+
+**ACCEL** proposes by mutating a level already held rather than drawing a
+fresh random one, so complexity compounds from the frontier. `walls_mean`,
+`tiles_mean` and `from_families` in the `ued` block are how to see whether it
+is working: a curriculum that is doing its job leaves the hand-written
+families behind.
+
+UED implies `--whole-episodes`, so each level gets exactly one episode and its
+score needs no attribution across episode boundaries.
