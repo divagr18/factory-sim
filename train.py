@@ -166,6 +166,16 @@ def parse(argv=None) -> argparse.Namespace:
         default=8,
         help="attempts per scene under --algo grpo; the baseline is their mean",
     )
+    p.add_argument(
+        "--baseline",
+        choices=("group", "loo"),
+        default="group",
+        help="how --algo grpo judges an episode against its group. group is "
+        "GRPO's: centre on the group mean and divide by its spread. loo is "
+        "RLOO's: centre on the mean of the other attempts and do not divide, "
+        "which drops the difficulty bias Liu et al. (2025) attribute to that "
+        "division (docs/algorithms.md)",
+    )
     p.add_argument("--task", default="construct_smelting_line")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--steps", type=int, default=20_000_000)
@@ -362,23 +372,41 @@ def unpacked(obs: dict) -> dict:
     return {**obs, "grid": grid}
 
 
-def group_advantage(rewards: torch.Tensor, live: torch.Tensor, group: int) -> torch.Tensor:
-    """GRPO's advantage: one number per episode, worn by all of its decisions.
+def group_advantage(
+    rewards: torch.Tensor, live: torch.Tensor, group: int, baseline: str = "group"
+) -> torch.Tensor:
+    """A critic-free advantage: one number per episode, worn by all of its
+    decisions.
 
     `rewards` and `live` are `(horizon, envs)`; consecutive blocks of `group`
     environments ran the same scene, so an episode's return is judged against
-    its group's mean and spread rather than against a critic's guess (Shao et
-    al. 2024). Timesteps after an episode ended are not part of it and get
-    zero, so they contribute no gradient.
+    its siblings rather than against a critic's guess. Timesteps after an
+    episode ended are not part of it and get zero, so they contribute no
+    gradient.
 
-    A group whose members all scored the same gets zero advantage throughout,
+    `baseline="group"` is GRPO (Shao et al. 2024): centre on the group's mean,
+    then divide by its standard deviation.
+
+    `baseline="loo"` is RLOO (Kool et al. 2019; Ahmadian et al. 2024): judge an
+    episode against the mean of the *others*, which is an unbiased baseline,
+    and do not divide. The division is what Liu et al. (2025) identify as
+    GRPO's difficulty bias -- a group that nearly all failed has a tiny spread,
+    so dividing by it turns noise into full-size advantages. On a task where
+    most attempts fail that is the case to worry about, which is why both are
+    here rather than only one.
+
+    A group whose members all scored the same gets zero advantage under either,
     which is the honest answer: nothing in it distinguishes a better attempt
     from a worse one.
     """
     totals = (rewards * live).sum(0)
     by_group = totals.view(-1, group)
     centred = by_group - by_group.mean(1, keepdim=True)
-    scaled = centred / (by_group.std(1, keepdim=True) + 1e-8)
+    if baseline == "loo":
+        # R_i - mean of the others = (G / (G - 1)) * (R_i - mean of all).
+        scaled = centred * (group / (group - 1)) if group > 1 else centred
+    else:
+        scaled = centred / (by_group.std(1, keepdim=True) + 1e-8)
     return scaled.reshape(1, -1) * live
 
 
@@ -589,7 +617,7 @@ def main(argv=None) -> int:
 
         with torch.no_grad():
             if args.algo == "grpo":
-                adv = group_advantage(rew_buf, live_buf, args.group)
+                adv = group_advantage(rew_buf, live_buf, args.group, args.baseline)
                 returns = torch.zeros_like(adv)
                 unfinished = float(live.sum())
                 # The number to watch: a group whose attempts all score the

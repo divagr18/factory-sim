@@ -34,6 +34,21 @@ What changes in the rollout:
   flight. Held-out generalisation is the number this project is judged on and
   scene diversity is what buys it, so this is the cost to watch, not a detail.
 
+### `--baseline loo`: RLOO, and the division GRPO does not need
+
+`--baseline group` is GRPO as published: centre an episode on its group's mean,
+then divide by the group's standard deviation. `--baseline loo` is RLOO
+(Kool et al. 2019; Ahmadian et al. 2024): judge the episode against the mean of
+the *other* attempts, which is an unbiased baseline, and divide by nothing.
+
+The division is not free. Liu et al. (2025) identify it as a difficulty bias:
+a group whose attempts all scored about the same has a spread near zero, so
+dividing by it turns a rounding-error difference into a full-size advantage.
+`tests/test_grpo.py` pins the case — three failures and a fourth attempt better
+by 1e-3 produce an advantage above 1.0 under `group` and below 0.01 under
+`loo`. On this task most attempts fail, so most groups are near-ties, which is
+exactly the regime where the bias bites.
+
 ### The metric that tells you it has stalled
 
 `group_spread` is the mean within-group standard deviation of returns. When it
