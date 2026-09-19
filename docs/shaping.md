@@ -286,6 +286,48 @@ operation is drawn. Conditioning those on the chosen target is the other half
 of what Conditional Action Trees does, and it needs a change on the environment
 side of both repositories.
 
+## One epoch is not worth 1.56x
+
+The update is sixteen minibatch steps or eight, and `--epochs 1` measured 1.56x
+on the desktop (26,804 -> 41,904 steps/s, twice). VPT's wake phase uses each
+sample at most once, so it was worth asking what it costs. Four seeds each, at
+the same forty-million-step budget, everything else identical:
+
+| held out | s1 | s2 | s3 | s4 | mean |
+|---|---|---|---|---|---|
+| two epochs | 92.0% | 85.5% | 87.7% | 82.0% | **86.8%** |
+| one epoch | 65.6% | 35.0% | 39.1% | 64.8% | 51.1% |
+
+It costs 36 points and doubles the spread. VPT could afford one pass because a
+behaviour-cloned prior had already done the work and it had 16.8 billion frames;
+here neither is true. The default stays at two.
+
+## Why the held-out family scores higher than the training split
+
+Every seed scores higher on the held-out family than on the training split --
+92.0% against 78.3% for the best -- which is the shape a leak makes. It is not
+one. The training number is an average over four families, and they are not
+equally hard:
+
+| `ar-s1`, by family | |
+|---|---|
+| cluttered_patch (7x7, walls scattered near it) | 95.6% |
+| open_patch (7x7) | 77.8% |
+| offset_patch (7x7, displaced) | 76.4% |
+| **varied_patch (dimensions drawn, 3x3 to 9x9)** | **61.8%** |
+| obstructed_patch, held out (3x11, one wall) | 92.0% |
+
+`varied_patch` is the hard one, by twenty points, and it is a whole
+distribution of patch shapes rather than one. The held-out family is a single
+fixed shape, which is why it scores like the fixed-shape training families
+rather than like `varied_patch`. Walls cost almost nothing once they have been
+seen at all: the cluttered family is the *easiest* of the four.
+
+That is worth stating plainly rather than leaving as a headline: the held-out
+family is a **compositional** test -- narrow patches and walls are both in
+training, their combination is not -- and it is not the hardest thing the
+policy is asked to do. `varied_patch` is.
+
 ## Sources
 
 - Ng, Harada, Russell (1999). Policy invariance under reward transformations.
