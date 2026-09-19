@@ -47,12 +47,25 @@ def _walk_to(world, target, budget=120) -> bool:
 
 
 def _handle_at(world, position) -> str | None:
+    """The handle naming the machine at `position`.
+
+    A handle is *not* an entity's unit number. Units are minted at creation,
+    handles lazily by the observation sweep in the order things are first
+    seen, and the two counters only coincide when the scene holds nothing
+    else. With `commissioning_crowded`'s six machines they diverge, and
+    `f"h{unit}"` addressed a decoy: the real furnace stayed unfuelled while
+    the one at (7, -3) got the coal, and the line made zero plates.
+    """
     for i in range(world.entity_count):
         e = world.entities[i]
         if not e.alive:
             continue
-        if abs(e.pos.x / 256.0 - position[0]) < 0.01 and abs(e.pos.y / 256.0 - position[1]) < 0.01:
-            return f"h{e.unit}"
+        if abs(e.pos.x / 256.0 - position[0]) > 0.01 or abs(e.pos.y / 256.0 - position[1]) > 0.01:
+            continue
+        for h in range(1, world.next_handle):
+            record = world.handles[h]
+            if record.used and record.unit == e.unit and record.destroyed_tick < 0:
+                return f"h{h}"
     return None
 
 
@@ -67,7 +80,9 @@ def _commission(world) -> None:
 
 
 def test_the_scene_installs_two_empty_machines():
-    env, _, _ = _reset("train", 0)
+    env, family, _ = _reset("train", 0)
+    if family == "commissioning_crowded":
+        pytest.skip("that family installs six machines on purpose")
     world = env.rl.env
     kinds = sorted(world.entities[i].kind for i in range(world.entity_count))
     assert kinds == sorted((lib.K_DRILL, lib.K_FURNACE))
@@ -134,3 +149,62 @@ def test_the_private_marker_does_not_reach_the_goal_vector():
     assert scene["public_markers"] == []
     assert list(env.obs["goal"][9:12]) == [0.0, 0.0, 0.0]
     assert lib.fsim_rl_potential(env.rl) > 0.5
+
+
+def _crowded(seed: int):
+    env = RlEnv()
+    scene = scenes.plate_line("commissioning_crowded", __import__("random").Random(seed))
+    env.reset("plate_line", scene, max_steps=400, construction_tick_limit=BUDGET_TICKS,
+              shaping="both", action_space="v2")  # fmt: skip
+    return env, scene
+
+
+def test_a_handle_is_not_a_unit_number():
+    """Units are minted at creation, handles lazily by the observation sweep,
+    and the two counters coincide only when the scene holds nothing else. With
+    six machines they diverge -- and addressing a machine by its unit number
+    fuelled a decoy while the real furnace stayed empty and the line made zero
+    plates."""
+    env, _ = _crowded(0)
+    world = env.rl.env
+    diverged = 0
+    for i in range(world.entity_count):
+        entity = world.entities[i]
+        handle = _handle_at(world, (entity.pos.x / 256.0, entity.pos.y / 256.0))
+        if handle != f"h{entity.unit}":
+            diverged += 1
+    assert diverged, "this scene no longer distinguishes handles from units"
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_the_crowded_family_is_still_solvable(seed):
+    """Its point is a bigger decision, not an impossible one: six targets and
+    three items, with coal cut to 50 so choosing wrongly costs something. The
+    two real machines still need 20 each."""
+    env, scene = _crowded(seed)
+    world = env.rl.env
+    assert scene["character"]["inventory"] == {"coal": 50, "iron-ore": 20, "stone": 20}
+    assert sum(1 for i in range(world.entity_count) if world.entities[i].alive) == 6
+    _commission(world)
+    while world.produced[lib.IT_IRON_PLATE] < 30 and world.tick < BUDGET_TICKS:
+        lib.fsim_step(world, action_struct("wait"), 30)
+    assert world.produced[lib.IT_IRON_PLATE] >= 30
+
+
+def test_the_decoys_cannot_make_a_plate():
+    """Fuel every machine and only the real line produces, so the family
+    enlarges the choice without changing what the task rewards."""
+    env, _ = _crowded(0)
+    world = env.rl.env
+    for i in range(world.entity_count):
+        entity = world.entities[i]
+        if (entity.pos.x / 256.0, entity.pos.y / 256.0) in (DRILL, FURNACE):
+            continue
+        handle = _handle_at(world, (entity.pos.x / 256.0, entity.pos.y / 256.0))
+        _walk_to(world, (entity.pos.x / 256.0, entity.pos.y / 256.0))
+        lib.fsim_step(
+            world, action_struct("give_to", {"to": handle, "item": "coal", "count": 5}), 30
+        )
+    for _ in range(400):
+        lib.fsim_step(world, action_struct("wait"), 30)
+    assert world.produced[lib.IT_IRON_PLATE] == 0

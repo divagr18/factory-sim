@@ -37,6 +37,7 @@ FAMILIES = {
     },
     "plate_line": {
         "commissioning": "train",
+        "commissioning_crowded": "train",
         "commissioning_far": "val",
         "commissioning_walled": "test",
     },
@@ -49,6 +50,19 @@ DRILL_POSITION = (1.0, 1.0)
 FURNACE_POSITION = (1.0, 3.0)
 ORE_RADIUS = 3
 STARTING_COAL = 120
+#: `commissioning_crowded` (plate_line 1.3.0): four decoy machines and two
+#: decoy items, so `give(target, item, amount)` is 6 x 3 x 4 = 72 combinations
+#: against 8. Coal drops to 50 -- with 120 the agent can fuel everything and
+#: the choice of target stops mattering. The decoys cannot produce a plate
+#: however they are fuelled, so only the size of the decision changes.
+DECOY_MACHINES = (
+    ("burner-mining-drill", (-5.0, -4.0), "north"),
+    ("burner-mining-drill", (6.0, 5.0), "east"),
+    ("stone-furnace", (-6.0, 4.0), "north"),
+    ("stone-furnace", (7.0, -3.0), "north"),
+)
+CROWDED_COAL = 50
+CROWDED_DECOY_ITEMS = {"iron-ore": 20, "stone": 20}
 #: Tiles the start is pushed out of per step, and how many steps to try.
 NUDGE_STEP = 1.0
 NUDGE_ATTEMPTS = 8
@@ -171,14 +185,18 @@ def build_line(family: str, rng: random.Random) -> dict:
     return _payload(entities, tiles, start, (round(cx, 1), round(cy, 1)))
 
 
-def _machine(name: str, position, direction: str, marker: str) -> dict:
-    return {
+def _machine(name: str, position, direction: str, marker: str | None) -> dict:
+    # An unmarked entity has no `marker` key at all. `EntitySpec.to_dict`
+    # omits it rather than writing null, and a null would not compare equal.
+    out = {
         "name": name,
         "position": [position[0], position[1]],
         "direction": direction,
         "force": "player",
-        "marker": marker,
     }
+    if marker is not None:
+        out["marker"] = marker
+    return out
 
 
 def _clear_of(start, angle: float, blocked: set[tuple[int, int]]):
@@ -217,6 +235,21 @@ def plate_line(family: str, rng: random.Random) -> dict:
         _machine("burner-mining-drill", DRILL_POSITION, "south", "drill"),
         _machine("stone-furnace", FURNACE_POSITION, "north", "furnace"),
     ]
+    inventory = {"coal": STARTING_COAL}
+    if family == "commissioning_crowded":
+        # The start annulus overlaps where the decoys sit, so the start is
+        # pushed clear first -- consuming no randomness -- and then the decoys
+        # and the decoy items are added.
+        occupied = {
+            (int(position[0]) + dx, int(position[1]) + dy)
+            for _name, position, _direction in DECOY_MACHINES
+            for dx in (-1, 0)
+            for dy in (-1, 0)
+        }
+        start = _clear_of(start, angle, occupied)
+        for name, position, direction in DECOY_MACHINES:
+            entities.append(_machine(name, position, direction, None))
+        inventory = {"coal": CROWDED_COAL, **CROWDED_DECOY_ITEMS}
     if family == "commissioning_walled":
         # The structural holdout: a screen to walk around, so the test split
         # differs in layout and not only in where the character starts.
@@ -233,7 +266,7 @@ def plate_line(family: str, rng: random.Random) -> dict:
         "public_markers": [],
         "entities": entities,
         "resources": [dict(_resource(x, y), amount=5000) for x, y in resources],
-        "character": {"position": list(start), "inventory": {"coal": STARTING_COAL}},
+        "character": {"position": list(start), "inventory": inventory},
         "markers": {"line": list(DRILL_POSITION)},
         # Nothing to unlock: the machines are already down, and the task never
         # asks for one to be crafted.
