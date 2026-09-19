@@ -450,7 +450,10 @@ typedef struct {
     int32_t terminated;
     int32_t truncated;
     int32_t success;
-    double components[3];       /* task-specific; see fsim_rl.c */
+    /* Task-specific, then the shaping terms after them: one component for
+     * construct_smelting_line and three for build_line, so the shaped terms
+     * start at slot 1 or slot 3. See `rl_rewards` and `fsim_rl_step`. */
+    double components[5];
     int32_t decode_failure;
     double potential;           /* SHAPING_POTENTIAL: phi of the current state */
     double progress_high;       /* SHAPING_PROGRESS: highest phi so far */

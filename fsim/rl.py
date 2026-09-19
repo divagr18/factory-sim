@@ -28,15 +28,21 @@ SHAPING = {
 #: `action_space` values: FactorioRL's parameterized-v1, or the simulator's v2
 #: prototype (entity-table targets, a fixed placement grid).
 ACTION_SPACES = {"v1": lib.ACTION_SPACE_V1, "v2": lib.ACTION_SPACE_V2}
+#: The shaped terms, reported after whatever the task itself pays.
 SHAPED_COMPONENTS = {
-    lib.SHAPING_POTENTIAL: ("verified_output", "line_potential"),
-    lib.SHAPING_PROGRESS: ("verified_output", "line_progress"),
-    lib.SHAPING_BOTH: ("verified_output", "line_progress", "line_potential"),
+    lib.SHAPING_POTENTIAL: ("line_potential",),
+    lib.SHAPING_PROGRESS: ("line_progress",),
+    lib.SHAPING_BOTH: ("line_progress", "line_potential"),
 }
 COMPONENTS = {
     "construct_smelting_line": ("verified_output",),
     "build_line": ("constructed", "plates_produced", "step_cost"),
 }
+
+
+def component_names(task: str, mode: int) -> tuple[str, ...]:
+    """What each slot of `rl.components` holds, for this task and shaping."""
+    return COMPONENTS[task] + (SHAPED_COMPONENTS[mode] if mode else ())
 
 
 def task_struct(task: str, blueprint: dict, *, decision_ticks=30, max_steps=600,
@@ -49,10 +55,8 @@ def task_struct(task: str, blueprint: dict, *, decision_ticks=30, max_steps=600,
     if construction_tick_limit is None:
         construction_tick_limit = 18000
     t.construction_tick_limit = construction_tick_limit
-    mode = SHAPING[shaping]
-    if mode and task != "construct_smelting_line":
-        raise ValueError("line shaping is defined for construct_smelting_line only")
-    t.shaping = mode
+    # Both tasks build the same line, so the same potential describes both.
+    t.shaping = SHAPING[shaping]
     t.action_space = ACTION_SPACES[action_space]
     t.gamma = gamma
     patch = (blueprint.get("markers") or {}).get("patch")
@@ -99,7 +103,7 @@ class RlEnv:
     def reset(self, task: str, blueprint: dict, **task_options) -> dict:
         self.task_name = task
         mode = SHAPING[task_options.get("shaping")]
-        self.components = SHAPED_COMPONENTS[mode] if mode else COMPONENTS[task]
+        self.components = component_names(task, mode)
         scene, keep = scene_struct(blueprint)
         t = task_struct(task, blueprint, **task_options)
         self._keep = (scene, keep, t)
