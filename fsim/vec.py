@@ -109,6 +109,7 @@ class VecEnv:
         gamma: float = 0.999,
         start_curriculum: float = 0.0,
         max_steps: int | tuple[int, int] = 600,
+        tick_limit: int | None = None,
         eval_seeds: bool = False,
         obs_memory=None,
         demo_starts: float = 0.0,
@@ -153,6 +154,10 @@ class VecEnv:
         self.gamma = gamma
         self.start_curriculum = start_curriculum
         self.max_steps = max_steps
+        #: The task's construction tick limit. plate_line's line runs for
+        #: about 7,200 ticks before it has made thirty plates, so a task whose
+        #: budget is not the default needs to say so.
+        self.tick_limit = tick_limit
         self.seed_base = (EVAL_SEED_BASE if eval_seeds else 0) + seed * 1_000_003
         self.episodes_started = 0
         # The builder puts the same line down for either task -- it solves
@@ -273,7 +278,7 @@ class VecEnv:
             budget = lo + (seed * 2654435761 + 97) % (hi - lo + 1)
         task = task_struct(
             self.task, scene, max_steps=budget, shaping=self.shaping, gamma=self.gamma,
-            action_space=self.action_space,
+            action_space=self.action_space, construction_tick_limit=self.tick_limit,
         )  # fmt: skip
         self._keep[i] = (c_scene, keep, task)
         rl = self.rls[i]

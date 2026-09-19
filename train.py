@@ -198,6 +198,22 @@ def parse(argv=None) -> argparse.Namespace:
         "division (docs/algorithms.md)",
     )
     p.add_argument("--task", default="construct_smelting_line")
+    p.add_argument(
+        "--max-steps",
+        type=int,
+        default=600,
+        help="decisions per episode. The two construction tasks allow 600; "
+        "plate_line allows 400, and a task trained on the wrong budget is a "
+        "different task",
+    )
+    p.add_argument(
+        "--tick-limit",
+        type=int,
+        default=None,
+        help="game ticks per episode; defaults to 18000. plate_line's line "
+        "needs about 7,200 ticks to make thirty plates, and FactorioRL allows "
+        "it 24000",
+    )
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--steps", type=int, default=20_000_000)
     p.add_argument("--envs", type=int, default=256)
@@ -535,6 +551,7 @@ def evaluate(
     env = VecEnv(
         n, args.task, split=split, seed=args.seed, threads=args.threads,
         shaping=False, gamma=args.gamma, eval_seeds=True, action_space=args.action_space,
+        max_steps=args.max_steps, tick_limit=args.tick_limit,
     )  # fmt: skip
     obs, masks = env.reset()
     done: list[dict] = []
@@ -616,7 +633,8 @@ def main(argv=None) -> int:
     env = VecEnv(
         args.envs, args.task, split="train", seed=args.seed, threads=args.threads,
         shaping=args.shaping, gamma=args.gamma, start_curriculum=args.start_curriculum,
-        max_steps=tuple(args.horizon_curriculum) if args.horizon_curriculum else 600,
+        max_steps=tuple(args.horizon_curriculum) if args.horizon_curriculum else args.max_steps,
+        tick_limit=args.tick_limit,
         demo_starts=args.demo_starts, compact=True, action_space=args.action_space,
         group=args.group, autoreset=not args.whole_episodes,
         **rollout.memories(),
@@ -627,7 +645,7 @@ def main(argv=None) -> int:
     batch = N * T
     updates = args.steps // batch
     if args.algo == "grpo":
-        longest = max(args.horizon_curriculum) if args.horizon_curriculum else 600
+        longest = max(args.horizon_curriculum) if args.horizon_curriculum else args.max_steps
         if T < longest:
             raise SystemExit(
                 f"--algo grpo needs --horizon >= {longest}, the longest episode: a "
