@@ -351,6 +351,41 @@ look is named in the family breakdown above: `varied_patch`, twenty points
 behind every other family, is the only part of the training distribution the
 policy has not largely solved.
 
+## The same recipe on a second task
+
+`build_line` asks for the same line and scores it differently: both machines
+placed through the action, and ten plates inside a 3600-tick window that begins
+after construction. From scratch it has no gradient at all -- measured over
+forty million steps, the return is exactly -0.6 at every checkpoint, six
+hundred steps of step cost and nothing else, while entropy drifts to 0.41 and
+the update KL to 6e-06. Its own reward pays for plates on a high-water mark,
+but nothing pays for walking to the patch and putting the machines down, and a
+policy that never makes a plate sees one number for every episode it has played.
+
+Both tasks build the same line, so the potential describes both and the builder
+demonstrates both -- it solves twelve of twelve build_line training scenes
+without a change. With those, three seeds:
+
+| held out | s1 | s2 | s3 | mean | spread |
+|---|---|---|---|---|---|
+| one training family | 17.2% | 14.3% | **97.9%** | 43.1% | 83.6 |
+| **three training families** | **98.8%** | **86.7%** | **99.2%** | **94.9%** | **12.5** |
+
+Training success is 98.4-99.6% in all six runs, so the recipe makes the task
+learnable either way. What one family does not do is make *generalisation*
+reliable: two seeds of three stayed near zero on the held-out family and the
+third reached 97.9%, which is a coin flip rather than a failure. Adding
+`varied_patch` and `cluttered_patch` moves the mean by 52 points and takes the
+spread from 84 points to 12, and the worst diversified seed beats two of the
+three single-family ones outright.
+
+That is the same result the first task gave, from the same change, and it is
+worth stating as the general lesson rather than a per-task fix: **one training
+shape makes generalisation a matter of luck, and the spread is the number to
+watch rather than the mean.** A single seed of either arm above would support
+almost any conclusion -- 97.9% from the undiversified arm, 86.7% from the
+diversified one -- which is why the seeds are reported here individually.
+
 ## Sources
 
 - Ng, Harada, Russell (1999). Policy invariance under reward transformations.
