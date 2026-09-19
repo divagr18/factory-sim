@@ -19,12 +19,20 @@ patch, which makes it a stronger test than the construction tasks' holdouts.
 |---|---|---|---|---|
 | s1 | 0.996 | 0.982 | 0.926 | 0.914 |
 | s2 | 0.998 | 1.000 | 1.000 | 1.000 |
+| s3 | 0.996 | 0.990 | 0.650 | 0.236 |
 
-Two things are unusual against the construction tasks:
+Read the sampled column. It is 0.982, 1.000, 0.990 -- the task is solved, and
+consistently so.
 
-- **Greedy works.** 91-100% here against 3.9% on `construct_smelting_line`,
-  where an argmax policy cycles. The task is short enough and its optimal
-  action sequence unambiguous enough that the argmax policy simply does it.
+**Greedy is bimodal and must not be quoted**: 0.914, 1.000, 0.236. Two seeds
+made it look like this task was the exception where an argmax policy works,
+against 3.9% on `construct_smelting_line`; the third seed says otherwise. The
+standing rule in this project applies here as everywhere else -- read the
+seeds, never the mean, and report sampled and epsilon-greedy rather than pure
+argmax.
+
+One thing is genuinely unusual against the construction tasks:
+
 - **No demonstration starts were needed.** The scripted builder in
   `fsim/expert.py` builds a line and this task is handed one, so it does not
   apply. The potential carries the run by itself: phi starts at 0.59 against
