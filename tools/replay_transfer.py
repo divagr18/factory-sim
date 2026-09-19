@@ -29,12 +29,18 @@ from fsim.rl import RlEnv  # noqa: E402
 
 
 def reset(env: RlEnv, episode: dict) -> dict:
+    # The profile the engine read those vectors under. A v2 episode replayed as
+    # v1 names a different entity and a different tile for the same numbers, and
+    # says nothing about whether the two agree; episodes recorded before the
+    # profile was written down are v1, which is what it was.
+    space = episode.get("action_space", "parameterized-v1").replace("parameterized-", "")
     return env.reset(
         episode["task"],
         episode["blueprint"],
         decision_ticks=episode["decision_ticks"],
         max_steps=episode["max_decision_steps"],
         construction_tick_limit=episode["construction_tick_limit"],
+        action_space=space,
     )
 
 
