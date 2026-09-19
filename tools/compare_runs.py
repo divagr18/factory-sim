@@ -50,6 +50,11 @@ def window(rows: list[dict], steps: int, span: int = 5) -> dict | None:
     demo = [r["demo_success"] for r in upto[-span:] if "demo_success" in r]
     if demo:
         out["demo_success"] = demo[-1]
+    if any(r.get("group_spread") for r in tail):
+        # A critic-free arm: how much its groups still disagree, and how many
+        # of the steps it spent belonged to an episode (docs/algorithms.md).
+        out["group_spread"] = mean("group_spread")
+        out["decisions"] = upto[-1].get("decisions", upto[-1]["steps"])
     return out
 
 
