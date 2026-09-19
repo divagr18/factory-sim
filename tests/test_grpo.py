@@ -128,3 +128,42 @@ def test_a_finished_episode_stays_finished():
         assert len(reported) == 8
     finally:
         env.close()
+
+
+def _togo_advantage(*args):
+    from train import togo_advantage
+
+    return togo_advantage(*args)
+
+
+def test_reward_to_go_credits_the_decision_that_earned_it():
+    """Two attempts at one scene. One is paid at its first decision, the other
+    at its last. A flat episode return cannot tell them apart at any single
+    timestep; reward-to-go can."""
+    rewards = torch.zeros(3, 2)
+    rewards[0, 0] = 1.0  # paid early
+    rewards[2, 1] = 1.0  # paid late
+    live = torch.ones(3, 2)
+
+    flat = _group_advantage(rewards, live, 2)
+    # Same total, so the episode-return baseline has nothing to say at all.
+    assert torch.allclose(flat, torch.zeros(3, 2), atol=1e-5)
+
+    togo = _togo_advantage(rewards, live, 2, 1.0)
+    # At the first decision both still have 1.0 to come, so they tie...
+    assert togo[0].abs().max() < 1e-5
+    # ... but by the second, only the late-paid attempt has anything left.
+    assert togo[1, 1] > 0 > togo[1, 0]
+
+
+def test_reward_to_go_discounts_and_stays_inside_the_episode():
+    rewards = torch.zeros(4, 2)
+    rewards[3, 0] = 1.0
+    live = torch.ones(4, 2)
+    live[2:, 1] = 0.0
+    togo = _togo_advantage(rewards, live, 2, 0.5)
+    # The dead tail of the second episode contributes nothing and is silent.
+    assert torch.equal(togo[2:, 1], torch.zeros(2))
+    # The first episode's payment is discounted back: 0.5^3, 0.5^2, 0.5, 1.
+    assert togo[0, 0] != 0.0
+    assert abs(float(togo[3, 0])) > abs(float(togo[0, 0]))

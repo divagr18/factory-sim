@@ -164,7 +164,28 @@ def parse(argv=None) -> argparse.Namespace:
         "--group",
         type=int,
         default=8,
-        help="attempts per scene under --algo grpo; the baseline is their mean",
+        help="environments per scene: i and j draw the same seed when "
+        "i // group == j // group. GRPO's baseline is the group's mean, but "
+        "the grouping is independent of the learner -- PPO with --group and "
+        "--whole-episodes is the control that separates 'GRPO loses' from "
+        "'this rollout shape loses'",
+    )
+    p.add_argument(
+        "--whole-episodes",
+        action="store_true",
+        help="one complete episode per environment per rollout, with no "
+        "autoreset inside it. Implied by --algo grpo, which cannot compute a "
+        "return without it",
+    )
+    p.add_argument(
+        "--credit",
+        choices=("episode", "togo"),
+        default="episode",
+        help="what --algo grpo hands each decision. episode is GRPO's: the "
+        "whole episode's return, the same number on every timestep. togo is "
+        "the discounted reward from that decision onward, judged against the "
+        "group's at the same decision -- which keeps the group baseline but "
+        "stops discarding the shaping's per-decision structure",
     )
     p.add_argument(
         "--baseline",
@@ -410,6 +431,37 @@ def group_advantage(
     return scaled.reshape(1, -1) * live
 
 
+def togo_advantage(
+    rewards: torch.Tensor, live: torch.Tensor, group: int, gamma: float, baseline: str = "group"
+) -> torch.Tensor:
+    """The group baseline, kept; the flat episode return, dropped.
+
+    Each decision is judged by the discounted reward from that decision
+    onward, against what its group's other attempts earned from the *same*
+    decision. Still no critic -- the siblings are the baseline, as in
+    `group_advantage` -- but a decision that raised the potential is now
+    credited for it instead of being averaged into six hundred others.
+
+    This is the control for the obvious reading of GRPO's failure here: our
+    reward is shaped per decision, and collapsing an episode to one number
+    keeps only its sum.
+    """
+    horizon = rewards.shape[0]
+    masked = rewards * live
+    togo = torch.zeros_like(masked)
+    running = torch.zeros(masked.shape[1], device=masked.device)
+    for t in reversed(range(horizon)):
+        running = masked[t] + gamma * running
+        togo[t] = running
+    by_group = togo.view(horizon, -1, group)
+    centred = by_group - by_group.mean(2, keepdim=True)
+    if baseline == "loo":
+        scaled = centred * (group / (group - 1)) if group > 1 else centred
+    else:
+        scaled = centred / (by_group.std(2, keepdim=True) + 1e-8)
+    return scaled.reshape(horizon, -1) * live
+
+
 def features(policy: Policy, obs: dict) -> torch.Tensor:
     """The extractor under bf16 autocast; the heads run in float32.
 
@@ -523,7 +575,7 @@ def main(argv=None) -> int:
         shaping=args.shaping, gamma=args.gamma, start_curriculum=args.start_curriculum,
         max_steps=tuple(args.horizon_curriculum) if args.horizon_curriculum else 600,
         demo_starts=args.demo_starts, compact=True, action_space=args.action_space,
-        group=args.group if args.algo == "grpo" else 1, autoreset=args.algo != "grpo",
+        group=args.group, autoreset=not args.whole_episodes,
         **rollout.memories(),
     )  # fmt: skip
     env.demo_layouts = not args.fixed_demo_layout
@@ -532,6 +584,8 @@ def main(argv=None) -> int:
     batch = N * T
     updates = args.steps // batch
     if args.algo == "grpo":
+        # A return needs a whole episode, so grpo cannot opt out of this.
+        args.whole_episodes = True
         longest = max(args.horizon_curriculum) if args.horizon_curriculum else 600
         if T < longest:
             raise SystemExit(
@@ -617,7 +671,12 @@ def main(argv=None) -> int:
 
         with torch.no_grad():
             if args.algo == "grpo":
-                adv = group_advantage(rew_buf, live_buf, args.group, args.baseline)
+                if args.credit == "togo":
+                    adv = togo_advantage(
+                        rew_buf, live_buf, args.group, args.gamma, args.baseline
+                    )
+                else:
+                    adv = group_advantage(rew_buf, live_buf, args.group, args.baseline)
                 returns = torch.zeros_like(adv)
                 unfinished = float(live.sum())
                 # The number to watch: a group whose attempts all score the
