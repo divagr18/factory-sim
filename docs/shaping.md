@@ -328,6 +328,29 @@ family is a **compositional** test -- narrow patches and walls are both in
 training, their combination is not -- and it is not the hardest thing the
 policy is asked to do. `varied_patch` is.
 
+## Forty million steps is where this configuration stops
+
+Two seeds to eighty million, against the four that stopped at forty. Sampled
+success on the held-out family, at each checkpoint:
+
+| | 20M | 30M | 40M | 60M | 80M | final |
+|---|---|---|---|---|---|---|
+| `long-s1` | 0.40 | 0.57 | 0.75 | 0.82 | 0.80 | 87.1% |
+| `long-s2` | 0.39 | 0.71 | 0.87 | 0.71 | 0.79 | 89.1% |
+| `ar-s1` (40M) | 0.31 | 0.71 | 0.77 | - | - | 92.0% |
+| `ar-s2` (40M) | 0.30 | 0.71 | 0.79 | - | - | 85.5% |
+
+Everything interesting happens between ten and forty million. After that the
+curve is flat and noisy between 0.71 and 0.87, and the final numbers -- 88.1%
+mean over the two long seeds against 86.8% over the four short ones -- differ
+by less than the spread between seeds of the same length.
+
+So doubling the compute buys about a point, which is to say nothing. Whatever
+comes next has to be a change rather than more of the same, and the place to
+look is named in the family breakdown above: `varied_patch`, twenty points
+behind every other family, is the only part of the training distribution the
+policy has not largely solved.
+
 ## Sources
 
 - Ng, Harada, Russell (1999). Policy invariance under reward transformations.
