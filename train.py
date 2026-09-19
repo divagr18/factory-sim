@@ -54,7 +54,7 @@ from torch import nn
 
 from fsim import ffi, lib
 from fsim.policy import EXTRACTOR_VERSION, Policy, export, masked_kl
-from fsim.ued import Curriculum, LevelBuffer, positive_value_loss
+from fsim.ued import Curriculum, LevelBuffer, load_buffer, save_buffer
 from fsim.vec import VecEnv, obs_layout, unpack_grid
 
 ROOT = Path(__file__).resolve().parent
@@ -220,6 +220,14 @@ def parse(argv=None) -> argparse.Namespace:
         "policy being updated on whatever the generator happened to emit",
     )
     p.add_argument("--ued-buffer", type=int, default=4000)
+    p.add_argument(
+        "--ued-load",
+        type=Path,
+        default=None,
+        help="a levels.json from an earlier run, used to start this one's "
+        "buffer. ACCEL compounds complexity across a run; this lets it "
+        "compound across runs too",
+    )
     p.add_argument(
         "--ued-beta", type=float, default=0.3, help="rank temperature: P ~ 1/rank**(1/beta)"
     )
@@ -703,8 +711,11 @@ def main(argv=None) -> int:
             buffer=LevelBuffer(
                 capacity=args.ued_buffer, beta=args.ued_beta, rho=args.ued_rho, seed=args.seed
             ),
-            seed=args.seed, edits=args.ued_edits, warm_start=args.ued_warm_start,
+            seed=args.seed, edits=args.ued_edits,
+            warm_start=0 if args.ued_load else args.ued_warm_start,
         )  # fmt: skip
+        if args.ued_load:
+            curriculum.buffer = load_buffer(args.ued_load, seed=args.seed)
     env = VecEnv(
         args.envs, args.task, split="train", seed=args.seed, threads=args.threads,
         shaping=args.shaping, gamma=args.gamma, start_curriculum=args.start_curriculum,
@@ -1007,6 +1018,11 @@ def main(argv=None) -> int:
                 torch.save(policy.state_dict(), out / "best.pt")
         log.write(json.dumps(row) + "\n")
         log.flush()
+        if curriculum is not None and (update % 25 == 0 or update == updates):
+            # The curriculum is a result, not scratch state: which levels it
+            # invented is most of what a UED run has to say, and without this
+            # it dies with the process.
+            save_buffer(curriculum.buffer, out / "levels.json")
         if update % 10 == 0 or "eval" in row:
             brief = {k: row[k] for k in ("steps", "sps", "ent", "kl") if k in row}
             brief.update({k: round(row[k], 4) for k in ("train_success", "train_verified",

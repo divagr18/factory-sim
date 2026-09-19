@@ -553,3 +553,77 @@ class Curriculum:
             }
         )  # fmt: skip
         return out
+
+
+def save_buffer(buffer: LevelBuffer, path) -> None:
+    """Write the curriculum out. Without this a run's curriculum dies with the
+    process: it could not be inspected afterwards, compared between runs, or
+    used to warm-start the next one, which is most of what ACCEL's compounding
+    is for."""
+    import json
+    from pathlib import Path
+
+    rows = [
+        {
+            "score": entry.score,
+            "seen": entry.seen,
+            "staleness": entry.staleness,
+            "level": {
+                "task": entry.level.task,
+                "x_lo": entry.level.x_lo, "x_hi": entry.level.x_hi,
+                "y_lo": entry.level.y_lo, "y_hi": entry.level.y_hi,
+                "ox": entry.level.ox, "oy": entry.level.oy,
+                "angle": entry.level.angle, "rx": entry.level.rx, "ry": entry.level.ry,
+                "walls": [list(w) for w in entry.level.walls],
+                "origin": entry.level.origin,
+            },
+        }  # fmt: skip
+        for entry in buffer.entries
+    ]
+    Path(path).write_text(
+        json.dumps(
+            {"beta": buffer.beta, "rho": buffer.rho, "capacity": buffer.capacity, "levels": rows},
+            indent=1,
+        ),
+        "utf-8",
+    )
+
+
+def load_buffer(path, seed: int = 0) -> LevelBuffer:
+    import json
+    from pathlib import Path
+
+    blob = json.loads(Path(path).read_text("utf-8"))
+    buffer = LevelBuffer(
+        capacity=blob["capacity"], beta=blob["beta"], rho=blob["rho"], seed=seed
+    )
+    for row in blob["levels"]:
+        spec = dict(row["level"])
+        spec["walls"] = tuple(tuple(w) for w in spec["walls"])
+        buffer.consider(Level(**spec), row["score"])
+    return buffer
+
+
+def render(level: Level, width: int = 33, height: int = 25) -> str:
+    """A level as text, centred on its patch: `#` wall, `o` ore, `@` start.
+
+    Aggregate statistics say a curriculum got harder; they do not say whether
+    it got harder in a way that means anything. This is for looking.
+    """
+    scene = build(level)
+    ore = {(math.floor(x), math.floor(y)) for x, y in (r["position"] for r in scene["resources"])}
+    walls = {(math.floor(x), math.floor(y)) for x, y in (e["position"] for e in scene["entities"])}
+    sx, sy = scene["character"]["position"]
+    start = (math.floor(sx), math.floor(sy))
+    cx = (level.ox * 2 + level.x_lo + level.x_hi) // 2
+    cy = (level.oy * 2 + level.y_lo + level.y_hi) // 2
+    lines = []
+    for row in range(cy - height // 2, cy + height // 2 + 1):
+        out = []
+        for col in range(cx - width // 2, cx + width // 2 + 1):
+            cell = (col, row)
+            out.append(
+                "@" if cell == start else "#" if cell in walls else "o" if cell in ore else "."
+            )
+        lines.append("".join(out))
+    return "\n".join(lines)
