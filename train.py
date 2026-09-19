@@ -260,6 +260,23 @@ def parse(argv=None) -> argparse.Namespace:
     )
     p.add_argument("--vf", type=float, default=0.5)
     p.add_argument(
+        "--critic-detach",
+        action="store_true",
+        help="stop the value loss from reaching the shared extractor, so the "
+        "critic learns on features the policy alone shapes. SAO (Hou et al. "
+        "2026, arXiv:2607.07508) freezes attention under the critic for this "
+        "reason -- its gradients are the ones that destabilised full-parameter "
+        "training. Here vf 2.0 froze three runs, and the critic is the suspect",
+    )
+    p.add_argument(
+        "--critic-updates",
+        type=int,
+        default=1,
+        help="value-head steps per policy step. SAO decouples the two and runs "
+        "the critic twice per policy update to cut variance; the extra steps "
+        "reuse the detached features, so they cost a head pass and no trunk",
+    )
+    p.add_argument(
         "--vf-clip",
         type=float,
         default=None,
@@ -629,6 +646,13 @@ def main(argv=None) -> int:
         for parameter in prior.parameters():
             parameter.requires_grad_(False)
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr, eps=1e-5)
+    # The critic's extra steps get their own optimizer over the value head
+    # alone, so they cannot move the trunk even when --critic-detach is off.
+    critic_opt = (
+        torch.optim.Adam(policy.value_head.parameters(), lr=args.lr, eps=1e-5)
+        if args.critic_updates > 1 and args.algo != "grpo"
+        else None
+    )
     rollout = Rollout(policy, args.envs, device, graph=not args.no_graph)
     env = VecEnv(
         args.envs, args.task, split="train", seed=args.seed, threads=args.threads,
@@ -808,7 +832,10 @@ def main(argv=None) -> int:
                 if args.algo == "grpo":
                     loss = pg - args.ent * ent
                 else:
-                    value = policy.value(f)
+                    # Detached, the critic reads features the policy alone
+                    # shapes, and its gradients never reach the extractor.
+                    frozen = f.detach()
+                    value = policy.value(frozen if args.critic_detach else f)
                     vf_clip = args.clip if args.vf_clip is None else args.vf_clip
                     v_clipped = b_val[idx] + (value - b_val[idx]).clamp(-vf_clip, vf_clip)
                     v_loss = 0.5 * torch.max(
@@ -837,6 +864,17 @@ def main(argv=None) -> int:
                 loss.backward()
                 nn.utils.clip_grad_norm_(policy.parameters(), args.max_grad_norm)
                 optimizer.step()
+                for _ in range(args.critic_updates - 1 if critic_opt is not None else 0):
+                    # SAO's decoupled frequency: the critic sees the same
+                    # minibatch again on the features the trunk already
+                    # produced, so an extra step costs a head pass, not a
+                    # forward through the extractor. Unclipped, because the
+                    # reference it would clip against is this same update's.
+                    extra = 0.5 * ((policy.value(frozen) - b_ret[idx]) ** 2).mean()
+                    critic_opt.zero_grad(set_to_none=True)
+                    extra.backward()
+                    nn.utils.clip_grad_norm_(policy.value_head.parameters(), args.max_grad_norm)
+                    critic_opt.step()
                 with torch.no_grad():
                     stats["pg"].append(pg.detach())
                     stats["v"].append(v_loss.detach())
