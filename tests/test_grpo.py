@@ -167,3 +167,24 @@ def test_reward_to_go_discounts_and_stays_inside_the_episode():
     # The first episode's payment is discounted back: 0.5^3, 0.5^2, 0.5, 1.
     assert togo[0, 0] != 0.0
     assert abs(float(togo[3, 0])) > abs(float(togo[0, 0]))
+
+
+def test_whole_episodes_is_a_rollout_shape_not_a_learner():
+    """--whole-episodes parks an environment once its episode ends, so every
+    rollout after the first must reset. A PPO arm run with the flag has the
+    same dead tail as a GRPO one, and forgetting that trained one control on
+    six hundred copies of a frozen state for an entire run -- with no error,
+    just metrics that never moved again.
+    """
+    import train
+
+    args = train.parse(["--run", "x", "--algo", "grpo", "--envs", "8", "--group", "4"])
+    assert args.whole_episodes, "grpo cannot compute a return without whole episodes"
+
+    plain = train.parse(["--run", "x"])
+    assert not plain.whole_episodes
+    assert plain.group == 8  # grouping is available to any learner...
+
+    control = train.parse(["--run", "x", "--whole-episodes", "--group", "4"])
+    assert control.algo == "ppo"  # ... and so is the rollout shape
+    assert control.whole_episodes

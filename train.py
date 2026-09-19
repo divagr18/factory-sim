@@ -304,7 +304,13 @@ def parse(argv=None) -> argparse.Namespace:
         default="v1",
         help="v1: FactorioRL's parameterized-v1; v2: the simulator prototype",
     )
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    # A return needs a whole episode, so grpo cannot opt out of the rollout
+    # shape. Applied here rather than in main, so anything reading the parsed
+    # arguments sees a coherent pair.
+    if args.algo == "grpo":
+        args.whole_episodes = True
+    return args
 
 
 def to_device(obs: dict, device) -> dict:
@@ -584,8 +590,6 @@ def main(argv=None) -> int:
     batch = N * T
     updates = args.steps // batch
     if args.algo == "grpo":
-        # A return needs a whole episode, so grpo cannot opt out of this.
-        args.whole_episodes = True
         longest = max(args.horizon_curriculum) if args.horizon_curriculum else 600
         if T < longest:
             raise SystemExit(
@@ -642,9 +646,13 @@ def main(argv=None) -> int:
         frac = 1.0 - (update - 1) / updates
         for group in optimizer.param_groups:
             group["lr"] = frac * args.lr
-        if args.algo == "grpo":
-            # Every rollout is a fresh set of episodes: a group's returns are
-            # only comparable if its members started together.
+        if args.whole_episodes:
+            # Every rollout is a fresh set of episodes. Required by --algo
+            # grpo, whose group returns are only comparable if its members
+            # started together -- but it belongs to the rollout shape, not to
+            # the learner. Without it, environments that finished in the first
+            # rollout are parked for the whole run and every later rollout is
+            # six hundred copies of a dead state.
             env.reset()
             next_done = torch.zeros(N, device=device)
         live = torch.ones(N, device=device)
@@ -706,11 +714,13 @@ def main(argv=None) -> int:
         b_actions = actions_buf.reshape(batch, -1)
         b_logp, b_adv = logp_buf.reshape(-1), adv.reshape(-1)
         b_ret, b_val = returns.reshape(-1), val_buf.reshape(-1)
-        # GRPO trains on the decisions that were actually part of an episode.
-        # The rest are an artefact of holding the horizon open until the last
-        # group member finishes.
+        # Train on the decisions that were actually part of an episode. The
+        # rest are an artefact of holding the horizon open until the last
+        # group member finishes, and belong to no episode at all. This follows
+        # the rollout shape, not the learner: a PPO arm run with
+        # --whole-episodes has exactly the same dead tail.
         usable = torch.nonzero(live_buf.reshape(-1), as_tuple=False).squeeze(1)
-        if args.algo != "grpo":
+        if not args.whole_episodes:
             usable = torch.arange(batch, device=device)
         n_usable = usable.numel()
         decisions += n_usable
