@@ -35,7 +35,23 @@ FAMILIES = {
         "varied_patch": "train",
         "cluttered_patch": "train",
     },
+    "plate_line": {
+        "commissioning": "train",
+        "commissioning_far": "val",
+        "commissioning_walled": "test",
+    },
 }
+
+#: plate_line's machines are pinned, not drawn: the scene is a commissioning
+#: scenario, and a drill whose drop tile moved between runs would make two runs
+#: incomparable (FactorioRL's plate_line 1.2.0).
+DRILL_POSITION = (1.0, 1.0)
+FURNACE_POSITION = (1.0, 3.0)
+ORE_RADIUS = 3
+STARTING_COAL = 120
+#: Tiles the start is pushed out of per step, and how many steps to try.
+NUDGE_STEP = 1.0
+NUDGE_ATTEMPTS = 8
 
 
 def _resource(x, y) -> dict:
@@ -155,7 +171,82 @@ def build_line(family: str, rng: random.Random) -> dict:
     return _payload(entities, tiles, start, (round(cx, 1), round(cy, 1)))
 
 
-GENERATORS = {"construct_smelting_line": construct_smelting_line, "build_line": build_line}
+def _machine(name: str, position, direction: str, marker: str) -> dict:
+    return {
+        "name": name,
+        "position": [position[0], position[1]],
+        "direction": direction,
+        "force": "player",
+        "marker": marker,
+    }
+
+
+def _clear_of(start, angle: float, blocked: set[tuple[int, int]]):
+    """Push `start` outward along its own bearing until its tile is free.
+
+    Consumes no randomness and is a no-op when the start is already clear, so
+    only the scenes that would have started inside the screen differ at all --
+    which is what keeps the other blueprint digests identical.
+    """
+    position = start
+    for _ in range(NUDGE_ATTEMPTS):
+        if (math.floor(position[0]), math.floor(position[1])) not in blocked:
+            return position
+        position = (
+            round(position[0] + math.cos(angle) * NUDGE_STEP, 1),
+            round(position[1] + math.sin(angle) * NUDGE_STEP, 1),
+        )
+    return position
+
+
+def plate_line(family: str, rng: random.Random) -> dict:
+    """Commissioning, not construction: both machines are placed and aligned
+    and both are empty, and the agent has to reach each one and fuel it."""
+    angle = rng.uniform(0, 2 * math.pi)
+    distance = rng.uniform(12.0, 16.0) if family == "commissioning_far" else rng.uniform(5.0, 9.0)
+    start = (
+        round(DRILL_POSITION[0] + math.cos(angle) * distance, 1),
+        round(DRILL_POSITION[1] + math.sin(angle) * distance, 1),
+    )
+    resources = [
+        (DRILL_POSITION[0] + dx, DRILL_POSITION[1] + dy)
+        for dx in range(-ORE_RADIUS, ORE_RADIUS + 1)
+        for dy in range(-ORE_RADIUS, ORE_RADIUS + 1)
+    ]
+    entities = [
+        _machine("burner-mining-drill", DRILL_POSITION, "south", "drill"),
+        _machine("stone-furnace", FURNACE_POSITION, "north", "furnace"),
+    ]
+    if family == "commissioning_walled":
+        # The structural holdout: a screen to walk around, so the test split
+        # differs in layout and not only in where the character starts.
+        side = 1 if math.cos(angle) >= 0 else -1
+        blocked = {
+            (int(DRILL_POSITION[0]) + side * 5, int(DRILL_POSITION[1]) + offset)
+            for offset in range(-1, 2)
+        }
+        for x, y in sorted(blocked, key=lambda t: t[1]):
+            entities.append(_wall(float(x), float(y)))
+        # The start annulus crosses the screen, so the two draws can collide.
+        start = _clear_of(start, angle, blocked)
+    return {
+        "public_markers": [],
+        "entities": entities,
+        "resources": [dict(_resource(x, y), amount=5000) for x, y in resources],
+        "character": {"position": list(start), "inventory": {"coal": STARTING_COAL}},
+        "markers": {"line": list(DRILL_POSITION)},
+        # Nothing to unlock: the machines are already down, and the task never
+        # asks for one to be crafted.
+        "unlock_recipes": [],
+        "radius": 48,
+    }
+
+
+GENERATORS = {
+    "construct_smelting_line": construct_smelting_line,
+    "build_line": build_line,
+    "plate_line": plate_line,
+}
 
 
 def families(task: str, split: str) -> list[str]:

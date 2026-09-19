@@ -16,6 +16,15 @@ NVEC = (22, 33, 122, 5, 15, 4)
 TASKS = {
     "construct_smelting_line": lib.TASK_CONSTRUCT_SMELTING_LINE,
     "build_line": lib.TASK_BUILD_LINE,
+    "plate_line": lib.TASK_PLATE_LINE,
+}
+#: The marker each task's potential measures approach to. plate_line's "line"
+#: is not a public marker -- see `has_target` in csrc/fsim.h for why the
+#: potential may read it when the observation may not.
+POTENTIAL_MARKER = {
+    "construct_smelting_line": "patch",
+    "build_line": "patch",
+    "plate_line": "line",
 }
 #: `shaping` values: none, potential-based (`line_potential`), or a capped
 #: high-water bonus on the same potential (`line_progress`).
@@ -37,6 +46,7 @@ SHAPED_COMPONENTS = {
 COMPONENTS = {
     "construct_smelting_line": ("verified_output",),
     "build_line": ("constructed", "plates_produced", "step_cost"),
+    "plate_line": ("commissioned", "plates_produced", "step_cost"),
 }
 
 
@@ -55,14 +65,23 @@ def task_struct(task: str, blueprint: dict, *, decision_ticks=30, max_steps=600,
     if construction_tick_limit is None:
         construction_tick_limit = 18000
     t.construction_tick_limit = construction_tick_limit
-    # Both tasks build the same line, so the same potential describes both.
+    # One potential describes all three: the construction tasks build the line
+    # it scores, and plate_line is handed that line already built, so its
+    # approach and fuel terms are exactly what commissioning asks for.
     t.shaping = SHAPING[shaping]
     t.action_space = ACTION_SPACES[action_space]
     t.gamma = gamma
-    patch = (blueprint.get("markers") or {}).get("patch")
-    if patch is not None and "patch" in (blueprint.get("public_markers") or []):
+    markers = blueprint.get("markers") or {}
+    public = blueprint.get("public_markers") or []
+    patch = markers.get("patch")
+    if patch is not None and "patch" in public:
         t.has_patch = 1
         t.patch_x, t.patch_y = float(patch[0]), float(patch[1])
+    # The potential reads the scene's truth, so its marker need not be public.
+    target = markers.get(POTENTIAL_MARKER[task])
+    if target is not None:
+        t.has_target = 1
+        t.target_x, t.target_y = float(target[0]), float(target[1])
     return t
 
 

@@ -518,6 +518,9 @@ static int32_t rl_machine_produced(const fsim_env *env, int32_t item) {
 #define SETTLE_TICKS 7200
 #define SAMPLE_GAP 30
 #define VERIFY_TARGET 10
+/* plate_line's goal: thirty plates, about an eighth of its tick budget spent
+ * producing, which is more than a single hand-fed smelt can reach. */
+#define PLATE_TARGET 30
 #define VERIFY_TICKS 3600
 #define PROGRESS_WEIGHT 0.5
 #define PROGRESS_CAP 0.45
@@ -567,6 +570,11 @@ static int rl_sustained(const fsim_rl *rl) {
 }
 
 static int rl_succeeded(const fsim_rl *rl) {
+    if (rl->task.task == TASK_PLATE_LINE) {
+        /* The line is already built, so nothing is verified and nothing is
+         * counted as constructed: the only question is whether it ran. */
+        return rl->env->produced[IT_IRON_PLATE] >= PLATE_TARGET;
+    }
     if (rl->task.task == TASK_BUILD_LINE) {
         return rl->env->built[IT_BURNER_DRILL] >= 1 && rl->env->built[IT_STONE_FURNACE] >= 1 &&
                rl_sustained(rl);
@@ -579,7 +587,15 @@ static void rl_goal(fsim_rl *rl, float *goal) {
     memset(goal, 0, sizeof(float) * RL_GOAL_FEATURES);
     double fraction = (double)rl->steps / (double)(rl->task.max_steps > 1 ? rl->task.max_steps : 1);
     goal[0] = (float)(fraction < 1.0 ? fraction : 1.0);
-    if (rl->task.task == TASK_BUILD_LINE) {
+    if (rl->task.task == TASK_PLATE_LINE) {
+        /* Nothing is built and nothing is verified here, so the goal reports
+         * the one thing that moves: how far along the plate count is. */
+        double plates = (double)env->produced[IT_IRON_PLATE] / (double)PLATE_TARGET;
+        goal[1] = (float)(plates < 1.0 ? plates : 1.0);
+        goal[2] = env->produced[IT_IRON_PLATE] >= PLATE_TARGET ? 1.0f : 0.0f;
+        /* goal[3]: the landmark "produced >= 1". */
+        goal[3] = env->produced[IT_IRON_PLATE] >= 1 ? 1.0f : 0.0f;
+    } else if (rl->task.task == TASK_BUILD_LINE) {
         goal[1] = env->built[IT_BURNER_DRILL] >= 1 ? 1.0f : 0.0f;
         goal[2] = env->built[IT_STONE_FURNACE] >= 1 ? 1.0f : 0.0f;
         goal[3] = rl_sustained(rl) ? 1.0f : 0.0f;
@@ -612,9 +628,10 @@ static void rl_goal(fsim_rl *rl, float *goal) {
 double fsim_rl_potential(const fsim_rl *rl) {
     const fsim_env *env = rl->env;
     double phi = 0.0;
-    if (rl->task.has_patch) {
-        double dx = tiles(env->char_pos.x) - rl->task.patch_x;
-        double dy = tiles(env->char_pos.y) - rl->task.patch_y;
+    /* The potential's own marker, which may be private (fsim.h). */
+    if (rl->task.has_target) {
+        double dx = tiles(env->char_pos.x) - rl->task.target_x;
+        double dy = tiles(env->char_pos.y) - rl->task.target_y;
         double approach = 1.0 - sqrt(dx * dx + dy * dy) / 64.0;
         phi += 0.1 * (approach > 0.0 ? approach : 0.0);
     }
@@ -647,13 +664,18 @@ double fsim_rl_potential(const fsim_rl *rl) {
  *   build_line: [constructed, plates_produced, step_cost] */
 static double rl_rewards(fsim_rl *rl, int succeeded) {
     memset(rl->components, 0, sizeof(rl->components));
-    if (rl->task.task == TASK_BUILD_LINE) {
+    if (rl->task.task == TASK_BUILD_LINE || rl->task.task == TASK_PLATE_LINE) {
+        /* Same three components either way -- sparse success, a capped
+         * high-water bonus on plates, a step cost -- graded to each task's own
+         * plate count so neither can reach the cap while unfinished. */
+        double goal_plates =
+            rl->task.task == TASK_PLATE_LINE ? (double)PLATE_TARGET : (double)WINDOW_PLATES;
         rl->components[0] = succeeded ? 1.0 : 0.0;
         double value = (double)rl->env->produced[IT_IRON_PLATE];
         double previous = rl->high_water;
         double gain = value - previous > 0.0 ? value - previous : 0.0;
         rl->high_water = previous > value ? previous : value;
-        double payout = (0.15 / WINDOW_PLATES) * gain * 1.0;
+        double payout = (0.15 / goal_plates) * gain * 1.0;
         double room = 0.15 - rl->paid;
         payout = payout < room ? payout : room;
         if (payout < 0.0) payout = 0.0;
@@ -741,7 +763,7 @@ double fsim_rl_step(fsim_rl *rl, const int32_t *vector) {
          * both. */
         /* After the task's own components: build_line fills three, the other
          * task fills one. */
-        int32_t at = rl->task.task == TASK_BUILD_LINE ? 3 : 1;
+        int32_t at = rl->task.task == TASK_CONSTRUCT_SMELTING_LINE ? 1 : 3;
         if (shaping == SHAPING_BOTH) {
             rl->components[at] = parts[0];
             rl->components[at + 1] = parts[1];

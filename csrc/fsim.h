@@ -332,6 +332,15 @@ typedef struct {
     int32_t wall_count;
     int32_t *wall_x;            /* declared positions, 1/256 */
     int32_t *wall_y;
+    /* Machines the scene places rather than the agent: plate_line is handed a
+     * drill and a furnace already aligned, and both start empty, which is what
+     * `new_entity` gives them (ST_NO_FUEL). Declared positions are already the
+     * integer centres a 2x2 entity snaps to, so they are used as given. */
+    int32_t machine_count;
+    int32_t *machine_kind;
+    int32_t *machine_x;         /* declared positions, 1/256 */
+    int32_t *machine_y;
+    int32_t *machine_dir;
     fsim_pos character;         /* already truncated to 1/256 */
     int32_t inventory_count;    /* already in insertion order */
     int32_t *inventory_item;
@@ -372,6 +381,9 @@ double fsim_capacity(int32_t kind);
 
 #define TASK_CONSTRUCT_SMELTING_LINE 1
 #define TASK_BUILD_LINE 2
+/* Commissioning rather than construction: the line is already down and both
+ * machines are empty, and the agent has to reach each one and fuel it. */
+#define TASK_PLATE_LINE 3
 
 #define ACTION_SPACE_V1 0
 #define ACTION_SPACE_V2 2
@@ -412,9 +424,21 @@ typedef struct {
     int32_t decision_ticks;
     int32_t max_steps;
     int32_t construction_tick_limit;
+    /* The marker the goal vector points at. Only a *public* marker belongs
+     * here: goal[9..11] is shown to the policy. */
     int32_t has_patch;
     double patch_x;
     double patch_y;
+    /* The marker the potential measures approach to, read from the scene's
+     * truth and not necessarily public -- FactorioRL's
+     * `line_potential(observation, truth, marker)` reads truth for the same
+     * reason. Potential-based shaping cannot change which policy is optimal,
+     * so privileged information in phi is sound where the same information in
+     * the observation would be a leak. For the two construction tasks these
+     * are the same public "patch" marker. */
+    int32_t has_target;
+    double target_x;
+    double target_y;
     /* construct_smelting_line shaping over the line potential phi:
      *   SHAPING_NONE      1.1.1, the verification score alone
      *   SHAPING_POTENTIAL gamma * phi(s') - phi(s), phi(terminal) = 0
