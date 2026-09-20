@@ -167,7 +167,38 @@ rollout, so `Curriculum.snapshot` is taken before the rollout and the whole
 segment is credited to the level the slot started with. At horizon 64 against
 600-decision episodes, about a tenth of slots change level inside a rollout.
 
-## UED measured: it does not help this task
+## UED measured: WITHDRAWN, the arms were not comparable
+
+**The comparison below is confounded and its verdict does not stand.** It is
+kept because the confound is the interesting part.
+
+A walled scene gets no demonstration start by default, and an ACCEL buffer
+drives the wall fraction from the hand-written split's 25% to **81-87%**.
+Measured demonstration rates: control **37.4%**, `u2-s1` **9.5%**, `u2-s2`
+**6.7%**, `u2-s3` **8.0%** -- four to fivefold apart. Across the three ACCEL
+seeds, held-out success tracks the demonstration rate monotonically:
+
+| seed | demonstrated | held-out |
+|---|---|---|
+| `u2-s1` | 9.5% | 0.787 |
+| `u2-s3` | 8.0% | 0.766 |
+| `u2-s2` | 6.7% | 0.389 |
+
+That accounts for the result better than anything about curation, and the
+demonstration curriculum is the thing this task is known to depend on --
+`build_line` had no gradient at all without it.
+
+Worse, this confound was found and fixed earlier the same night, and then
+reintroduced when the fix was reverted: the revert was measured on the
+hand-written split, where the wall fraction is 25% and the interaction is
+mild, and applied to a curriculum that drives it past 80%.
+
+`u3-s1..s3` rerun both arms under `--demo-obstructed`, where demonstration
+eligibility no longer depends on walls and both sit near 50%. That is a worse
+absolute setting -- the control scores 0.568 there against 0.868 -- and it is
+the same setting for both, which is what the comparison needs.
+
+## The withdrawn comparison
 
 Three seeds each at the tuned config (512 environments, horizon 64, 40M
 steps), default settings, identical but for where training scenes come from.
