@@ -166,3 +166,72 @@ approximation: autoreset hands a finished slot a new level part-way through a
 rollout, so `Curriculum.snapshot` is taken before the rollout and the whole
 segment is credited to the level the slot started with. At horizon 64 against
 600-decision episodes, about a tenth of slots change level inside a rollout.
+
+## UED measured: it does not help this task
+
+Three seeds each at the tuned config (512 environments, horizon 64, 40M
+steps), default settings, identical but for where training scenes come from.
+Evaluation draws the frozen hand-written families either way.
+
+| run | held-out `obstructed_patch` | broad parameter space |
+|---|---|---|
+| `ar-s1` | 0.920 | 0.883 |
+| `ar-s2` | 0.856 | 0.859 |
+| `ar-s3` | 0.877 | 0.797 |
+| `ar-s4` | 0.820 | 0.852 |
+| **hand-written mean** | **0.868** | **0.848** |
+| `u2-s1` | 0.787 | 0.828 |
+| `u2-s2` | 0.389 | 0.398 |
+| `u2-s3` | 0.766 | 0.688 |
+| **ACCEL mean** | **0.647** | **0.638** |
+
+Twenty-one points behind on both axes, and every ACCEL seed below every
+hand-written one.
+
+### The curriculum worked; the policy it produced did not
+
+This is not a case of the machinery failing quietly. Every ACCEL seed ran
+clean, held the Robust PLR split at `decisions/steps` 0.750, filled its
+4,000-level buffer, drove `from_families` to 0.004-0.006, and kept a mean
+standing of 0.64-0.72 where a buffer sampling at random would sit at 0.50.
+The policies it produced **build more reliably than the control**:
+
+| | `line_built` | peak phi | held-out |
+|---|---|---|---|
+| `ar-s1` | 0.806 | 0.732 | 0.920 |
+| `u2-s1` | 0.938 | 0.849 | 0.787 |
+| `u2-s2` | **0.979** | **0.870** | **0.389** |
+| `u2-s3` | 0.959 | 0.856 | 0.766 |
+
+`u2-s2` puts a line down in 98% of episodes, has the highest potential of any
+run in this project, and finishes the task in 30% of them. It learned to
+build and not to finish. Its curriculum was also the hardest of the three
+(`walls_mean` 1.63 against 1.30 and 1.49) and it scored worst -- the generator
+outrunning the student, which is the failure ACCEL's regret objective exists
+to avoid.
+
+### The excuse that did not survive
+
+`construct_smelting_line` has one test family, and `varied_patch` and
+`cluttered_patch` were added to the training split *because* they lifted it
+from 0-1.4% to 88%. So a curriculum that stops training on them should score
+badly on it whether or not it generalises worse. That is a real effect --
+`u2-s1` gains four points moving from the holdout to the broad space, 0.787
+to 0.828 -- and it is nowhere near large enough. ACCEL loses by the same
+twenty-one points on a space neither arm is tuned to, and `u2-s2` is equally
+bad on both (0.389, 0.398). `tools/eval_broad.py` exists for this check.
+
+### What the number is worth
+
+Three bugs were fixed before this comparison could be run at all, each of
+which would have produced a null for the wrong reason: demonstrations
+starved by a wall-skip rule, a level buffer ranking on recency rather than
+regret, and UED forced onto a rollout shape where control seeds ranged from
+0.002 to 0.244. The result is that a null now means something.
+
+What it does not license is "UED does not work". The variance is the story:
+two of three seeds land at 0.787 and 0.766, within reach of the control's
+0.820 floor, and one collapses. A method whose best seed is competitive and
+whose worst is catastrophic wants a stabiliser, not abandonment -- and the
+obvious suspect is a generator with no notion of how far ahead of the
+student it has got.
