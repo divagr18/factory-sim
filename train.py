@@ -231,9 +231,7 @@ def parse(argv=None) -> argparse.Namespace:
     p.add_argument(
         "--ued-beta", type=float, default=0.3, help="rank temperature: P ~ 1/rank**(1/beta)"
     )
-    p.add_argument(
-        "--ued-rho", type=float, default=0.3, help="share of the draw that is staleness"
-    )
+    p.add_argument("--ued-rho", type=float, default=0.3, help="share of the draw that is staleness")
     p.add_argument("--ued-edits", type=int, default=2, help="edits per mutation under accel")
     p.add_argument(
         "--ued-warm-start",
@@ -308,6 +306,19 @@ def parse(argv=None) -> argparse.Namespace:
         "progress on that arrangement, not generalisation (fsim/vec.py)",
     )
     p.set_defaults(demo_obstructed=False)
+    p.add_argument(
+        "--demo-variants",
+        type=int,
+        default=1,
+        choices=(1, 2),
+        help="how many furnace arrangements demonstrations may draw from. 1 is "
+        "the rotation orbit of the canonical pose, which is what every earlier "
+        "run measured. 2 adds the second productive furnace centre: it is the "
+        "reflection of the first, and this mechanic is not reflection-invariant, "
+        "so no turn or translation of a demonstration reaches it. The one axis "
+        "on which the builder can be more varied rather than merely re-posed "
+        "(fsim/expert.py, FURNACE_OFFSETS)",
+    )
     p.add_argument(
         "--fixed-demo-layout",
         action="store_true",
@@ -741,6 +752,7 @@ def main(argv=None) -> int:
         **rollout.memories(),
     )  # fmt: skip
     env.demo_layouts = not args.fixed_demo_layout
+    env.demo_variants = args.demo_variants
 
     N, T = args.envs, args.horizon
     batch = N * T
@@ -846,13 +858,9 @@ def main(argv=None) -> int:
         with torch.no_grad():
             if args.algo == "grpo":
                 if args.credit == "togo":
-                    adv = togo_advantage(
-                        rew_buf, live_buf, args.group, args.gamma, args.baseline
-                    )
+                    adv = togo_advantage(rew_buf, live_buf, args.group, args.gamma, args.baseline)
                 else:
-                    adv = group_advantage(
-                        rew_buf, live_buf, args.group, args.gamma, args.baseline
-                    )
+                    adv = group_advantage(rew_buf, live_buf, args.group, args.gamma, args.baseline)
                 returns = torch.zeros_like(adv)
                 unfinished = float(live.sum())
                 # The number to watch: a group whose attempts all score the
@@ -963,16 +971,15 @@ def main(argv=None) -> int:
                     value = policy.value(frozen if args.critic_detach else f)
                     vf_clip = args.clip if args.vf_clip is None else args.vf_clip
                     v_clipped = b_val[idx] + (value - b_val[idx]).clamp(-vf_clip, vf_clip)
-                    v_loss = 0.5 * torch.max(
-                        (value - b_ret[idx]) ** 2, (v_clipped - b_ret[idx]) ** 2
-                    ).mean()
+                    v_loss = (
+                        0.5
+                        * torch.max((value - b_ret[idx]) ** 2, (v_clipped - b_ret[idx]) ** 2).mean()
+                    )
                     loss = pg - args.ent * ent + args.vf * v_loss
                 prior_kl = torch.zeros((), device=device)
                 if prior is not None:
                     op = b_actions[idx][:, 0]
-                    op_logits, op_mask, arg_logits, pad = policy.head_logits(
-                        f, b_masks[idx], op
-                    )
+                    op_logits, op_mask, arg_logits, pad = policy.head_logits(f, b_masks[idx], op)
                     with torch.no_grad():
                         pf = features(prior, {k: v[idx] for k, v in flat.items()})
                         p_op, _, p_arg, _ = prior.head_logits(pf, b_masks[idx], op)

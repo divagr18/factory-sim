@@ -205,6 +205,13 @@ class VecEnv:
         #: the one canonical arrangement. False reproduces the single-pose
         #: demonstrations, which a policy memorises (`docs/shaping.md`).
         self.demo_layouts: bool = True
+        #: How many of `expert.FURNACE_OFFSETS` a demonstration may use. 1 is
+        #: the rotation orbit of the canonical pose, which is what every run
+        #: recorded before this option existed used, so leaving it alone keeps
+        #: those runs comparable. 2 adds the reflected orbit, which no turn or
+        #: translation of a demonstration can reach -- the one axis along which
+        #: the builder can be more varied rather than merely re-posed.
+        self.demo_variants: int = 1
         self.action_space = action_space
         #: Where a resetting environment gets its scene. None draws from the
         #: task's own families, which is every run that is not a UED run.
@@ -340,8 +347,10 @@ class VecEnv:
         if self.demo_starts and eligible and draw.random() < self.demo_starts:
             patch = scene["markers"]["patch"]
             # No buildable arrangement at all: nothing to demonstrate.
-            if expert.layouts(rl, patch):
-                layout = expert.choose_layout(rl, patch, draw if self.demo_layouts else None)
+            if expert.layouts(rl, patch, self.demo_variants):
+                layout = expert.choose_layout(
+                    rl, patch, draw if self.demo_layouts else None, self.demo_variants
+                )
                 if self.demo_window is None:
                     stage = draw.choice(expert.STAGES)
                     taken = expert.advance_to(rl, patch, stage, self._demo_step(rl), layout)
@@ -351,9 +360,7 @@ class VecEnv:
                     lo, hi = self.demo_window
                     back = draw.randint(min(lo, length), min(hi, length))
                     wanted = length - back
-                    taken = expert.advance_decisions(
-                        rl, patch, wanted, self._demo_step(rl), layout
-                    )
+                    taken = expert.advance_decisions(rl, patch, wanted, self._demo_step(rl), layout)
                     if taken < wanted:
                         # The builder walks in straight lines and something was
                         # in the way. A half-finished demonstration is worse

@@ -15,6 +15,14 @@ teaches a policy that pose rather than the task: measured, a policy trained on
 the single canonical layout reaches 84% on unseen scenes of the shape it was
 trained on and 0% once a wall stands where it expects to stand.
 
+Turning and moving a demonstration varies where it happens, not what it is.
+Both are symmetries the task is invariant under, so every layout drawn that
+way is the same structure seen from somewhere else. `FURNACE_OFFSETS` is the
+axis that is not: two furnace centres catch a drill's drop, they are
+reflections rather than rotations of each other, and this mechanic is not
+reflection-invariant, so no turn of the first reaches the second. Pass
+`variants=2` to draw from both.
+
 It exists for one purpose: **demonstration starts**. Resetting an episode to a
 state partway along a demonstration, and letting the policy take over from
 there, is how Salimans & Chen (2018) learned Montezuma's Revenge from a single
@@ -50,6 +58,29 @@ AMOUNT_20 = 3
 
 #: How far along the build a start state is.
 STAGES = ("walked", "drill", "furnace", "drill_fuelled", "furnace_fuelled")
+
+#: Where the furnace may sit, as an offset from the drill's centre before the
+#: layout's quarter-turns are applied.
+#:
+#: A drill facing south drops ore at (cx + 0.5, cy + 1.30), and a 2x2 furnace
+#: at integer centre (fx, fy) covers x in [fx-1, fx+1), y in [fy-1, fy+1). Two
+#: centres catch that drop, not one: (0, 2) and (1, 2). FactorioRL measured
+#: both on the real engine, over every integer offset within four tiles --
+#: `docs/evidence/section8-symmetry.json`, and `docs/LIMITATIONS.md` section 2
+#: for what it constrains.
+#:
+#: The two are **not** related by any turn of the layout. Rotation is a
+#: symmetry of this mechanic and reflection is not, because a 2x2 entity
+#: extends one tile in the negative direction from its centre and none in the
+#: positive; the group is C4, not D4. Turning (0, 2) gives (-2, 0), (0, -2),
+#: (2, 0) -- one orbit, one structure seen from four sides. (1, 2) turns into
+#: the second orbit, (-2, 1), (-1, -2), (2, -1), which matches the second
+#: productive centre measured for each facing exactly.
+#:
+#: So a builder that only ever uses `FURNACE_OFFSETS[0]` demonstrates half the
+#: arrangements that work, and the missing half is precisely the half no
+#: amount of rotating or translating the demonstration can reach.
+FURNACE_OFFSETS = ((0.0, 2.0), (1.0, 2.0))
 
 
 def _floor_tile(v: int) -> int:
@@ -93,14 +124,20 @@ def _square(anchor: tuple[int, int]) -> list[tuple[int, int]]:
     return [(ax, ay), (ax + 1, ay), (ax, ay + 1), (ax + 1, ay + 1)]
 
 
-def layouts(rl, patch) -> list[tuple[tuple[int, int], int]]:
-    """Every `(drill anchor, quarter-turns)` this scene can be built with.
+def layouts(rl, patch, variants: int = 1) -> list[tuple[tuple[int, int], int, int]]:
+    """Every `(drill anchor, quarter-turns, furnace variant)` this scene admits.
 
     The drill's four tiles must all be ore, the furnace's four and the tile the
     builder stands in must be clear, and both machines must fall inside the
     placement window around that tile. The canonical layout -- the drill on the
     patch centre, the furnace due south, the builder standing to the east -- is
     FactorioRL's `_build_at` reference, and comes first.
+
+    `variants` is how many of `FURNACE_OFFSETS` to draw from. One is the
+    rotation orbit of (0, 2) and reproduces every layout this function returned
+    before the second orbit existed, so a run that leaves it alone is
+    comparable with every run recorded before. Two adds the reflected orbit,
+    which no turn of the first can produce.
     """
     env = rl.env
     ore, taken = _ore_tiles(env), _taken_tiles(env)
@@ -111,22 +148,24 @@ def layouts(rl, patch) -> list[tuple[tuple[int, int], int]]:
     for anchor in anchors:
         centre = (anchor[0] + 1, anchor[1] + 1)
         for quarters in range(4):
-            fx, fy = _turn((0.0, 2.0), quarters)
-            furnace = (round(centre[0] + fx) - 1, round(centre[1] + fy) - 1)
             sx, sy = _turn((3.5, 0.5), quarters)
             stand = (math.floor(centre[0] + sx), math.floor(centre[1] + sy))
-            if any(t in taken for t in _square(furnace) + [stand]):
-                continue
-            if any(
-                abs(t[0] - stand[0]) > PLACEMENT_RADIUS or abs(t[1] - stand[1]) > PLACEMENT_RADIUS
-                for t in (anchor, furnace)
-            ):
-                continue
-            found.append((anchor, quarters))
+            for variant in range(min(variants, len(FURNACE_OFFSETS))):
+                fx, fy = _turn(FURNACE_OFFSETS[variant], quarters)
+                furnace = (round(centre[0] + fx) - 1, round(centre[1] + fy) - 1)
+                if any(t in taken for t in _square(furnace) + [stand]):
+                    continue
+                if any(
+                    abs(t[0] - stand[0]) > PLACEMENT_RADIUS
+                    or abs(t[1] - stand[1]) > PLACEMENT_RADIUS
+                    for t in (anchor, furnace)
+                ):
+                    continue
+                found.append((anchor, quarters, variant))
     return found
 
 
-def choose_layout(rl, patch, rng=None) -> tuple[tuple[int, int], int]:
+def choose_layout(rl, patch, rng=None, variants: int = 1) -> tuple[tuple[int, int], int, int]:
     """One layout for this scene: a random valid one, or the first valid one.
 
     Without an `rng` this is the canonical layout wherever the scene allows it,
@@ -137,9 +176,9 @@ def choose_layout(rl, patch, rng=None) -> tuple[tuple[int, int], int]:
     that blocks that pose -- an obstacle standing on it, an ore patch whose
     shape moves it -- leaves that policy with nothing to fall back on.
     """
-    found = layouts(rl, patch)
+    found = layouts(rl, patch, variants)
     if not found:
-        return ((math.floor(patch[0]), math.floor(patch[1])), 0)
+        return ((math.floor(patch[0]), math.floor(patch[1])), 0, 0)
     return rng.choice(found) if rng is not None else found[0]
 
 
@@ -217,16 +256,22 @@ def move_vector(rl, goal: tuple[float, float], tolerance: float = 0.3) -> list[i
 class Builder:
     """Drives one `fsim_rl` through the build, one decision at a time."""
 
-    def __init__(self, rl, patch: tuple[float, float], stop: int = len(STAGES), layout=None) -> None:
+    def __init__(
+        self, rl, patch: tuple[float, float], stop: int = len(STAGES), layout=None
+    ) -> None:
         self.rl = rl
         self.stop = stop  # how many stages to complete
-        anchor, quarters = layout if layout is not None else choose_layout(rl, patch)
+        chosen = layout if layout is not None else choose_layout(rl, patch)
+        # A layout was a pair before the second furnace orbit existed. Accept
+        # one, so a caller that hard-codes the canonical pose still means it.
+        anchor, quarters, variant = chosen if len(chosen) == 3 else (*chosen, 0)
         self.quarters = quarters
+        self.variant = variant
         # The drill covers four ore tiles; everything else is placed relative
         # to the point at its centre, turned with it.
         self.drill_anchor = anchor
         self.drill_centre = (anchor[0] + 1, anchor[1] + 1)
-        fx, fy = _turn((0.0, 2.0), quarters)
+        fx, fy = _turn(FURNACE_OFFSETS[variant], quarters)
         self.furnace_centre = (self.drill_centre[0] + fx, self.drill_centre[1] + fy)
         self.furnace_anchor = (
             round(self.furnace_centre[0]) - 1,

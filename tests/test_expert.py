@@ -41,6 +41,7 @@ def test_every_layout_the_builder_may_draw_builds_a_line(seed):
     assert found[0] == (
         (int(scene["markers"]["patch"][0] // 1), int(scene["markers"]["patch"][1] // 1)),
         0,
+        0,
     ), "the canonical layout comes first"
     for layout in found:
         env = RlEnv()
@@ -55,14 +56,14 @@ def test_all_four_turns_are_available_and_distinct():
     env = RlEnv()
     env.reset("construct_smelting_line", scene)
     found = expert.layouts(env.rl, scene["markers"]["patch"])
-    assert {quarters for _, quarters in found} == {0, 1, 2, 3}
+    assert {quarters for _, quarters, _ in found} == {0, 1, 2, 3}
     patch = scene["markers"]["patch"]
     anchor = found[0][0]
     # The four turns of one anchor put the builder on four different sides of
     # the drill, facing the way the drill's output must travel.
     sides = set()
     for quarters in range(4):
-        builder = expert.Builder(env.rl, patch, layout=(anchor, quarters))
+        builder = expert.Builder(env.rl, patch, layout=(anchor, quarters, 0))
         cx, cy = builder.drill_centre
         sides.add((builder.standing[0] > cx, builder.standing[1] > cy))
         assert builder.drill_facing == expert._turn_direction(expert.DIR_SOUTH, quarters)
@@ -191,3 +192,79 @@ def test_build_line_may_have_demonstration_starts():
             assert env.starts[i] == expected, (env.families[i], env.starts[i])
     finally:
         env.close()
+
+
+class TestTheSecondFurnaceOrbit:
+    """The builder's variety was rotation and translation, which the task is
+    invariant under, so every demonstration was one structure re-posed. The
+    second productive furnace centre is the reflection of the first, and this
+    mechanic is not reflection-invariant, so it is genuinely a second thing to
+    demonstrate. Measured on the engine in FactorioRL's
+    `docs/evidence/section8-symmetry.json`."""
+
+    def test_the_default_is_the_orbit_every_earlier_run_measured(self):
+        """Adding an option must not silently restate old results."""
+        _, scene = scenes.sample("construct_smelting_line", "train", 3)
+        env = RlEnv()
+        env.reset("construct_smelting_line", scene)
+        found = expert.layouts(env.rl, scene["markers"]["patch"])
+        assert {variant for _, _, variant in found} == {0}
+
+    def test_asking_for_two_offers_both(self):
+        _, scene = scenes.sample("construct_smelting_line", "train", 3)
+        env = RlEnv()
+        env.reset("construct_smelting_line", scene)
+        patch = scene["markers"]["patch"]
+        one = expert.layouts(env.rl, patch, 1)
+        two = expert.layouts(env.rl, patch, 2)
+        assert {variant for _, _, variant in two} == {0, 1}
+        assert set(one) < set(two), "variants=1 must stay a subset of variants=2"
+
+    @pytest.mark.parametrize("seed", range(6))
+    def test_every_layout_of_either_orbit_builds_a_verified_line(self, seed):
+        """A demonstration that does not smelt is worse than no demonstration:
+        it starts the policy from a state the expert cannot finish."""
+        family, scene = scenes.sample("construct_smelting_line", "train", seed)
+        if scene["entities"]:
+            pytest.skip(f"{family} has something in the way")
+        env = RlEnv()
+        env.reset("construct_smelting_line", scene)
+        found = expert.layouts(env.rl, scene["markers"]["patch"], 2)
+        assert any(variant for _, _, variant in found), "no second-orbit layout to check"
+        for layout in found:
+            env = RlEnv()
+            env.reset("construct_smelting_line", scene)
+            expert.run_to_completion(env.rl, scene["markers"]["patch"], layout=layout)
+            assert env.rl.success, (family, layout)
+            assert env.rl.decode_failures == 0, (family, layout)
+
+    def test_the_second_orbit_is_not_a_turn_of_the_first(self):
+        """If it were, it would be more of the same and worth nothing."""
+        turns_of_first = {expert._turn(expert.FURNACE_OFFSETS[0], q) for q in range(4)}
+        turns_of_second = {expert._turn(expert.FURNACE_OFFSETS[1], q) for q in range(4)}
+        assert turns_of_first.isdisjoint(turns_of_second)
+        assert turns_of_first == {(0.0, 2.0), (-2.0, 0.0), (0.0, -2.0), (2.0, 0.0)}
+        # The measured second productive centre for each facing, in the order
+        # south, west, north, east -- the order `_turn` visits them.
+        assert turns_of_second == {(1.0, 2.0), (-2.0, 1.0), (-1.0, -2.0), (2.0, -1.0)}
+
+    def test_a_pair_still_means_the_canonical_pose(self):
+        """Callers written before the second orbit existed keep their meaning."""
+        _, scene = scenes.sample("construct_smelting_line", "train", 3)
+        env = RlEnv()
+        env.reset("construct_smelting_line", scene)
+        patch = scene["markers"]["patch"]
+        anchor = expert.layouts(env.rl, patch)[0][0]
+        pair = expert.Builder(env.rl, patch, layout=(anchor, 1))
+        triple = expert.Builder(env.rl, patch, layout=(anchor, 1, 0))
+        assert pair.furnace_anchor == triple.furnace_anchor
+        assert pair.variant == 0
+
+    def test_the_trainer_leaves_the_orbit_alone_by_default(self):
+        """The arm a run is in has to be a property of the run, not a default
+        that moved underneath it."""
+        env = VecEnv(8, demo_starts=1.0, seed=7)
+        try:
+            assert env.demo_variants == 1
+        finally:
+            env.close()
