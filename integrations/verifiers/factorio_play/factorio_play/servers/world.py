@@ -12,7 +12,7 @@ from __future__ import annotations
 import verifiers.v1 as vf
 from pydantic import Field
 
-from factorio_tools.session import WorldSession
+from factorio_play.session import WorldSession
 from fsim import scenes
 
 MAX_WAITS = 100

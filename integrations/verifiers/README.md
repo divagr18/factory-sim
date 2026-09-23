@@ -6,7 +6,7 @@ There are two packages, one environment each, in the Environments Hub layout
 | Package | Kind | Entry points |
 | --- | --- | --- |
 | [`factorio_build/`](factorio_build/README.md) | single-turn program synthesis | v1 `FactorioBuildTaskset`, v0 `load_environment()` |
-| [`factorio_tools/`](factorio_tools/README.md) | multi-turn tool use, one scene per rollout | v1 `FactorioToolsTaskset` |
+| [`factorio_play/`](factorio_play/README.md) | multi-turn tool use, one scene per rollout | v1 `FactorioPlayTaskset` |
 
 Both reuse factory-sim's evaluation code (`fsim.program_api`,
 `evolve.sandbox`, `evolve.evaluate`, `evolve.mutate`, `fsim.scenes`). Neither

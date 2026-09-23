@@ -1,4 +1,4 @@
-"""factorio-tools: build a smelting line through `world.*` tool calls, one scene per rollout.
+"""factorio-play: build a smelting line through `world.*` tool calls, one scene per rollout.
 
 Each tool call is one `World` method call on a live factory-sim episode (see
 `servers/world.py` and `session.py`). The model calls `finish` when done; the
@@ -13,12 +13,12 @@ import logging
 from typing import Literal
 
 import verifiers.v1 as vf
-from factorio_build import core
 from pydantic import Field
 from verifiers.v1.harnesses.null import NullHarness
 
 from evolve import mutate
-from factorio_tools.servers.world import WorldState, WorldToolset, WorldToolsetConfig
+from factorio_play import scenes as scene_plan
+from factorio_play.servers.world import WorldState, WorldToolset, WorldToolsetConfig
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ def system_prompt(game_notes: bool = True) -> str:
     return "\n\n".join(parts)
 
 
-class FactorioToolsData(vf.TaskData):
+class FactorioPlayData(vf.TaskData):
     sim_task: str
     split: str
     scene_id: str
@@ -51,17 +51,17 @@ class FactorioToolsData(vf.TaskData):
     sample_split: str
 
 
-class FactorioToolsTaskConfig(vf.TaskConfig):
+class FactorioPlayTaskConfig(vf.TaskConfig):
     tools: WorldToolsetConfig = WorldToolsetConfig()
 
 
-class FactorioToolsTask(vf.Task[FactorioToolsData, WorldState, FactorioToolsTaskConfig]):
+class FactorioPlayTask(vf.Task[FactorioPlayData, WorldState, FactorioPlayTaskConfig]):
     @property
     def key(self) -> str:
         return self.data.scene_id
 
     @classmethod
-    def toolsets(cls, config: FactorioToolsTaskConfig) -> list[vf.Toolset]:
+    def toolsets(cls, config: FactorioPlayTaskConfig) -> list[vf.Toolset]:
         return [WorldToolset(config.tools)]
 
     @vf.metric
@@ -81,7 +81,7 @@ class FactorioToolsTask(vf.Task[FactorioToolsData, WorldState, FactorioToolsTask
         return float(st.finished and st.success)
 
 
-class FactorioToolsConfig(vf.TasksetConfig):
+class FactorioPlayConfig(vf.TasksetConfig):
     sim_task: str = "construct_smelting_line"
     split: Literal["train", "val", "holdout"] = "train"
     """`holdout` is the frozen FactorioRL holdout: evaluation only."""
@@ -90,22 +90,22 @@ class FactorioToolsConfig(vf.TasksetConfig):
     seed: int = Field(0, ge=0)
     """First scene index of the split."""
     game_notes: bool = True
-    task: FactorioToolsTaskConfig = FactorioToolsTaskConfig()
+    task: FactorioPlayTaskConfig = FactorioPlayTaskConfig()
 
 
-class FactorioToolsTaskset(vf.Taskset[FactorioToolsTask, FactorioToolsConfig]):
-    def load(self) -> list[FactorioToolsTask]:
+class FactorioPlayTaskset(vf.Taskset[FactorioPlayTask, FactorioPlayConfig]):
+    def load(self) -> list[FactorioPlayTask]:
         cfg = self.config
         if cfg.split == "holdout":
-            logger.warning("factorio-tools: split=holdout is for evaluation only")
-        refs = core.scene_block(cfg.sim_task, cfg.split, cfg.seed, cfg.num_examples)
+            logger.warning("factorio-play: split=holdout is for evaluation only")
+        refs = scene_plan.scene_block(cfg.sim_task, cfg.split, cfg.seed, cfg.num_examples)
         system = system_prompt(cfg.game_notes)
         tasks = []
         for i, ref in enumerate(refs):
             scene_id = f"{cfg.sim_task}/{cfg.split}/{cfg.seed + i}"
             tasks.append(
-                FactorioToolsTask(
-                    FactorioToolsData(
+                FactorioPlayTask(
+                    FactorioPlayData(
                         idx=i,
                         name=scene_id,
                         sim_task=cfg.sim_task,
@@ -124,8 +124,8 @@ class FactorioToolsTaskset(vf.Taskset[FactorioToolsTask, FactorioToolsConfig]):
         return tasks
 
 
-class FactorioToolsHarness(NullHarness):
+class FactorioPlayHarness(NullHarness):
     """The built-in `null` chat loop (with MCP tools), made this taskset's default."""
 
 
-__all__ = ["FactorioToolsHarness", "FactorioToolsTaskset"]
+__all__ = ["FactorioPlayHarness", "FactorioPlayTaskset"]

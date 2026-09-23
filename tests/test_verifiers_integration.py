@@ -19,15 +19,15 @@ pytest.importorskip("verifiers")
 pytest.importorskip("datasets")
 
 ROOT = Path(__file__).resolve().parents[1]
-for sub in ("factorio_build", "factorio_tools"):
+for sub in ("factorio_build", "factorio_play"):
     path = str(ROOT / "integrations" / "verifiers" / sub)
     if path not in sys.path:
         sys.path.insert(0, path)
 
 import factorio_build  # noqa: E402
-import factorio_tools  # noqa: E402
+import factorio_play  # noqa: E402
 from factorio_build import core  # noqa: E402
-from factorio_tools.session import WorldSession  # noqa: E402
+from factorio_play.session import WorldSession  # noqa: E402
 
 from evolve import evaluate, mutate, sandbox  # noqa: E402
 from evolve.seeds import builder, trivial  # noqa: E402
@@ -355,10 +355,10 @@ def test_v1_validate_and_default_harness(v1_task):
 
 @needs_v1
 def test_v1_tools_toolset_offline():
-    from factorio_tools.servers.world import WorldToolset
-    from factorio_tools.taskset import FactorioToolsConfig
+    from factorio_play.servers.world import WorldToolset
+    from factorio_play.taskset import FactorioPlayConfig
 
-    tasks = list(factorio_tools.FactorioToolsTaskset(FactorioToolsConfig(num_examples=2)))
+    tasks = list(factorio_play.FactorioPlayTaskset(FactorioPlayConfig(num_examples=2)))
     task = tasks[0]
     toolset = WorldToolset(task.config.tools)
     asyncio.run(toolset.setup_task(task.data))
@@ -377,3 +377,21 @@ def test_v1_tools_toolset_offline():
     )
     assert done["success"] == direct.success
     assert done["verified_output"] == direct.verified_output
+
+
+def test_play_scenes_match_factorio_build():
+    """factorio-play carries its own copy of the seed plan so it depends on
+    factory-sim alone; it must pick exactly the scenes factorio-build does."""
+    from factorio_play import scenes as play_scenes
+
+    for split, start, n in (
+        ("train", 0, 5),
+        ("val", 3, 5),
+        ("holdout", 0, 5),
+        ("holdout", 1000, 3),
+    ):
+        a = core.scene_block(TASK, split, start, n)
+        b = play_scenes.scene_block(TASK, split, start, n)
+        assert [(r.family, r.seed, r.sample_split) for r in a] == [
+            (r.family, r.seed, r.sample_split) for r in b
+        ]
