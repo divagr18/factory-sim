@@ -55,6 +55,21 @@ with no code block scores 0.
 `normalized_hash` (blind to layout, comments and renaming), which is useful for
 counting distinct programs in a group.
 
+### Baselines
+One reply per row, zero-shot, game notes on, 16 scenes per row, up to 32,000
+completion tokens (reasoning included), scored by `score_completion` under
+evaluator version 4.
+
+| Model | `val` scenes solved (32 rows) | `holdout` scenes solved (6 rows) | Programs the sandbox accepts | Rows fully solved |
+| --- | --- | --- | --- | --- |
+| `gpt-6-luna` (OpenAI, Flex tier) | 80.9% | 89.6% | 97% val, 100% holdout | 16/32 val, 2/6 holdout |
+
+The `val` rows are subsets 0–31 at `seed=0`. The `holdout` rows are 0–5,
+which cover frozen indices 0–95. Six rows is a small sample, so read the
+holdout column as a rough number. Almost every remaining failure is a valid
+program whose plan fails on some scenes; two ran past the 2-second limit and
+one was over 300 lines. The run cost $0.06.
+
 ### Two entry points
 verifiers 0.3.x ships two stacks, and this package supports both. Both score
 through the same function, `factorio_build.core.score_completion`, so a
