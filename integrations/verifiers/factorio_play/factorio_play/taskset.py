@@ -9,11 +9,14 @@ ended, so nothing was verified.
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 from typing import Literal
 
 import verifiers.v1 as vf
 from pydantic import Field
+from verifiers.v1.dialects.chat import message_to_wire
 from verifiers.v1.harnesses.null import NullHarness
 
 from evolve import mutate
@@ -124,8 +127,41 @@ class FactorioPlayTaskset(vf.Taskset[FactorioPlayTask, FactorioPlayConfig]):
         return tasks
 
 
+RESPONSES_PROGRAM = (Path(__file__).resolve().parent / "responses_program.py").read_text(
+    encoding="utf-8"
+)
+
+
 class FactorioPlayHarness(NullHarness):
-    """The built-in `null` chat loop (with MCP tools), made this taskset's default."""
+    """This taskset's default agent: the `null` loop over the Responses API.
+
+    Everything but the program is the built-in `null` harness: the same
+    arguments and MCP wiring, with `responses_program.py` instead of its Chat
+    Completions loop. Some reasoning models take function tools only on
+    `/responses`."""
+
+    async def setup(self, runtime) -> None:
+        await runtime.prepare_uv_script(RESPONSES_PROGRAM, self.config.resolved_env)
+
+    async def launch(self, ctx, trace, runtime, endpoint, secret, mcp_urls, data):
+        system_prompt, prompt = self.resolve_prompt(data)
+        args = [f"--base-url={endpoint}", f"--api-key={secret}", f"--model={ctx.model}"]
+        if system_prompt:
+            args.append(f"--system-prompt={system_prompt}")
+        if mcp_urls:
+            servers = {
+                name: {"url": url, "timeout": self.config.tool_timeout}
+                for name, url in mcp_urls.items()
+            }
+            args.append("--mcp-config=" + json.dumps({"mcpServers": servers}))
+        if isinstance(prompt, str):
+            args.append(f"--prompt={prompt}")
+        elif prompt is not None:
+            path = f".vf-initial-messages-{trace.id}.json"
+            await runtime.write(path, json.dumps([message_to_wire(m) for m in prompt]).encode())
+            args.append(f"--initial-messages-file={path}")
+        program = await runtime.prepare_uv_script(RESPONSES_PROGRAM, self.config.resolved_env)
+        return await runtime.run_program([*program, *args], dict(self.config.resolved_env))
 
 
 __all__ = ["FactorioPlayHarness", "FactorioPlayTaskset"]

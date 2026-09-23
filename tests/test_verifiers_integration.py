@@ -395,3 +395,21 @@ def test_play_scenes_match_factorio_build():
         assert [(r.family, r.seed, r.sample_split) for r in a] == [
             (r.family, r.seed, r.sample_split) for r in b
         ]
+
+
+def test_session_accepts_compass_words_and_says_why_an_action_is_refused():
+    """A live model wrote move("east", "long") and place(..., "S") and got a bare
+    False back every time: World takes N/E/S/W only, and the reason never reached
+    the model. Words now work, and every refusal carries its reason."""
+    session = WorldSession(scenes.sample(TASK, "train", 0)[1], task=TASK)
+    start = session.call("me")["result"]
+    moved = session.call("move", "East", "Long")
+    assert moved == {"ok": True, "result": True}
+    assert session.call("me")["result"] != start
+
+    bad = session.call("move", "sideways", "long")
+    assert bad["result"] is False and "N/E/S/W" in bad["refused"]
+
+    far = session.call("place", "stone-furnace", 999, 999, "south")
+    assert far["result"] is False and "tiles from tile()" in far["refused"]
+    session.finish()

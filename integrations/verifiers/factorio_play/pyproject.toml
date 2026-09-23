@@ -1,6 +1,6 @@
 [project]
 name = "factorio-play"
-version = "0.1.0"
+version = "0.1.1"
 description = "Build a working Factorio smelting line one tool call at a time, in a tick-exact simulator; the reward is the line's verified output."
 tags = [
     "multi-turn", "tool-use", "agent", "agentic", "train", "eval", "v1", "game", "factorio",

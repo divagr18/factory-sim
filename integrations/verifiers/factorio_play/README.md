@@ -36,13 +36,23 @@ played live instead of written as one program.
   scene. A tool call is one method call on factory-sim's `World`, so the
   budget, refusals and verification are exactly those of a program in
   `factorio-build`. The tests check this decision for decision.
-- **Cost:** a build takes 50 to 200 tool calls, so rollouts are long. The
-  environment suits evaluating agents better than cheap RL.
+- **Harness:** the default agent (`FactorioPlayHarness`) calls the model through
+  the OpenAI **Responses API**, so reasoning models can think and call tools in
+  the same turn. Its reasoning is carried from one turn to the next. A refused
+  action returns the reason, and directions take `N/E/S/W` or words.
+- **Cost:** a successful build can be short: the first verified run used 17
+  tool calls, 5 of them spending decisions. A flailing agent can use hundreds.
 
 ```bash
 uv run eval factorio-play -m openai/gpt-6-luna -n 8 --env.agent.max-turns 400
 uv run eval factorio-play -m openai/gpt-6-luna -n 8 --env.taskset.split holdout --env.agent.max-turns 400   # evaluation only
 ```
+
+## First run
+
+`gpt-6-luna`, one `val` scene, reasoning on: the line was built and verified
+(15 plates) in 12 model turns and 17 tool calls, with no refused action. One
+episode shows the environment works end to end. It is not a benchmark number.
 
 ## Config
 
@@ -55,4 +65,8 @@ uv run eval factorio-play -m openai/gpt-6-luna -n 8 --env.taskset.split holdout 
 
 ## Changelog
 
+- 2026-09-24 (0.1.1): The default harness uses the Responses API. Refused
+  actions return their reason, and directions and facings accept words
+  (`east`) as well as letters (`E`). Before this, every action a model phrased
+  with a word was refused without explanation.
 - 2026-09-24 (0.1.0): Initial release.

@@ -127,14 +127,16 @@ class WorldToolset(vf.Toolset[WorldToolsetConfig, WorldState]):
 
     @vf.tool
     def move(self, direction: str, stride: str = "long") -> dict:
-        """Walk N/E/S/W for one decision: stride "long" (~4.5 tiles), "step" (~1) or
-        "nudge" (~0.3)."""
+        """Walk one decision in `direction` (N/E/S/W, or north/east/south/west) with
+        stride "long" (~4.5 tiles), "step" (~1) or "nudge" (~0.3). If it is refused,
+        the result says why."""
         return self._call("move", direction, stride)
 
     @vf.tool
     def place(self, item: str, x: int, y: int, facing: str) -> dict:
-        """Place `item` on tile (x, y) facing N/E/S/W; a 2x2 machine covers x..x+1,
-        y..y+1. Reaches 5 tiles from tile(), never the character's own tile."""
+        """Place `item` on tile (x, y) facing N/E/S/W (or north/east/south/west); a
+        2x2 machine covers x..x+1, y..y+1. Reaches 5 tiles from tile(), never the
+        character's own tile. If it is refused, the result says why."""
         return self._call("place", item, x, y, facing)
 
     @vf.tool

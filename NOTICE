@@ -27,3 +27,10 @@ Rules for contributors
   not allow it. Measure behaviour and write it down; then implement it.
 - Never commit game binaries, graphics, sounds, fonts, locale files, saves or
   prototype dumps.
+
+Third-party code
+----------------
+integrations/verifiers/factorio_play/factorio_play/responses_program.py adapts
+the MCP client helpers of verifiers' null harness (harnesses/null/program.py),
+Copyright (c) 2026 Prime Intellect, under the MIT License. The notice is
+reproduced in that file.
