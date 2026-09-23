@@ -120,3 +120,68 @@ The PufferLib adapter costs about as much as raw `VecEnv`, because it adds no
 copy. The Gymnasium vector's overhead comes almost entirely from copying the
 float grid (about 100 KB per environment per step) out of the strided C
 buffers. With `copy=False` it runs at raw speed.
+
+## OpenEnv
+
+An [OpenEnv](https://github.com/huggingface/OpenEnv) environment for LLM
+agents, built against `openenv` 0.5.0 and its WebSocket session protocol. The
+code, a Dockerfile and a full README are in `integrations/openenv/` (package
+`factory_sim_env`). It reuses `fsim.program_api`, `evolve.sandbox`,
+`evolve.evaluate` and the evolution loop's prompt. Nothing in it is a second
+implementation.
+
+- **Program mode** (default, one step): `reset()` returns the task, the
+  program contract and the `World` API. The action is one `def build(world)`
+  program. `step()` sandbox-checks it and runs it on 16 train scenes in a
+  worker pool. The reward is the success rate, and the observation carries
+  per-family rates and a short failure trace for each family.
+- **Tool mode** (`reset(mode="tool")`, multi-turn): one scene. Each action is
+  one `World` call (`move`, `place`, `give`, `take`, `mine`, `wait`, `finish`).
+  The reward is 1 on a verified line at the end of the episode.
+
+```bash
+cd integrations/openenv
+uvicorn server.app:app --port 8000          # train / val
+uvicorn server.app:holdout_app --port 8001  # frozen holdout, evaluation only
+```
+
+```python
+from factory_sim_env import FactorySimAction, FactorySimEnv
+
+with FactorySimEnv(base_url="http://localhost:8000").sync() as env:
+    env.reset(seed=0)
+    r = env.step(FactorySimAction(program=source))
+    print(r.reward, r.observation.family_rates)
+```
+
+The holdout is served only by `holdout_app`, and it never returns traces. The
+training app refuses `split="holdout"`. `factory_sim_env.trl_envs` has TRL
+`environment_factory` classes (`ProgramToolEnv`, `WorldToolEnv`). The tests
+are in `tests/test_openenv_integration.py`, and they are skipped when
+`openenv` is not installed.
+
+## Environments Hub (verifiers)
+
+[Prime Intellect `verifiers`](https://github.com/PrimeIntellect-ai/verifiers)
+environments, built against verifiers 0.3.1, in `integrations/verifiers/`.
+Each is its own package with a Hub-style README. They reuse
+`fsim.program_api`, `evolve.sandbox`, `evolve.evaluate`, `evolve.mutate` and
+`fsim.scenes`, and nothing in them is a second implementation.
+
+- **`factorio_build`** (single turn): the prompt is the evolution loop's system prompt (task, contract, `World` API, optional game notes) plus a user message naming a scene subset. The reply's program is sandbox-checked and run on that subset's 8 to 16 scenes in an `EvalPool`. The rewards are `success_rate` (1.0), `format` (0.1: +1 valid, −1 refused by the sandbox, 0 no code) and an opt-in `refusal_penalty`. The package exports a native v1 `FactorioBuildTaskset` and also a v0 `load_environment()` (a `SingleTurnEnv` with a `Rubric`). Both score through the same function.
+- **`factorio_tools`** (multi-turn, v1 only): one scene per rollout. The `World` methods are MCP tools, backed by an unmodified `run_episode` running on a thread, plus `finish`. The reward is verified success.
+
+```bash
+eval factorio-build -m <model> -n 8 --env.taskset.split val      # v1
+vf-eval factorio-build -m <model> -n 8 -a '{"split": "val"}'      # v0
+```
+
+`split="holdout"` (the frozen FactorioRL holdout) is built only when asked
+for, and it is for evaluation only. `verifiers.v1` does not import on Windows
+(it needs `fcntl`), so there only the v0 entry point works. Neither package
+has been published. Publishing needs factory-sim to become pip-installable
+first, with its C extension built by the build backend and shipped as wheels
+(or as a git dependency that compiles at install time). See
+`integrations/verifiers/factorio_build/README.md`. The tests are in
+`tests/test_verifiers_integration.py`, and they are skipped without
+`verifiers`.

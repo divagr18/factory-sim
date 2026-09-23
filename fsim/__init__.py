@@ -139,15 +139,27 @@ def g(value: float) -> str:
 
 
 def water_tiles() -> list[tuple[int, int]]:
-    """The benchmark map's water, recorded by FactorioRL's probe."""
-    for candidate in (
+    """The benchmark map's water, recorded by FactorioRL's probe.
+
+    Missing, this raises rather than returning no water. It used to return an
+    empty list, and a packaged copy of the simulator without the file would
+    then have run every scene -- the frozen holdout included -- on a map with
+    no water: a different map from the real game's, with nothing to say so.
+    `Sim(water=[])` is still available for a deliberately dry map.
+    """
+    candidates = (
         ROOT / "tests" / "golden" / "sim-mechanics-m3.json",
         ROOT.parent / "FactorioRL" / "docs" / "evidence" / "sim-mechanics-m3.json",
-    ):
+    )
+    for candidate in candidates:
         if candidate.exists():
             data = json.loads(candidate.read_text(encoding="utf-8"))
             return sorted((int(x), int(y)) for x, y in data["terrain"]["water"])
-    return []
+    raise FileNotFoundError(
+        "the benchmark map's water is missing (sim-mechanics-m3.json); looked in "
+        + ", ".join(str(c) for c in candidates)
+        + ". Ship it with the simulator, or pass water=[] for a deliberately dry map."
+    )
 
 
 def _handle(value) -> int:

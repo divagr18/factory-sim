@@ -52,3 +52,15 @@ def test_every_generated_scene_installs(task):
             _, scene = scenes.sample(task, split, seed)
             obs = env.reset(task, scene)
             assert obs["grid"][0].sum() > 0  # the ore patch is visible
+
+
+def test_a_missing_water_file_is_an_error_not_a_dry_map(tmp_path, monkeypatch):
+    """A packaged simulator without the water file used to run every scene on a
+    map with no water -- a different map from the real game's -- in silence."""
+    import pytest
+
+    import fsim
+
+    monkeypatch.setattr(fsim, "ROOT", tmp_path / "nowhere")
+    with pytest.raises(FileNotFoundError, match="water"):
+        fsim.water_tiles()
