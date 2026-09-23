@@ -11,7 +11,7 @@ import pytest
 from evolve import run as evo_run
 from evolve.spend import SpendCapError, SpendLedger
 
-PRICE = {"input": 0.05, "cached_input": 0.005, "output": 0.25}  # gpt-6-luna on Flex
+PRICE = {"input": 0.05, "cached_input": 0.005, "output": 0.25}  # dollars per million tokens
 
 
 def usage(prompt=1000, completion=1000, cached=0):

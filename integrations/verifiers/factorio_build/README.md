@@ -62,7 +62,7 @@ evaluator version 4.
 
 | Model | `val` scenes solved (32 rows) | `holdout` scenes solved (6 rows) | Programs the sandbox accepts | Rows fully solved |
 | --- | --- | --- | --- | --- |
-| `gpt-6-luna` (OpenAI, Flex tier) | 80.9% | 89.6% | 97% val, 100% holdout | 16/32 val, 2/6 holdout |
+| `gpt-6-luna` | 80.9% | 89.6% | 97% val, 100% holdout | 16/32 val, 2/6 holdout |
 
 The `val` rows are subsets 0–31 at `seed=0`. The `holdout` rows are 0–5,
 which cover frozen indices 0–95. Six rows is a small sample, so read the

@@ -309,7 +309,7 @@ def test_load_provider_from_env(tmp_path, monkeypatch):
 
 def test_provider_options_shape_the_request(tmp_path):
     """OpenAI reasoning models want `max_completion_tokens`, no temperature, and
-    take extras such as `service_tier: flex`; the config decides, not the code."""
+    take provider-specific extras; the config decides, not the code."""
     import json as _json
 
     cfg = tmp_path / "p.json"
@@ -321,7 +321,7 @@ def test_provider_options_shape_the_request(tmp_path):
                 "model": "m",
                 "token_param": "max_completion_tokens",
                 "temperature": None,
-                "extra": {"service_tier": "flex"},
+                "extra": {"seed": 7},
             }
         )
     )
@@ -337,7 +337,7 @@ def test_provider_options_shape_the_request(tmp_path):
     client.complete([{"role": "user", "content": "hi"}], max_tokens=123)
     assert sent["max_completion_tokens"] == 123 and "max_tokens" not in sent
     assert "temperature" not in sent
-    assert sent["service_tier"] == "flex"
+    assert sent["seed"] == 7
     assert "sk-test-SECRET123" not in repr(provider)
 
 

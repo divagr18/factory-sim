@@ -88,7 +88,7 @@ class Provider:
         #: None leaves `temperature` out of the request: reasoning models reject
         #: any value but their own default.
         self.temperature = temperature
-        #: Merged into every request body, e.g. `{"service_tier": "flex"}`.
+        #: Merged into every request body, e.g. `{"service_tier": "..."}` or `{"seed": 0}`.
         self.extra = dict(extra or {})
         #: Dollars per million tokens, `{"input", "cached_input", "output"}`, and the
         #: spend cap. They sit with the key, in the private config, so the cap travels
