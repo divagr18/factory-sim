@@ -6,7 +6,7 @@ ground item piles. It exists to train reinforcement-learning policies quickly,
 with the real game kept as the verifier.
 
 It is checked, decision by decision and tick by tick, against golden traces
-recorded on Factorio 2.0.60 by [FactorioRL](https://github.com/divagr18/FactorioRL).
+recorded on Factorio 2.0.60 by [FactorioGym](https://github.com/divagr18/FactorioGym).
 A mechanic is added here only after it has been measured there.
 
 ## Status
