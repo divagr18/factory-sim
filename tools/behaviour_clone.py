@@ -96,7 +96,9 @@ def main(argv=None) -> int:
 
     torch.save(policy.state_dict(), args.out)
     args.out.with_suffix(".json").write_text(
-        json.dumps({"args": {k: str(v) for k, v in vars(args).items()}, "history": history}, indent=2),
+        json.dumps(
+            {"args": {k: str(v) for k, v in vars(args).items()}, "history": history}, indent=2
+        ),
         encoding="utf-8",
     )
     print(json.dumps({"saved": str(args.out), "samples": seen}))

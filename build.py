@@ -25,18 +25,21 @@ def cdef_from_header(text: str) -> str:
     return text[start:end]
 
 
-def make_ffi() -> FFI:
+def make_ffi(root: Path | None = None) -> FFI:
+    """The extension's builder. Paths are relative to the project root, where
+    setuptools builds from, so no sdist or wheel carries this machine's paths;
+    `root` makes them absolute for `ffi.compile`, which works in a temp dir."""
+    base = f"{root.as_posix()}/" if root else ""
     ffi = FFI()
     ffi.cdef(cdef_from_header((CSRC / "fsim.h").read_text(encoding="utf-8")))
     windows = sys.platform == "win32"
-    # Relative to the project root, where setuptools builds from: an sdist or a
-    # wheel must not carry this machine's absolute paths. fsim.c includes fsim_rl.c.
+    # fsim.c includes fsim_rl.c.
     ffi.set_source(
         "fsim._fsim",
         '#include "fsim.h"',
-        sources=["csrc/fsim.c"],
-        include_dirs=["csrc"],
-        depends=["csrc/fsim.h", "csrc/fsim_rl.c"],
+        sources=[f"{base}csrc/fsim.c"],
+        include_dirs=[f"{base}csrc"],
+        depends=[f"{base}csrc/fsim.h", f"{base}csrc/fsim_rl.c"],
         extra_compile_args=["/std:c11", "/O2", "/fp:precise"]
         if windows
         else ["-std=c11", "-O2", "-ffp-contract=off"],
@@ -49,7 +52,7 @@ ffibuilder = make_ffi()
 
 def main() -> int:
     os.chdir(ROOT)
-    ffibuilder.compile(tmpdir=str(ROOT / "build"), verbose=False, target=None)
+    make_ffi(ROOT).compile(tmpdir=str(ROOT / "build"), verbose=False, target=None)
     built = sorted((ROOT / "build" / "fsim").glob("_fsim*"))
     for path in built:
         (ROOT / "fsim" / path.name).write_bytes(path.read_bytes())

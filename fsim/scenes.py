@@ -177,7 +177,10 @@ def build_line(family: str, rng: random.Random) -> dict:
             along = rng.randint(-6, 3)
             length = rng.randint(2, 4)
             for step in range(length):
-                x, y = (cx + away, cy + along + step) if vertical else (cx + along + step, cy + away)
+                if vertical:
+                    x, y = cx + away, cy + along + step
+                else:
+                    x, y = cx + along + step, cy + away
                 if (x, y) in seen:
                     continue
                 seen.add((x, y))

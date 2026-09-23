@@ -1065,7 +1065,10 @@ def main(argv=None) -> int:
                 slot_scores = (paid / lived.clamp(min=1.0)).tolist()
                 counts = lived.tolist()
             curriculum.report(
-                [score if count > 0 else 0.0 for score, count in zip(slot_scores, counts)],
+                [
+                    score if count > 0 else 0.0
+                    for score, count in zip(slot_scores, counts, strict=True)
+                ],
                 at=pending,
             )
 

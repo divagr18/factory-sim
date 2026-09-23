@@ -13,7 +13,6 @@ import math
 import random
 
 import numpy as np
-
 import pytest
 
 from fsim import scenes, ued
@@ -357,6 +356,7 @@ def test_ued_no_longer_forces_whole_episodes():
     where seeds range over a hundredfold and no curriculum effect is
     detectable. Scoring a rollout segment instead is what PLR's own
     implementation does, and it runs at the tuned 512 x 64."""
+    pytest.importorskip("torch")
     import train
 
     assert not train.parse(["--run", "x", "--ued", "accel"]).whole_episodes

@@ -126,7 +126,7 @@ def test_shaping_leaves_the_sparse_reward_alone():
 def test_build_line_is_shaped_after_its_own_components():
     """The same potential describes both tasks; it is reported after the
     task's own components, which build_line fills three of."""
-    from fsim.rl import component_names, SHAPING
+    from fsim.rl import SHAPING, component_names
 
     assert component_names("build_line", SHAPING["both"]) == (
         "constructed", "plates_produced", "step_cost", "line_progress", "line_potential",

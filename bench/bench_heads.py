@@ -55,6 +55,59 @@ def timed(fn, warmup=3, iters=10, device="cuda"):
     return (time.perf_counter() - start) / iters * 1000.0
 
 
+def measure(space: str, batch: int, device) -> dict:
+    """Per-head timings for one action space, in milliseconds."""
+    policy = Policy(action_space=space).to(device)
+    if device.type == "cuda":
+        policy.extractor.input_dtype = torch.bfloat16
+        policy = policy.to(memory_format=torch.channels_last)
+    obs, mask, actions = inputs(batch, device)
+    autocast = torch.autocast(device.type, torch.bfloat16, enabled=device.type == "cuda")
+
+    def features():
+        with autocast:
+            return policy.features(*obs)
+
+    def forward():
+        with autocast:
+            f = policy.features(*obs)
+            return policy.evaluate(f, mask, actions)
+
+    def full():
+        with autocast:
+            f = policy.features(*obs)
+            logp, entropy = policy.evaluate(f, mask, actions)
+            loss = -(logp.mean() + entropy.mean()) + policy.value(f).mean()
+        policy.zero_grad(set_to_none=True)
+        loss.backward()
+
+    res = {
+        "extractor_ms": round(timed(features, device=device.type), 2),
+        "forward_ms": round(timed(forward, device=device.type), 2),
+        "forward_backward_ms": round(timed(full, device=device.type), 2),
+    }
+    if space == "v2":
+        with autocast:
+            f = policy.features(*obs)
+        context = torch.randn(batch, policy.features_dim + 22, device=device, dtype=f.dtype)
+        start = policy.features_dim
+        width = policy.rows * policy.row_dim
+        rows = f[:, start : start + width].reshape(batch, policy.rows, policy.row_dim)
+        crop = f[:, start + width :].reshape(batch, 6, policy.crop, policy.crop)
+
+        def pointer():
+            with autocast:
+                return policy.target_head(rows, context)
+
+        def placement():
+            with autocast:
+                return policy.place_head(crop, context)
+
+        res["pointer_head_ms"] = round(timed(pointer, device=device.type), 2)
+        res["place_head_ms"] = round(timed(placement, device=device.type), 2)
+    return res
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--batch", type=int, default=4096)
@@ -64,57 +117,7 @@ def main() -> int:
     out = {"batch": args.batch, "device": str(device)}
 
     for space in ("v1", "v2"):
-        policy = Policy(action_space=space).to(device)
-        if device.type == "cuda":
-            policy.extractor.input_dtype = torch.bfloat16
-            policy = policy.to(memory_format=torch.channels_last)
-        obs, mask, actions = inputs(args.batch, device)
-        autocast = torch.autocast(device.type, torch.bfloat16, enabled=device.type == "cuda")
-
-        def features():
-            with autocast:
-                return policy.features(*obs)
-
-        def forward():
-            with autocast:
-                f = policy.features(*obs)
-                return policy.evaluate(f, mask, actions)
-
-        def full():
-            with autocast:
-                f = policy.features(*obs)
-                logp, entropy = policy.evaluate(f, mask, actions)
-                loss = -(logp.mean() + entropy.mean()) + policy.value(f).mean()
-            policy.zero_grad(set_to_none=True)
-            loss.backward()
-
-        out[space] = {
-            "extractor_ms": round(timed(features, device=device.type), 2),
-            "forward_ms": round(timed(forward, device=device.type), 2),
-            "forward_backward_ms": round(timed(full, device=device.type), 2),
-        }
-        if space == "v2":
-            with autocast:
-                f = policy.features(*obs)
-            context = torch.randn(
-                args.batch, policy.features_dim + 22, device=device, dtype=f.dtype
-            )
-            start = policy.features_dim
-            width = policy.rows * policy.row_dim
-            rows = f[:, start : start + width].reshape(args.batch, policy.rows, policy.row_dim)
-            crop = f[:, start + width :].reshape(args.batch, 6, policy.crop, policy.crop)
-
-            def pointer():
-                with autocast:
-                    return policy.target_head(rows, context)
-
-            def placement():
-                with autocast:
-                    return policy.place_head(crop, context)
-
-            out[space]["pointer_head_ms"] = round(timed(pointer, device=device.type), 2)
-            out[space]["place_head_ms"] = round(timed(placement, device=device.type), 2)
-        del policy, obs, mask, actions
+        out[space] = measure(space, args.batch, device)
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
