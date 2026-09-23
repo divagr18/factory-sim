@@ -20,3 +20,4 @@ runs/
 opencode.json
 secrets/
 wheelhouse/
+.venv-*/

@@ -18,7 +18,7 @@ Tests: `tests/test_verifiers_integration.py`. They are skipped when
 where `verifiers.v1` cannot import.
 
 ```bash
-UV_CACHE_DIR=D:/uv-cache uv venv --python 3.13 D:/fsim-venvs/verifiers
-uv pip install --python D:/fsim-venvs/verifiers verifiers datasets cffi numpy pytest
-PYTHONPATH=. D:/fsim-venvs/verifiers/Scripts/python -m pytest tests/test_verifiers_integration.py
+uv venv --python 3.13 .venv-verifiers
+uv pip install --python .venv-verifiers -e . verifiers datasets pytest
+.venv-verifiers/bin/python -m pytest tests/test_verifiers_integration.py   # Scripts\python on Windows
 ```
