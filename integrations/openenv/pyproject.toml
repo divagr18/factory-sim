@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "openenv-factory-sim"
 version = "0.1.0"
 description = "factory-sim (a Factorio early-game simulator) as an OpenEnv environment"
-license = "MIT"
+license = "Apache-2.0"
 requires-python = ">=3.11"
 # The simulator itself (fsim, evolve) is not a pip package: it comes from a
 # factory-sim checkout on PYTHONPATH, with the C extension built by build.py.

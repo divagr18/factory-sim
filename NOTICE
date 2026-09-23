@@ -1,6 +1,6 @@
 factory-sim
 Copyright (c) 2026 factory-sim contributors
-Licensed under the MIT License; see LICENSE.
+Licensed under the Apache License, Version 2.0; see LICENSE.
 
 Factorio
 --------
@@ -16,8 +16,10 @@ running game, recorded by FactorioRL (its docs/evidence/). No Factorio code,
 data files, prototype definitions, art, sound or fonts were copied or are
 included, and nothing here draws anything that imitates the game.
 
-The golden traces under tests/golden/ are recordings FactorioRL made of its
-own scenarios and are distributed under the same MIT License.
+The golden traces under tests/golden/, and fsim/data/terrain.json, are
+measurements FactorioRL recorded of its own scenarios in the running game:
+positions, ticks, counts and names. They are included for parity testing and
+contain no game code or assets.
 
 Rules for contributors
 ----------------------

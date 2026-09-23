@@ -3,7 +3,7 @@ name = "factorio-build"
 version = "0.1.0"
 description = "Write a Python builder program that builds a working smelting line in factory-sim, a Factorio early-game simulator; scored by running it on held-fixed scene subsets."
 tags = ["program-synthesis", "code", "simulation", "single-turn", "train", "eval"]
-license = "MIT"
+license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
     "verifiers>=0.3.1",

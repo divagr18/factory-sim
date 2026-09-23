@@ -84,4 +84,7 @@ uv run python bench/bench.py
 `tools/sync_golden.py --from ../FactorioRL` refreshes the golden traces from a
 FactorioRL checkout, checking every trace's hash.
 
-See NOTICE for what this project does and does not contain.
+## License
+
+Apache-2.0; see [LICENSE](LICENSE). See [NOTICE](NOTICE) for what this project
+does and does not contain.

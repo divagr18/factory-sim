@@ -3,7 +3,7 @@ name = "factorio-tools"
 version = "0.1.0"
 description = "Build a working smelting line in factory-sim, a Factorio early-game simulator, one world.* tool call at a time; reward is verified success."
 tags = ["tool-use", "multi-turn", "simulation", "agent", "eval"]
-license = "MIT"
+license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
     "verifiers>=0.3.1",
