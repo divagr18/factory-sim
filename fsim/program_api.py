@@ -23,7 +23,9 @@ The program never can: it holds only a `World`.
 
 from __future__ import annotations
 
+import ctypes
 import math
+import threading
 from collections import deque
 from dataclasses import dataclass
 
@@ -44,6 +46,60 @@ TRACE_LENGTH = 20
 #: ever asks for impossible things would otherwise never spend its budget.
 MAX_REFUSALS = 1000
 WAIT = (OP_WAIT, 0, 0, 0, 0, 0)
+
+
+class ProgramTimeLimit(Exception):
+    """Raised inside a program that ran past its wall-clock limit.
+
+    The decision budget does not bound a program's time: queries cost no
+    decision, so a `while` loop that only reads `world.entities()` -- or a
+    search that never terminates without touching `world` at all -- runs
+    forever. One such program held evaluation workers at 100% CPU for most of
+    an hour, stalling whole evolution runs. The sandbox bans `try`, so a
+    program cannot catch this."""
+
+
+class _Watchdog:
+    """Raises `ProgramTimeLimit` in the calling thread after `seconds`, unless left first.
+
+    An asynchronous exception, so it interrupts pure-Python loops between
+    bytecodes, which no call counter could. It is armed only around the
+    program, never around the simulator's own stepping."""
+
+    def __init__(self, seconds: float | None):
+        self.seconds = seconds
+        self.fired = False
+        self._tid = threading.get_ident()
+        self._lock = threading.Lock()
+        self._armed = False
+        self._timer: threading.Timer | None = None
+
+    def _raise_in(self, exc) -> None:
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(self._tid), exc)
+
+    def _fire(self) -> None:
+        with self._lock:
+            if self._armed:
+                self.fired = True
+                self._raise_in(ctypes.py_object(ProgramTimeLimit))
+
+    def __enter__(self):
+        if self.seconds is not None:
+            self._armed = True
+            self._timer = threading.Timer(self.seconds, self._fire)
+            self._timer.daemon = True
+            self._timer.start()
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        if self._timer is not None:
+            with self._lock:
+                self._armed = False
+            self._timer.cancel()
+            # An exception set but not yet raised would surface later, somewhere
+            # outside the program: clear it.
+            self._raise_in(None)
+        return False
 
 
 class BudgetExhausted(Exception):
@@ -280,8 +336,12 @@ def run_episode(
     task: str = "construct_smelting_line",
     decision_budget: int = 600,
     env: RlEnv | None = None,
+    time_limit_s: float | None = None,
 ) -> EpisodeResult:
     """Reset to `scene` under v2, run `build(world)`, then wait out the episode.
+
+    `time_limit_s` bounds the program's wall-clock time; past it the program is
+    stopped, recorded as an error, and the episode still runs to its end.
 
     Whatever the program does, the episode runs to its own end afterwards --
     waits, without encoding observations -- so the task's verification window
@@ -295,7 +355,10 @@ def run_episode(
     world = World(env, decision_budget)
     error = None
     try:
-        build(world)
+        with _Watchdog(time_limit_s):
+            build(world)
+    except ProgramTimeLimit:
+        error = f"ProgramTimeLimit: ran past {time_limit_s:g} s"
     except BudgetExhausted:
         pass
     except Exception as exc:  # the program's own bug: recorded, and the episode still ends

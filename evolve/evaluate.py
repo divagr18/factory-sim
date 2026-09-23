@@ -32,7 +32,7 @@ from evolve import sandbox
 from fsim import scenes
 from fsim.program_api import Entity, World, run_episode
 
-EVALUATOR_VERSION = 1
+EVALUATOR_VERSION = 2  # 2: programs are stopped after PROGRAM_TIME_LIMIT_S per episode
 TASK = "construct_smelting_line"
 FAMILIES_TRAIN = ("open_patch", "offset_patch", "varied_patch", "cluttered_patch")
 FAMILIES_HOLDOUT = ("obstructed_patch",)
@@ -223,6 +223,16 @@ def _with_facings(build, facings: list):
     return run
 
 
+#: Wall-clock seconds a program may run per episode. A whole episode takes about
+#: 7 ms and a program's own work a few more, so this only ever stops a loop that
+#: will not end: queries cost no decision, and the decision budget cannot.
+PROGRAM_TIME_LIMIT_S = 2.0
+#: Time-limit hits in one chunk after which its remaining scenes are scored as
+#: failures without being run. A program that loops forever on one scene will
+#: on most; without this one candidate held a run for most of an hour.
+MAX_TIME_LIMIT_HITS = 2
+
+
 def worker_job(payload: dict) -> dict:
     """Run one source on a chunk of scenes: {"results": [per-scene dict], "error": None}."""
     global _ENV
@@ -233,8 +243,17 @@ def worker_job(payload: dict) -> dict:
     except sandbox.SandboxError as e:
         return {"results": [], "error": f"sandbox: {e}"}
     budget = payload.get("decision_budget", 600)
+    limit = payload.get("time_limit_s", PROGRAM_TIME_LIMIT_S)
     results = []
+    hits = 0
     for family, seed, blueprint in payload["scenes"]:
+        if hits >= MAX_TIME_LIMIT_HITS:
+            results.append(
+                _failed(
+                    family, seed, f"skipped: the program hit its {limit:g} s limit {hits} times"
+                )
+            )
+            continue
         facings: list = []
         try:
             r = run_episode(
@@ -243,6 +262,7 @@ def worker_job(payload: dict) -> dict:
                 task=TASK,
                 decision_budget=budget,
                 env=_ENV,
+                time_limit_s=limit,
             )
         except Exception as e:  # the harness, not the program; keep the chunk going
             results.append(_failed(family, seed, f"evaluator: {type(e).__name__}: {e}"))
@@ -265,6 +285,8 @@ def worker_job(payload: dict) -> dict:
                 "error": r.error,
             }
         )
+        if r.error and r.error.startswith("ProgramTimeLimit"):
+            hits += 1
     return {"results": results, "error": None}
 
 

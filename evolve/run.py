@@ -893,7 +893,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=600.0,
         help="seconds before an unanswered request is abandoned and its slot refilled",
     )
-    p.add_argument("--job-timeout", type=float, default=300.0, help="seconds per pool job")
+    p.add_argument(
+        "--job-timeout",
+        type=float,
+        default=60.0,
+        help="seconds per pool job: the last-resort backstop. A program is stopped after "
+        "evaluate.PROGRAM_TIME_LIMIT_S per episode and a chunk after two such stops, so "
+        "this only catches a hang outside the program",
+    )
     p.add_argument("--runs-dir", default=str(FACTORY_SIM / "runs"))
     p.add_argument(
         "--max-usd",
