@@ -8,6 +8,14 @@ license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.11"
 dependencies = ["cffi>=1.17", "numpy>=2"]
 
+[project.optional-dependencies]
+# Gymnasium adapters: fsim/gym_env.py.
+gym = ["gymnasium>=1.0"]
+# What fsim/puffer_env.py needs besides PufferLib itself. PufferLib 3.0.0 pins
+# numpy<2 and gymnasium<=0.29.1 and will not build on Windows, so listing it
+# here would make the lock unsolvable; on Linux: `pip install --no-deps pufferlib`.
+puffer = ["gymnasium>=1.0", "gym>=0.26", "psutil"]
+
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6", "setuptools>=70"]
 # Only for train.py. Not synced by default, so CI and the simulator stay
