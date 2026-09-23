@@ -19,3 +19,4 @@ runs/
 .env.*
 opencode.json
 secrets/
+wheelhouse/

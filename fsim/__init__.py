@@ -18,6 +18,8 @@ from fsim._fsim import ffi, lib
 __all__ = ["Sim", "action_struct", "ffi", "lib", "scene_struct"]
 
 ROOT = Path(__file__).resolve().parents[1]
+#: Shipped inside the package, so an installed copy has the map without a checkout.
+PACKAGE_DATA = Path(__file__).resolve().parent / "data"
 
 ITEM_NAMES = {
     lib.IT_IRON_ORE: "iron-ore",
@@ -148,6 +150,7 @@ def water_tiles() -> list[tuple[int, int]]:
     `Sim(water=[])` is still available for a deliberately dry map.
     """
     candidates = (
+        PACKAGE_DATA / "terrain.json",
         ROOT / "tests" / "golden" / "sim-mechanics-m3.json",
         ROOT.parent / "FactorioRL" / "docs" / "evidence" / "sim-mechanics-m3.json",
     )
@@ -206,9 +209,7 @@ def scene_struct(blueprint: dict):
     scene.machine_kind = array(SCENE_MACHINES[m["name"]] for m in machines)
     scene.machine_x = array(fixed(m["position"][0]) for m in machines)
     scene.machine_y = array(fixed(m["position"][1]) for m in machines)
-    scene.machine_dir = array(
-        DIRECTIONS.index(m.get("direction") or "north") * 4 for m in machines
-    )
+    scene.machine_dir = array(DIRECTIONS.index(m.get("direction") or "north") * 4 for m in machines)
     character = blueprint.get("character") or {}
     position = character.get("position") or [0, 0]
     scene.character.x = fixed(position[0])

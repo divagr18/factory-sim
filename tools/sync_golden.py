@@ -75,6 +75,12 @@ def main() -> int:
                 data["engine"].pop("executable", None)
             text = json.dumps(data, indent=0, sort_keys=True) + "\n"
             (DEST / extra).write_text(text, "utf-8")
+    # The installed package's copy of the map: terrain only, see fsim.water_tiles.
+    m3 = json.loads((DEST / "sim-mechanics-m3.json").read_text(encoding="utf-8"))
+    terrain = {"source": "sim-mechanics-m3.json (FactorioRL docs/evidence), terrain only",
+               "terrain": m3["terrain"]}  # fmt: skip
+    text = json.dumps(terrain, sort_keys=True) + "\n"
+    (ROOT / "fsim" / "data" / "terrain.json").write_text(text, "utf-8")
     write_scenes(args.source)
     write_potentials(args.source)
     return 1 if problems else 0

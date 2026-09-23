@@ -62,11 +62,21 @@ How parity is judged:
   difference.
 - Everything else must match exactly.
 
+## Install
+
+```
+pip install git+https://github.com/divagr18/factory-sim   # compiles csrc/: needs a C compiler
+```
+
+This installs the simulator (`fsim`) and the program-search loop (`evolve`); the
+benchmark map ships inside the package. Extras: `[gym]` for the Gymnasium
+adapter, `[puffer]` for PufferLib's (see `docs/interfaces.md`).
+
 ## Build and test
 
 ```
-uv sync
-uv run python build.py          # compiles csrc/ into fsim/_fsim (MSVC or gcc/clang)
+uv sync                         # installs the checkout editable, compiling csrc/
+uv run python build.py          # rebuilds fsim/_fsim in place after a C change
 uv run pytest                   # parity against tests/golden
 uv run python bench/bench.py
 ```

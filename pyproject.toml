@@ -1,12 +1,23 @@
 [project]
 name = "factory-sim"
-version = "0.0.1"
+version = "0.1.0"
 description = "A fast, tick-exact simulator of an early-game factory, checked against recorded traces of the real game."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.11"
 dependencies = ["cffi>=1.17", "numpy>=2"]
+
+[build-system]
+# setup.py hands cffi the C extension; everything else is declared here.
+requires = ["setuptools>=70", "cffi>=1.17"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["fsim*", "evolve*"]
+
+[tool.setuptools.package-data]
+fsim = ["data/*.json"]
 
 [project.optional-dependencies]
 # Gymnasium adapters: fsim/gym_env.py.

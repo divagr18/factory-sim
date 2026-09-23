@@ -125,15 +125,14 @@ shared by its rollouts. `workers=0` skips the pool, so it is for tests and
 trusted code only.
 
 ### Packaging for the Hub
-This package has **not** been pushed. It is not self-contained yet, because it
-imports factory-sim's `fsim` and `evolve` packages and the compiled
-`fsim._fsim` extension, and none of them can be pip-installed today. The
-checkout's `pyproject.toml` declares no build backend, and the extension is
-built by `build.py` (cffi, API mode). A Hub environment is a wheel whose
-dependencies pip resolves, so publishing needs one of these:
+This package has **not** been pushed. It imports factory-sim's `fsim` and
+`evolve` packages and the compiled `fsim._fsim` extension. factory-sim is now a
+real package (setuptools + cffi, from 0.1.0): its sdist builds and passes a smoke
+test on Windows and on Linux (gcc), with identical scores. What is left is where
+the Hub resolves it from:
 
-1. **Wheels on PyPI (the best option).** Make factory-sim a real package: add a `[build-system]` with setuptools and `cffi_modules=["build.py:ffi"]` (or an equivalent build step), list `fsim` and `evolve` as packages, and build manylinux, macOS and Windows wheels with cibuildwheel. Then add `"factory-sim>=X"` to `dependencies` here. Nothing is compiled at install time.
-2. **A git dependency.** `"factory-sim @ git+https://github.com/divagr18/factory-sim@<tag>"`, as a PEP 508 URL in `dependencies`, not in `[tool.uv.sources]`, which never reaches the wheel's metadata. This still needs step 1's build backend, and it compiles C at install time, so every Hub sandbox or training node needs a C compiler and cffi's build dependencies.
+1. **Wheels on PyPI (the best option).** `.github/workflows/wheels.yml` builds manylinux, macOS and Windows wheels with cibuildwheel; publishing them to PyPI is the remaining step. Then add `"factory-sim>=0.1"` to `dependencies` here. Nothing is compiled at install time.
+2. **A git dependency.** `"factory-sim @ git+https://github.com/divagr18/factory-sim@<tag>"`, as a PEP 508 URL in `dependencies`, not in `[tool.uv.sources]`, which never reaches the wheel's metadata. This works now, but it compiles C at install time, so every Hub sandbox or training node needs a C compiler and cffi's build dependencies.
 3. **Vendoring the source.** Copy `csrc/`, `fsim/` and `evolve/` into this package and compile at install time. This forks the simulator, which the project avoids.
 
 After step 1 or 2, also pin `factorio-build`'s version, run `validate

@@ -62,5 +62,6 @@ def test_a_missing_water_file_is_an_error_not_a_dry_map(tmp_path, monkeypatch):
     import fsim
 
     monkeypatch.setattr(fsim, "ROOT", tmp_path / "nowhere")
+    monkeypatch.setattr(fsim, "PACKAGE_DATA", tmp_path / "nowhere" / "data")
     with pytest.raises(FileNotFoundError, match="water"):
         fsim.water_tiles()

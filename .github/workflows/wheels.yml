@@ -1,0 +1,41 @@
+name: wheels
+
+# Builds the sdist and binary wheels, so `pip install factory-sim` needs no C
+# compiler. Artifacts only: publishing to PyPI is a separate, deliberate step.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  wheels:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pypa/cibuildwheel@v2.23
+        env:
+          CIBW_BUILD: "cp311-* cp312-* cp313-*"
+          CIBW_SKIP: "*-musllinux_* *-win32 *_i686"
+          # The installed wheel must find its map and run a scene, away from the checkout.
+          CIBW_TEST_COMMAND: >-
+            python -c "import fsim; from fsim import scenes; from fsim.rl import RlEnv;
+            assert len(fsim.water_tiles()) > 0;
+            f, bp = scenes.sample('construct_smelting_line', 'train', 0);
+            RlEnv().reset('construct_smelting_line', bp, action_space='v2')"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pipx run build --sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
