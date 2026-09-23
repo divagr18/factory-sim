@@ -107,7 +107,7 @@ class Config:
     budget_candidates: int | None = None
     hours: float | None = None
     operators: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_OPERATORS))
-    max_tokens: int = 16000
+    max_tokens: int = 32000
     game_notes: bool = True
     seed: int = 0
     #: Model replies (not timeouts) between migrations; 0 never migrates.
@@ -858,8 +858,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=256,
         help="LLM requests in flight. The ceiling is the token-per-minute limit, which a "
-        "request charges at its reserved max-tokens: at 2M TPM and ~12k per request that "
-        "is ~165 requests/min, ~250 in flight at ~100 s each",
+        "request charges at its reserved max-tokens: at 2M TPM and ~36k per request that "
+        "is ~55 requests/min, ~90 in flight at ~100 s each",
     )
     p.add_argument("--islands", type=int, default=4)
     p.add_argument("--island-size", type=int, default=12)
@@ -874,9 +874,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--max-tokens",
         type=int,
-        default=8000,
-        help="completion cap, reasoning included. Rate limits reserve it up front, so it "
-        "sets how many requests fit in a minute; measured outputs ran 1.7k-4.2k tokens",
+        default=32000,
+        help="completion cap, reasoning included. 8000 cut off reasoning models that were "
+        "still thinking (9 of 38 baseline replies). Rate limits reserve the cap up front, "
+        "so a larger one fits fewer requests in a minute",
     )
     p.add_argument("--no-game-notes", action="store_true")
     p.add_argument(

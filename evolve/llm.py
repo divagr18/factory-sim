@@ -322,7 +322,7 @@ class LLMClient:
         self,
         messages: list[dict],
         *,
-        max_tokens: int = 16000,
+        max_tokens: int = 32000,
         temperature: float | None | object = ...,
     ) -> Completion:
         p = self.provider

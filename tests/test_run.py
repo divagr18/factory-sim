@@ -52,7 +52,7 @@ class FakeClient:
         self.max_active = 0
         self.lock = threading.Lock()
 
-    def complete(self, messages, max_tokens=16000):
+    def complete(self, messages, max_tokens=32000):
         with self.lock:
             self.calls += 1
             n = self.calls
