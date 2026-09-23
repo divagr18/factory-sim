@@ -24,9 +24,18 @@ REJECT = [
     (_in_build("return (x for x in []).gi_frame"), "attribute 'gi_frame'"),
     (_in_build('return "{0.__class__}".format(world)'), "attribute 'format'"),
     (_in_build("return __builtins__"), "name '__builtins__'"),
-    (_in_build("_x = 1"), "name '_x'"),
-    (_in_build("return world.me(_n=1)"), "keyword '_n'"),
-    ("def _helper(world):\n    pass\ndef build(world):\n    pass\n", "name '_helper'"),
+    (_in_build("__x = 1"), "name '__x'"),
+    (_in_build("return world.me(__n=1)"), "keyword '__n'"),
+    ("def __helper(world):\n    pass\ndef build(world):\n    pass\n", "name '__helper'"),
+    # the freedoms below open nothing: attributes are still checked everywhere
+    (_in_build("_x = world\nreturn _x._env"), "attribute '_env'"),
+    (_in_build("f = lambda: ().__class__\nreturn f()"), "attribute '__class__'"),
+    (_in_build("return (lambda w: w._env)(world)"), "attribute '_env'"),
+    (_in_build("return (lambda *a: a)"), "plain positional"),
+    (_in_build("return (lambda: getattr)(world)"), "'getattr'"),
+    (_in_build("if (__b := 1):\n    pass"), "name '__b'"),
+    (_in_build("return set().__init__"), "attribute '__init__'"),
+    (_in_build('return "{0.x}".format(world)'), "attribute 'format'"),
     # forbidden builtins
     (_in_build('return getattr(world, "_env")'), "'getattr'"),
     (_in_build('setattr(world, "x", 1)'), "'setattr'"),
@@ -44,7 +53,6 @@ REJECT = [
     (_in_build("return math.nope(1)"), "math.nope"),
     (_in_build("xs = []\nreturn xs.frobnicate"), "attribute 'frobnicate'"),
     # banned statements and expressions
-    (_in_build("return lambda: 1"), "lambda"),
     (_in_build("try:\n    pass\nexcept Exception:\n    pass"), "try"),
     (_in_build("raise ValueError()"), "raise"),
     (_in_build("assert world"), "assert"),
@@ -58,7 +66,6 @@ REJECT = [
     ("x = 1\ndef build(world):\n    global x\n", "only def"),
     (_in_build("global x"), "global"),
     (_in_build("x = 1\ndef f():\n    nonlocal x"), "nonlocal"),
-    (_in_build("if (n := 3):\n    pass"), "':='"),
     (_in_build("match world:\n    case _:\n        pass"), "match"),
     ("x = 1\ndef build(world):\n    pass\n", "only def statements"),
     ("x = 1\ndef build(world):\n    pass\ndel x\n", "only def statements"),
@@ -98,8 +105,8 @@ def test_error_names_the_line():
 
 def test_builtins_are_exactly_the_spec():
     spec = (
-        "abs all any bool dict enumerate float int isinstance len list max min range "
-        "reversed round set sorted sum tuple zip"
+        "abs all any bool dict enumerate filter float int isinstance len list map max min "
+        "range reversed round set sorted sum tuple zip"
     ).split()
     assert sorted(SAFE_BUILTINS) == sorted(spec)
 
@@ -306,3 +313,29 @@ def test_hash_keeps_parameters_named_by_keyword():
 def test_hash_of_refused_program_is_stable():
     bad = "import os\ndef build(world):\n    pass\n"
     assert normalized_hash(bad) == normalized_hash("import os\n\ndef build(world):  # hi\n  pass\n")
+
+
+#: Ordinary Python that models wrote and the sandbox used to refuse, without the
+#: prompt ever saying so. Each must pass check() and run.
+ACCEPT = [
+    "_blocked = set()\n_blocked.add((1, 2))\nreturn len(_blocked)",
+    "def _walk(n):\n    return n + 1\nreturn _walk(1)",
+    "return sorted([(2, 'b'), (1, 'a')], key=lambda p: p[0])[0][0]",
+    "a = {1, 2, 3}\nb = {2, 3, 4}\nreturn len(a.intersection(b) | a.union(b) - a.difference(b))",
+    "a = {1, 2}\na.difference_update({1})\nreturn a.issubset({2, 3}) and a.isdisjoint({5})",
+    "if (n := 3) > 2:\n    return n\nreturn 0",
+    "return list(map(abs, filter(lambda v: v < 0, [-1, 2, -3])))",
+    "return ','.join(['a', 'b']).split(',')[0].strip().upper()",
+]
+
+
+@pytest.mark.parametrize("body", ACCEPT)
+def test_accepts_ordinary_python(body):
+    source = _in_build(body)
+    check(source)
+    assert load(source)(None) is not None
+
+
+def test_hash_is_stable_for_lambda_and_walrus():
+    a = _in_build("return sorted([3, 1], key=lambda v: -v)")
+    assert normalized_hash(a) == normalized_hash(a + "\n")

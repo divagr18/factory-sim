@@ -34,8 +34,8 @@ MAX_CHARS = 20_000
 
 #: The builtins a program may call: pure functions and plain types.
 SAFE_BUILTIN_NAMES = (
-    "abs all any bool dict enumerate float int isinstance len list max min range reversed "
-    "round set sorted sum tuple zip"
+    "abs all any bool dict enumerate filter float int isinstance len list map max min range "
+    "reversed round set sorted sum tuple zip"
 ).split()
 SAFE_BUILTINS = {name: getattr(builtins, name) for name in SAFE_BUILTIN_NAMES}
 
@@ -48,14 +48,20 @@ WORLD_API = frozenset(
 )
 
 #: Attributes allowed on any value: `Entity` fields, then list, dict, set and str
-#: methods that only read or mutate the container. `format` and `format_map` are
-#: left out on purpose: a format string can walk attributes.
+#: methods that only read, build or mutate plain data. `format` and `format_map`
+#: are left out on purpose: a format string can walk attributes.
 SAFE_ATTRS = (
     frozenset(
         "x y row kind facing fuel contents output working remembered "
+        # list and dict
         "append extend insert pop remove index count sort reverse copy clear "
-        "get items keys values update setdefault add discard "
-        "startswith endswith".split()
+        "get items keys values update setdefault "
+        # set
+        "add discard union intersection difference symmetric_difference issubset "
+        "issuperset isdisjoint intersection_update difference_update "
+        "symmetric_difference_update "
+        # str
+        "startswith endswith join split strip lstrip rstrip lower upper replace".split()
     )
     | WORLD_API
 )
@@ -78,6 +84,7 @@ _ALLOWED_NODES = frozenset(
         "Return Assign AugAssign AnnAssign For While If Expr Pass Break Continue Delete "
         # expressions
         "BoolOp BinOp UnaryOp IfExp Dict Set ListComp SetComp DictComp GeneratorExp "
+        "Lambda NamedExpr "
         "comprehension Compare Call JoinedStr FormattedValue Constant Attribute Subscript "
         "Starred Name List Tuple Slice "
         # contexts and operators
@@ -91,7 +98,6 @@ _BANNED_WORDS = {
     "ImportFrom": "import",
     "Global": "global",
     "Nonlocal": "nonlocal",
-    "Lambda": "lambda",
     "Try": "try",
     "TryStar": "try",
     "Raise": "raise",
@@ -104,7 +110,6 @@ _BANNED_WORDS = {
     "Await": "await",
     "AsyncFunctionDef": "async def",
     "AsyncFor": "async for",
-    "NamedExpr": "':='",
     "Match": "match",
 }
 
@@ -165,11 +170,13 @@ class _Checker(ast.NodeVisitor):
             self.generic_visit(node)
 
     def _ident(self, node: ast.AST, name: str, what: str) -> None:
-        # A bare `_` is the conventional throwaway (`for _ in range(3)`,
-        # `_, y = pos`) and reaches nothing. Every other leading underscore is
-        # refused: dunders are how an escape starts, and `World` keeps its
-        # internals behind single-underscore names.
-        if name.startswith("_") and name != "_":
+        # A program's own names may start with one underscore (`_blocked`,
+        # `_walk`): a name only ever resolves to the program's own bindings or
+        # SAFE_BUILTINS, so it reaches nothing. A double underscore is refused,
+        # because dunders are how an escape starts. `World`'s internals are
+        # single-underscore *attributes*, and visit_Attribute refuses every
+        # attribute that starts with `_`.
+        if name.startswith("__"):
             raise _err(node, f"{what} '{name}' is not allowed")
         if name in FORBIDDEN_NAMES:
             raise _err(node, f"'{name}' is not allowed")
@@ -188,6 +195,16 @@ class _Checker(ast.NodeVisitor):
         for stmt in node.body:
             self.visit(stmt)
         # Annotations are never checked or run: load() strips them.
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        a = node.args
+        if a.posonlyargs or a.kwonlyargs or a.vararg or a.kwarg:
+            raise _err(node, "a lambda may only have plain positional parameters")
+        for arg in a.args:
+            self._ident(arg, arg.arg, "parameter")
+        for default in a.defaults:
+            self.visit(default)
+        self.visit(node.body)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         self.visit(node.target)
@@ -417,8 +434,9 @@ def normalized_hash(source: str) -> str:
     annotations and consistent renaming of its own functions and variables.
 
     Renaming is applied only to programs that pass `check`, because the scope
-    model assumes no `global`, `nonlocal`, `lambda` or `class`. A refused
-    program still gets a stable hash, just without renaming.
+    model assumes no `global`, `nonlocal`, `lambda`, `:=` or `class`. A refused
+    program, or one using `lambda` or `:=`, still gets a stable hash, just
+    without renaming.
     """
     tree = _parse(source)
     tree = _StripAnnotations().visit(tree)
@@ -428,6 +446,10 @@ def normalized_hash(source: str) -> str:
     except (SandboxError, RecursionError):
         pass
     else:
+        if any(isinstance(n, (ast.Lambda, ast.NamedExpr)) for n in ast.walk(tree)):
+            return hashlib.sha256(
+                ast.dump(tree, annotate_fields=True, include_attributes=False).encode()
+            ).hexdigest()
         keywords = frozenset(n.arg for n in ast.walk(tree) if isinstance(n, ast.keyword) and n.arg)
         top = {s.name for s in tree.body if isinstance(s, ast.FunctionDef)}
         module = _Scope(top, 0, frozenset({"build"}))

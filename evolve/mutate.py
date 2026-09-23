@@ -24,8 +24,8 @@ iron plates are machine-made during a verification window after the build phase.
 scenes have walls; walking straight into a wall wastes decisions."""
 
 ALLOWED_BUILTINS = (
-    "abs all any bool dict enumerate float int isinstance len list max min range reversed "
-    "round set sorted sum tuple zip"
+    "abs all any bool dict enumerate filter float int isinstance len list map max min range "
+    "reversed round set sorted sum tuple zip"
 )
 
 CONTRACT = f"""\
@@ -33,9 +33,10 @@ Program contract:
 - Exactly one top-level `def build(world):` (helper functions, nested or top-level, are fine).
 - Use only `world.*` methods, `math.*` (`math` is already global; never import it), these \
 builtins: {ALLOWED_BUILTINS}, and True/False/None.
+- Attributes: `world.*`, `math.*`, entity fields, and ordinary list, dict, set and str \
+methods (no `format`). No attribute may start with `_`; your own names may, but not with `__`.
 - Banned: import, open, exec, eval, compile, getattr, setattr, globals, locals, vars, print, \
-any `__dunder__` name or attribute, global/nonlocal, lambda, try/except/raise, with, class, \
-yield, async.
+global/nonlocal, try/except/raise/assert, with, class, yield, async, match.
 - At most 300 lines (and 20,000 characters)."""
 
 #: Mechanics the API reference does not state. Set to "" to leave them out.

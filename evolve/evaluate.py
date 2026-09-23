@@ -32,7 +32,8 @@ from evolve import sandbox
 from fsim import scenes
 from fsim.program_api import Entity, World, run_episode
 
-EVALUATOR_VERSION = 3  # 3: feedback traces come from training scenes only (2: 2 s program limit)
+# 4: the sandbox accepts lambda, :=, _names and set/str methods (3: train-only traces)
+EVALUATOR_VERSION = 4
 TASK = "construct_smelting_line"
 FAMILIES_TRAIN = ("open_patch", "offset_patch", "varied_patch", "cluttered_patch")
 FAMILIES_HOLDOUT = ("obstructed_patch",)

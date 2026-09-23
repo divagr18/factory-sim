@@ -70,7 +70,7 @@ def test_system_prompt_states_rules_and_notes():
     system = mutate.system_prompt(API)
     for word in ("2 burner mining drills", "2 stone furnaces", "60 coal", "10", "walls"):
         assert word in system
-    for banned in ("import", "lambda", "getattr", "try", "300 lines"):
+    for banned in ("import", "getattr", "try", "`__`", "start with `_`", "300 lines"):
         assert banned in system
     assert "sorted" in system and "never import it" in system
     assert mutate.GAME_NOTES in system
