@@ -54,7 +54,17 @@ ERROR_BODY_CHARS = 500
 class Provider:
     """Where to send requests. The key is private and never shown."""
 
-    __slots__ = ("base_url", "model", "_api_key", "token_param", "temperature", "extra")
+    __slots__ = (
+        "base_url",
+        "model",
+        "_api_key",
+        "token_param",
+        "temperature",
+        "extra",
+        "price",
+        "max_usd",
+        "ledger_path",
+    )
 
     def __init__(
         self,
@@ -65,6 +75,9 @@ class Provider:
         token_param: str = "max_tokens",
         temperature: float | None = 0.8,
         extra: dict | None = None,
+        price: dict | None = None,
+        max_usd: float | None = None,
+        ledger_path: str | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -77,11 +90,18 @@ class Provider:
         self.temperature = temperature
         #: Merged into every request body, e.g. `{"service_tier": "flex"}`.
         self.extra = dict(extra or {})
+        #: Dollars per million tokens, `{"input", "cached_input", "output"}`, and the
+        #: spend cap. They sit with the key, in the private config, so the cap travels
+        #: with the credential rather than living in a public repository.
+        self.price = dict(price) if price else None
+        self.max_usd = float(max_usd) if max_usd is not None else None
+        self.ledger_path = ledger_path
 
     def __repr__(self) -> str:
         return (
             f"Provider(base_url={self.base_url!r}, model={self.model!r}, "
-            f"token_param={self.token_param!r}, extra={self.extra!r}, api_key=<redacted>)"
+            f"token_param={self.token_param!r}, extra={self.extra!r}, "
+            f"max_usd={self.max_usd!r}, api_key=<redacted>)"
         )
 
     __str__ = __repr__
@@ -118,6 +138,9 @@ def load_provider(path: str | None = None) -> Provider:
         token_param=cfg.get("token_param", "max_tokens"),
         temperature=cfg.get("temperature", 0.8),
         extra=extra,
+        price=cfg.get("price"),
+        max_usd=cfg.get("max_usd"),
+        ledger_path=cfg.get("ledger") or (str(path) + ".spend.json"),
     )
 
 

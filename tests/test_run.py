@@ -2,8 +2,10 @@
 
 import json
 import logging
+import random
 import sys
 import threading
+import time
 import types
 
 import pytest
@@ -33,32 +35,46 @@ NO_BLOCK = "I would rather not write code today."
 
 
 class FakeClient:
-    """Returns `script` in order, one completion per prompt; `raise_on` is a
-    1-based call number at which it raises KeyboardInterrupt instead."""
+    """Replies with `script` in call order, one completion per call, from many threads.
 
-    def __init__(self, script, raise_on=None):
+    `latency` is seconds per reply: a number, or a function of the 1-based call
+    number. `hold` maps a call number to an Event that call waits on (at most
+    5 s) instead. `raise_on` is a call number that raises KeyboardInterrupt."""
+
+    def __init__(self, script, raise_on=None, latency=0.0, hold=None):
         self.script = list(script)
-        self.i = 0
         self.calls = 0
         self.raise_on = raise_on
-        self.batches = []
+        self.latency = latency
+        self.hold = dict(hold or {})
+        self.prompts = []
+        self.active = 0
+        self.max_active = 0
         self.lock = threading.Lock()
 
-    def complete_many(self, batch, max_tokens=16000):
+    def complete(self, messages, max_tokens=16000):
         with self.lock:
             self.calls += 1
-            self.batches.append(batch)
-            if self.raise_on is not None and self.calls == self.raise_on:
+            n = self.calls
+            self.prompts.append(messages)
+            text = self.script[(n - 1) % len(self.script)]
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            if self.raise_on is not None and n == self.raise_on:
                 raise KeyboardInterrupt
-            out = []
-            for _ in batch:
-                text = self.script[self.i % len(self.script)]
-                self.i += 1
-                if isinstance(text, Exception):
-                    out.append(text)
-                else:
-                    out.append(Completion(text, None, {}, latency_s=2.0, model="fake-model"))
-            return out
+            if n in self.hold:
+                self.hold[n].wait(5.0)
+            else:
+                delay = self.latency(n) if callable(self.latency) else self.latency
+                if delay:
+                    time.sleep(delay)
+            if isinstance(text, Exception):
+                raise text
+            return Completion(text, None, {}, latency_s=2.0, model="fake-model")
+        finally:
+            with self.lock:
+                self.active -= 1
 
 
 class FakeEvaluator:
@@ -177,7 +193,7 @@ def test_parents_feed_prompts_in_parent_dict_format(tmp_path):
     client = FakeClient([reply(program(2))])
     evo, _, _ = make(tmp_path, client, budget_candidates=1, operators={"fix": 1.0})
     evo.run()
-    user = client.batches[0][0][1]["content"]
+    user = client.prompts[0][1]["content"]
     assert "Success rate per scene family" in user
     assert f"wait -> ok ({SEED_VAL})" in user  # the seed's trace
     assert "def build(world):" in user
@@ -196,6 +212,11 @@ REQUIRED = {
     "extract_failures",
     "llm_calls",
     "llm_errors",
+    "llm_timeouts",
+    "batches",
+    "status_writes",
+    "in_flight",
+    "queue_depth",
     "mean_latency_s",
     "elapsed_s",
     "candidates_per_hour",
@@ -204,23 +225,36 @@ REQUIRED = {
 }
 
 
-def test_status_file_is_valid_and_written_after_every_batch(tmp_path):
-    seen = []
+def _spy(tmp_path, client, **cfg):
+    """An Evolution that keeps every status it writes, in `evo.seen`."""
 
     class Spy(Evolution):
+        seen: list
+
         def save(self):
             super().save()
-            seen.append(json.loads(self.status_path.read_text(encoding="utf-8")))
+            self.seen.append(json.loads(self.status_path.read_text(encoding="utf-8")))
 
-    config = Config(name="t", concurrency=3, islands=2, island_size=4, budget_candidates=8)
+    cfg.setdefault("concurrency", 3)
+    cfg.setdefault("islands", 2)
+    cfg.setdefault("island_size", 4)
+    config = Config(name="t", **cfg)
     run_dir = tmp_path / "evolve-t"
     store = _store(run_dir / "genealogy.sqlite")
-    islands = Islands(2, 4, 0)
-    evo = Spy(config, FakeClient(SCRIPT), FakeEvaluator(), store, islands, run_dir / "status.json")
+    Spy.seen = []  # the constructor does not save, so a fresh list per spy is enough
+    evo = Spy(config, client, FakeEvaluator(), store, Islands(2, 4, 0), run_dir / "status.json")
+    return evo, store, run_dir
+
+
+def test_status_file_is_valid_and_written_on_seed_and_exit(tmp_path):
+    evo, _, run_dir = _spy(tmp_path, FakeClient(SCRIPT), budget_candidates=8)
     evo.run()
-    # after seeding, after each of three batches (3 + 3 + 2), and on the way out
-    assert [s["llm_calls"] for s in seen] == [0, 3, 6, 8, 8]
+    seen = evo.seen
+    # the run is far shorter than status_every_s: once after seeding, once on exit
+    assert [s["llm_calls"] for s in seen] == [0, 8]
+    assert [s["batches"] for s in seen] == [s["status_writes"] for s in seen] == [1, 2]
     final = seen[-1]
+    assert final["in_flight"] == 0 and final["queue_depth"] == 0 and final["llm_timeouts"] == 0
     assert REQUIRED <= set(final)
     assert final["state"] == "done"
     assert final["best_val_mean"] == 0.5 and final["best_length"] == 6
@@ -232,8 +266,8 @@ def test_status_file_is_valid_and_written_after_every_batch(tmp_path):
 
 
 def test_improvement_accounting(tmp_path):
-    # One island and one prompt at a time, so the parents are known: batch 2 is
-    # prompted while batch 1 is being scored, so both children descend from the seed.
+    # One island and one prompt at a time: the first child descends from the
+    # seed, and each later prompt is drawn after the previous child was admitted.
     client = FakeClient([reply(program(5)), reply(program(1)), reply(program(4))])
     evo, store, _ = make(
         tmp_path,
@@ -247,10 +281,10 @@ def test_improvement_accounting(tmp_path):
     rows = {c.id: c for c in store.all()}
     seed = next(c for c in rows.values() if c.operator == "seed")
     kids = sorted((c for c in rows.values() if c.operator == "fix"), key=lambda c: c.created)
-    assert [c.parents for c in kids[:2]] == [[seed.id], [seed.id]]
-    # 0.5 > 0.3 improves; 0.1 does not; 0.4 improves only if its parent was the seed
-    third_parent = rows[kids[2].parents[0]]
-    expected = 1 + (0.4 > third_parent.score())
+    assert kids[0].parents == [seed.id]
+    # 0.5 > 0.3 improves; 0.1 never does; 0.4 improves only if its parent was the seed
+    assert kids[1].parents[0] in {seed.id, kids[0].id}
+    expected = 1 + (0.4 > rows[kids[2].parents[0]].score())
     assert st["improved"] == expected
     assert st["share_improved"] == pytest.approx(expected / 3)
     fix = st["per_operator"]["fix"]
@@ -372,10 +406,22 @@ def test_main_wires_the_modules_and_resumes(tmp_path, monkeypatch):
             self.closed = True
 
     monkeypatch.setattr("evolve.pool.EvalPool", Pool)
-    monkeypatch.setattr(
-        "evolve.llm.load_provider", lambda path=None: types.SimpleNamespace(model="fake-model")
+    # A provider with a cap and prices: main refuses to start a run on a paid model
+    # without them, and the ledger lives in the test's own directory.
+    fake_provider = types.SimpleNamespace(
+        model="fake-model",
+        max_usd=5.0,
+        price={"input": 0.05, "cached_input": 0.005, "output": 0.25},
+        ledger_path=str(tmp_path / "spend.json"),
     )
-    monkeypatch.setattr("evolve.llm.LLMClient", lambda provider, concurrency: FakeClient(SCRIPT))
+    monkeypatch.setattr("evolve.llm.load_provider", lambda path=None: fake_provider)
+    timeouts = []
+
+    def make_client(provider, concurrency, timeout_s):
+        timeouts.append(timeout_s)
+        return FakeClient(SCRIPT)
+
+    monkeypatch.setattr("evolve.llm.LLMClient", make_client)
     argv = ["--name", "m", "--runs-dir", str(tmp_path), "--concurrency", "2"]
     assert evo_run.main(argv + ["--budget-candidates", "4"]) == 0
     run_dir = tmp_path / "evolve-m"
@@ -391,18 +437,23 @@ def test_main_wires_the_modules_and_resumes(tmp_path, monkeypatch):
     second = json.loads((run_dir / "status.json").read_text(encoding="utf-8"))
     assert second["llm_calls"] == 6
     assert SOURCE not in evaluators[1].sources  # not reseeded
+    assert timeouts == [evo_run.SOCKET_TIMEOUT_S] * 2
+
+    assert evo_run.main(argv + ["--budget-candidates", "1", "--request-timeout", "20"]) == 0
+    assert timeouts[-1] == 20.0
 
 
 def test_keyboard_interrupt_from_the_client_saves_and_stops(tmp_path):
-    client = FakeClient(SCRIPT, raise_on=2)
-    evo, store, run_dir = make(tmp_path, client, budget_candidates=40)
+    # One request at a time, so the third is issued only after two were scored.
+    client = FakeClient(SCRIPT, raise_on=3)
+    evo, store, run_dir = make(tmp_path, client, concurrency=1, budget_candidates=40)
     st = evo.run()  # does not raise
     assert st["state"] == "interrupted"
     on_disk = json.loads((run_dir / "status.json").read_text(encoding="utf-8"))
     assert on_disk["state"] == "interrupted"
-    assert client.calls == 2
-    # batch 1 was scored while batch 2 was with the model: 3 rows and a duplicate
-    assert store.count() == 4 and st["llm_calls"] == 4 and st["duplicates"] == 1
+    assert client.calls == 3
+    # the seed, program(2) and the sandbox violation
+    assert store.count() == 3 and st["llm_calls"] == 2 and on_disk["llm_calls"] == 2
     assert (run_dir / "state.json").exists()
 
 
@@ -426,9 +477,126 @@ def test_logs_hold_no_prompts_or_code(tmp_path, caplog):
     evo, _, _ = make(tmp_path, FakeClient(SCRIPT), budget_candidates=8)
     evo.run()
     text = caplog.text
-    assert "batch" in text
+    assert "status" in text and "candidate" in text
     for leak in ("APIREF", "def build", "world.wait", "import os", "rather not"):
         assert leak not in text
+
+
+# --- the pipeline ---
+
+
+def test_fast_completions_are_scored_before_a_slow_one_returns(tmp_path):
+    # Call 1 is stuck until scoring releases it: with a batch barrier nothing
+    # would be scored, the hold would run out after 5 s and the flag stay unset.
+    release = threading.Event()
+
+    class Releases(FakeEvaluator):
+        released_by_scoring = False
+
+        def full(self, source):
+            out = super().full(source)
+            if len([s for s in self.sources if s != SOURCE]) == 5:
+                self.released_by_scoring = True
+                release.set()
+            return out
+
+    script = [reply(program(9))] + [reply(program(k)) for k in range(1, 8)]
+    client = FakeClient(script, hold={1: release})
+    ev = Releases()
+    t0 = time.monotonic()
+    evo, store, _ = make(tmp_path, client, evaluator=ev, concurrency=4, budget_candidates=8)
+    st = evo.run()
+    assert ev.released_by_scoring
+    assert time.monotonic() - t0 < 4.0
+    assert ev.sources[-1] == program(9)  # the slow child is scored last
+    assert st["llm_calls"] == client.calls == 8 and st["evaluated"] == 8
+    assert store.count() == 9
+
+
+def test_in_flight_never_exceeds_concurrency(tmp_path):
+    rng = random.Random(5)
+    delays = {n: rng.uniform(0.0, 0.02) for n in range(1, 31)}
+    client = FakeClient([reply(program(k)) for k in range(1, 31)], latency=lambda n: delays[n])
+    evo, _, _ = _spy(tmp_path, client, budget_candidates=30, status_every_s=0.005)
+    st = evo.run()
+    assert st["llm_calls"] == client.calls == 30
+    assert 2 <= client.max_active <= 3
+    assert all(s["in_flight"] <= 3 for s in evo.seen)
+    assert st["in_flight"] == 0
+
+
+def test_budget_is_respected_when_concurrency_exceeds_it(tmp_path):
+    client = FakeClient([reply(program(k)) for k in range(1, 9)], latency=lambda n: 0.01 * n)
+    evo, store, _ = make(tmp_path, client, concurrency=8, budget_candidates=3)
+    st = evo.run()
+    assert client.calls == st["llm_calls"] == 3
+    assert store.count() == 4
+
+
+def test_request_timeout_abandons_a_stuck_request_and_refills_its_slot(tmp_path):
+    # One slot. Call 1 hangs until two later children are scored, then answers
+    # with a program that must never be scored: its request had timed out.
+    late = threading.Event()
+
+    class Releases(FakeEvaluator):
+        def full(self, source):
+            out = super().full(source)
+            if len([s for s in self.sources if s != SOURCE]) == 2:
+                late.set()
+            return out
+
+    script = [reply(program(9))] + [reply(program(k)) for k in range(1, 5)]
+    client = FakeClient(script, hold={1: late}, latency=0.1)
+    ev = Releases()
+    t0 = time.monotonic()
+    evo, store, run_dir = make(
+        tmp_path, client, evaluator=ev, concurrency=1, budget_candidates=5, request_timeout=0.2
+    )
+    st = evo.run()
+    assert time.monotonic() - t0 < 4.0
+    assert st["llm_timeouts"] == 1 and st["llm_errors"] == 0
+    assert st["llm_calls"] == client.calls == 5  # the stuck one and four refills
+    assert program(9) not in ev.sources
+    assert store.count() == 1 + 4
+    assert st["abandoned_running"] == 0  # its late reply came back and was dropped
+    assert sum(o["llm_timeouts"] for o in st["per_operator"].values()) == 1
+    state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["counters"]["llm_timeouts"] == 1
+
+
+def test_a_request_stuck_past_the_run_does_not_hold_it_up(tmp_path):
+    stuck = threading.Event()
+    client = FakeClient([reply(program(9)), reply(program(1))], hold={1: stuck})
+    evo, store, _ = make(tmp_path, client, concurrency=2, budget_candidates=2, request_timeout=0.1)
+    try:
+        t0 = time.monotonic()
+        st = evo.run()
+        assert time.monotonic() - t0 < 2.0
+        assert st["state"] == "done" and st["llm_timeouts"] == 1 and store.count() == 2
+    finally:
+        stuck.set()
+
+
+def test_islands_migrate_every_n_replies(tmp_path):
+    client = FakeClient([reply(program(k)) for k in range(1, 8)])
+    evo, _, _ = make(tmp_path, client, concurrency=2, budget_candidates=7, migrate_every=3)
+    calls = []
+    real = evo.islands.migrate
+    evo.islands.migrate = lambda: (calls.append(evo.llm_calls), real())
+    evo.run()
+    assert calls == [3, 6]
+
+
+def test_status_is_written_periodically(tmp_path):
+    client = FakeClient([reply(program(k)) for k in range(1, 7)], latency=0.03)
+    evo, _, _ = _spy(tmp_path, client, concurrency=1, budget_candidates=6, status_every_s=0.05)
+    evo.run()
+    seen = evo.seen
+    assert len(seen) >= 3  # seed, at least one periodic write, exit
+    assert [s["batches"] for s in seen] == list(range(1, len(seen) + 1))
+    assert all(s["status_writes"] == s["batches"] for s in seen)
+    assert any(s["in_flight"] == 1 for s in seen[1:-1])
+    assert seen[-1]["llm_calls"] == 6 and seen[-1]["state"] == "done"
 
 
 def test_parse_operators():
