@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "A fast, tick-exact simulator of an early-game factory, checked against recorded traces of the real game."
 readme = "README.md"
 license = "Apache-2.0"
+authors = [{ name = "Divyansh Agrawal" }]
 license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.11"
 dependencies = ["cffi>=1.17", "numpy>=2"]

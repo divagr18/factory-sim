@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software in academic work, please cite it as below."
+type: software
+title: "factory-sim: a fast, tick-exact simulator of an early-game factory"
+abstract: "A fast, tick-exact simulator of an early-game factory, checked against recorded traces of the real game."
+authors:
+  - family-names: Agrawal
+    given-names: Divyansh
+    orcid: "https://orcid.org/0009-0003-0739-2473"
+version: "0.1.0"
+license: Apache-2.0
+repository-code: "https://github.com/divagr18/factory-sim"
+keywords:
+  - "reinforcement learning"
+  - "simulator"
+  - "benchmark"
+  - "program search"
+  - "Factorio"

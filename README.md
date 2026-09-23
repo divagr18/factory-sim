@@ -84,6 +84,22 @@ uv run python bench/bench.py
 `tools/sync_golden.py --from ../FactorioRL` refreshes the golden traces from a
 FactorioRL checkout, checking every trace's hash.
 
+## Citing
+
+If you use factory-sim in academic work, please cite it. GitHub's "Cite this
+repository" button reads [CITATION.cff](CITATION.cff); in BibTeX:
+
+```bibtex
+@software{agrawal2026factorysim,
+  author  = {Agrawal, Divyansh},
+  title   = {{factory-sim}: a fast, tick-exact simulator of an early-game factory},
+  year    = {2026},
+  version = {0.1.0},
+  url     = {https://github.com/divagr18/factory-sim},
+  license = {Apache-2.0}
+}
+```
+
 ## License
 
 Apache-2.0; see [LICENSE](LICENSE). See [NOTICE](NOTICE) for what this project
