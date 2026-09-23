@@ -182,3 +182,39 @@ def test_the_trivial_seed_passes_the_sandbox_and_builds_nothing():
     _, scene = scenes.sample("construct_smelting_line", "train", 0)
     result = run_episode(sandbox.load(SOURCE), scene)
     assert not result.success and result.built == [] and result.error is None
+
+
+def test_concurrent_processes_share_one_ledger_without_errors(tmp_path):
+    """Three runs died of this on Windows: a reader held the file open while
+    another process's atomic replace ran, and the replace was refused."""
+    import multiprocessing as mp
+
+    from tests._pool_jobs import ledger_hammer
+
+    path = str(tmp_path / "shared.json")
+    SpendLedger(path, PRICE, 1_000_000.0)  # create it before the processes race
+    ctx = mp.get_context("spawn")
+    with ctx.Pool(8) as pool:
+        done = pool.map(ledger_hammer, [(path, 60)] * 8)
+    total = SpendLedger(path, PRICE, 1_000_000.0).total
+    assert sum(done) == 480
+    assert total == pytest.approx(480 * 0.001)  # every charge landed, none twice
+
+
+def test_a_refused_replace_is_retried(tmp_path, monkeypatch):
+    import os
+
+    import evolve.spend as spend
+
+    ledger = SpendLedger(tmp_path / "l.json", PRICE, 5.0)
+    real, fails = os.replace, {"n": 2}
+
+    def flaky(src, dst):
+        if fails["n"]:
+            fails["n"] -= 1
+            raise PermissionError(5, "Access is denied")
+        real(src, dst)
+
+    monkeypatch.setattr(spend.os, "replace", flaky)
+    ledger.charge(usage(1_000_000, 0))
+    assert ledger.total == pytest.approx(0.05)

@@ -738,7 +738,10 @@ class Evolution:
 
     def _checkpoint(self) -> None:
         if self.ledger is not None:
-            self.ledger.heartbeat(self._ledger_key)
+            try:
+                self.ledger.heartbeat(self._ledger_key)
+            except OSError as e:  # a missed refresh only risks a stale hold
+                log.warning("spend ledger heartbeat failed (%s); will retry", e)
         self.save()
         st = self.status()
         log.info(
@@ -802,7 +805,13 @@ class Evolution:
             if self.ledger is not None:
                 # Unanswered requests may still be billed, and once this process is
                 # gone nothing will record them: book their worst case as spent.
-                self.unconfirmed_usd = self.ledger.close(self._ledger_key)
+                try:
+                    self.unconfirmed_usd = self.ledger.close(self._ledger_key)
+                except OSError as e:
+                    # The holds stay in the ledger and go stale in STALE_S, so the
+                    # budget is not pinned; losing the run's status would be worse.
+                    log.warning("could not book unanswered holds at exit (%s)", e)
+                    self.unconfirmed_usd = sum(self._worst.values())
                 self.run_spent_usd += self.unconfirmed_usd
                 self._worst.clear()
             if self.stopped == "running":

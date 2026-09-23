@@ -36,6 +36,8 @@ from pathlib import Path
 CHARS_PER_TOKEN = 3.0
 #: Seconds after which a run's unrefreshed holds are taken to be abandoned.
 STALE_S = 600.0
+#: Attempts at the atomic replace before a write gives up (about 5 s in all).
+REPLACE_ATTEMPTS = 30
 
 
 class SpendCapError(RuntimeError):
@@ -93,11 +95,14 @@ class SpendLedger:
 
     @property
     def total(self) -> float:
-        return float(self._read().get("total_usd", 0.0))
+        with self._locked():
+            return float(self._read().get("total_usd", 0.0))
 
     def held(self, data: dict | None = None) -> float:
         """Worst cases held by every live run sharing this ledger."""
-        data = self._read() if data is None else data
+        if data is None:
+            with self._locked():
+                data = self._read()
         now = time.time()
         return sum(
             float(h.get("usd", 0.0))
@@ -110,7 +115,8 @@ class SpendLedger:
 
         `own_local` is held by the caller but not yet written to the ledger; the
         caller's written holds are already counted."""
-        data = self._read()
+        with self._locked():
+            data = self._read()
         spent = float(data.get("total_usd", 0.0))
         return spent + self.held(data) + own_local + new_usd <= self.cap_usd
 
@@ -179,9 +185,19 @@ class SpendLedger:
             return {"total_usd": 0.0, "calls": 0}
 
     def _write(self, data: dict) -> None:
+        """Atomic replace, retried: Windows refuses to replace a file that any
+        process has open, and an indexer or antivirus scan can hold it briefly
+        even when every run reads under the lock."""
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        os.replace(tmp, self.path)
+        for attempt in range(REPLACE_ATTEMPTS):
+            try:
+                os.replace(tmp, self.path)
+                return
+            except PermissionError:
+                if attempt == REPLACE_ATTEMPTS - 1:
+                    raise
+                time.sleep(0.02 * (attempt + 1))
 
     class _Lock:
         def __init__(self, path: Path, timeout_s: float = 30.0):
@@ -193,14 +209,17 @@ class SpendLedger:
                 try:
                     os.close(os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
                     return self
-                except FileExistsError:
+                except (FileExistsError, PermissionError):
+                    # Held. On Windows a lock file another process is deleting sits
+                    # "delete pending", and creating it then raises PermissionError
+                    # rather than FileExistsError: that is also "held, try again".
                     # A lock older than the timeout belongs to a process that died.
                     try:
                         if time.time() - self.path.stat().st_mtime > self.timeout_s:
                             self.path.unlink(missing_ok=True)
                             continue
-                    except FileNotFoundError:
-                        continue
+                    except (FileNotFoundError, PermissionError):
+                        pass
                     if time.monotonic() > deadline:
                         raise SpendCapError(
                             f"could not lock the spend ledger {self.path}"
@@ -208,7 +227,12 @@ class SpendLedger:
                     time.sleep(0.02)
 
         def __exit__(self, *exc):
-            self.path.unlink(missing_ok=True)
+            for attempt in range(REPLACE_ATTEMPTS):
+                try:
+                    self.path.unlink(missing_ok=True)
+                    return
+                except PermissionError:  # an antivirus or indexer has it open
+                    time.sleep(0.02 * (attempt + 1))
 
     def _locked(self):
         return self._Lock(self._lock)
