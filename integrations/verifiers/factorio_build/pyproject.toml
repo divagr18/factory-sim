@@ -1,0 +1,26 @@
+[project]
+name = "factorio-build"
+version = "0.1.0"
+description = "Write a Python builder program that builds a working smelting line in factory-sim, a Factorio early-game simulator; scored by running it on held-fixed scene subsets."
+tags = ["program-synthesis", "code", "simulation", "single-turn", "train", "eval"]
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "verifiers>=0.3.1",
+    "datasets",
+    # factory-sim itself (the `fsim` and `evolve` packages plus its compiled C
+    # extension) is NOT declared yet: it is not pip-installable today. Run with
+    # a factory-sim checkout on PYTHONPATH (see README, "Packaging for the Hub").
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["factorio_build"]
+
+# Read by the v0 `vf-eval` / `prime eval run`.
+[tool.verifiers.eval]
+num_examples = 5
+rollouts_per_example = 3
