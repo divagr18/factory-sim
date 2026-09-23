@@ -12,3 +12,10 @@ dist/
 *.egg-info/
 fsim/_fsim.c
 runs/
+
+# LLM provider credentials for the evolution loop. This repository is public:
+# a key or an account-specific endpoint must never reach it.
+.env
+.env.*
+opencode.json
+secrets/
