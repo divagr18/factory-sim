@@ -122,7 +122,7 @@ shared by its rollouts. `workers=0` skips the pool, so it is for tests and
 trusted code only.
 
 ### Packaging for the Hub
-This package has **not** been pushed. It depends on `factory-sim>=0.1.0`,
+This package has **not** been pushed. It depends on `factory-sim>=0.1.1`,
 which `.github/workflows/wheels.yml` builds as manylinux, macOS and Windows
 wheels and publishes to PyPI on a version tag, so nothing is compiled at
 install time. Both packages pass their tests on Linux, the v1 cases included.
