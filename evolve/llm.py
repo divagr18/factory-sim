@@ -108,7 +108,7 @@ class Provider:
 
 
 def load_provider(path: str | None = None) -> Provider:
-    """Read `{"base_url", "api_key", "model"}` from `path`, or from `$FSIM_QWEN_CONFIG`."""
+    """Read `{"base_url", "api_key", "model"}` from `path`, or from `$FSIM_LLM_CONFIG`."""
     if path is None:
         path = os.environ.get(CONFIG_ENV) or os.environ.get(LEGACY_CONFIG_ENV)
         if not path:
