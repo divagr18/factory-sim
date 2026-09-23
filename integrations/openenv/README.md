@@ -61,13 +61,12 @@ training code at the train server only.
 
 ## Run it locally
 
-Use Python 3.11 or later. factory-sim's C extension must be built for your
-platform (`python build.py` in the repository root).
+Use Python 3.11 or later. Installing the package pulls in `openenv` and
+factory-sim:
 
 ```bash
-pip install "openenv>=0.5.0" cffi numpy
+pip install -e integrations/openenv
 cd integrations/openenv
-export PYTHONPATH=/path/to/factory-sim     # the server also finds it on its own
 uvicorn server.app:app --port 8000          # train / val
 uvicorn server.app:holdout_app --port 8001  # holdout, for evaluation only
 # or: python -m server.app --port 8000 [--holdout]

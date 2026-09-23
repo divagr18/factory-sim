@@ -33,11 +33,10 @@ named by their current `row` in `entities()`.
 | `finished`, `verified_output`, `decisions`, `refusals`, `tool_calls` | metrics | From the episode. |
 
 ### Quickstart
-The same setup as `factorio-build` (build the C extension, put the checkout on
-`PYTHONPATH`), then:
+From a factory-sim checkout:
 
 ```bash
-uv pip install -e integrations/verifiers/factorio_build -e integrations/verifiers/factorio_tools
+uv pip install -e . -e integrations/verifiers/factorio_build -e integrations/verifiers/factorio_tools
 eval factorio-tools -m <model> -n 8 --env.agent.max-turns 400
 ```
 

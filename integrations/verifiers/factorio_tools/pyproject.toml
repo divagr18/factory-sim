@@ -7,8 +7,7 @@ license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
     "verifiers>=0.3.1",
-    # Shares scene selection with factorio-build. Like factorio-build, it also
-    # needs a factory-sim checkout on PYTHONPATH (see factorio_build/README.md).
+    # Shares scene selection with factorio-build.
     "factorio-build",
 ]
 

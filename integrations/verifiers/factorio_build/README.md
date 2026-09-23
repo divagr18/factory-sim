@@ -67,15 +67,12 @@ completion earns the same reward on either.
 v0 entry point is exported.
 
 ### Quickstart
-Scoring needs factory-sim's compiled C extension (`fsim._fsim`). Build it from
-a checkout first, then put the checkout on `PYTHONPATH` (see "Packaging for the
-Hub" for why it is not a dependency yet):
+The package depends on `factory-sim`, which it installs from PyPI. From a
+checkout, install both in place instead:
 
 ```bash
 git clone https://github.com/divagr18/factory-sim && cd factory-sim
-uv sync && uv run python build.py            # compiles fsim/_fsim (needs a C compiler)
-export PYTHONPATH=$PWD
-uv pip install -e integrations/verifiers/factorio_build
+uv pip install -e . -e integrations/verifiers/factorio_build   # compiles the simulator (needs a C compiler)
 ```
 
 v1 (Linux or macOS):
@@ -125,17 +122,11 @@ shared by its rollouts. `workers=0` skips the pool, so it is for tests and
 trusted code only.
 
 ### Packaging for the Hub
-This package has **not** been pushed. It imports factory-sim's `fsim` and
-`evolve` packages and the compiled `fsim._fsim` extension. factory-sim is now a
-real package (setuptools + cffi, from 0.1.0): its sdist builds and passes a smoke
-test on Windows and on Linux (gcc), with identical scores. What is left is where
-the Hub resolves it from:
+This package has **not** been pushed. It depends on `factory-sim>=0.1.0`,
+which `.github/workflows/wheels.yml` builds as manylinux, macOS and Windows
+wheels and publishes to PyPI on a version tag, so nothing is compiled at
+install time. Both packages pass their tests on Linux, the v1 cases included.
 
-1. **Wheels on PyPI (the best option).** `.github/workflows/wheels.yml` builds manylinux, macOS and Windows wheels with cibuildwheel; publishing them to PyPI is the remaining step. Then add `"factory-sim>=0.1"` to `dependencies` here. Nothing is compiled at install time.
-2. **A git dependency.** `"factory-sim @ git+https://github.com/divagr18/factory-sim@<tag>"`, as a PEP 508 URL in `dependencies`, not in `[tool.uv.sources]`, which never reaches the wheel's metadata. This works now, but it compiles C at install time, so every Hub sandbox or training node needs a C compiler and cffi's build dependencies.
-3. **Vendoring the source.** Copy `csrc/`, `fsim/` and `evolve/` into this package and compile at install time. This forks the simulator, which the project avoids.
-
-After step 1 or 2, also pin `factorio-build`'s version, run `validate
-factorio-build --only-gold` on a Linux box, and push with `prime env push`
-under the owner's chosen visibility. `factorio-tools` depends on this package,
-so it has to be published after it.
+Publishing order: the factory-sim release on PyPI, then `validate factorio-build
+--only-gold` on a Linux box, then `prime env push` for `factorio-build`, then for
+`factorio-tools`, which depends on it.

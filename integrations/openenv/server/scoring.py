@@ -28,7 +28,7 @@ from functools import lru_cache
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-try:  # factory-sim is a checkout, not a package: find it when PYTHONPATH does not
+try:  # an installed factory-sim; otherwise the checkout this file sits in
     import fsim  # noqa: F401
 except ImportError:
     if (REPO_ROOT / "fsim").is_dir():

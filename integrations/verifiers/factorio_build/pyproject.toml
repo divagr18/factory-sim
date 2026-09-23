@@ -8,9 +8,7 @@ requires-python = ">=3.11"
 dependencies = [
     "verifiers>=0.3.1",
     "datasets",
-    # factory-sim itself (the `fsim` and `evolve` packages plus its compiled C
-    # extension) is NOT declared yet: it is not pip-installable today. Run with
-    # a factory-sim checkout on PYTHONPATH (see README, "Packaging for the Hub").
+    "factory-sim>=0.1.0",
 ]
 
 [build-system]
