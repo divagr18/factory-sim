@@ -10,7 +10,7 @@ license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
     "openenv>=0.5.0",
-    "factory-sim>=0.1.1",
+    "factory-sim>=0.1.2",
 ]
 
 [project.optional-dependencies]

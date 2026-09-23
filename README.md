@@ -138,7 +138,7 @@ repository" button reads [CITATION.cff](CITATION.cff); in BibTeX:
   author  = {Agrawal, Divyansh},
   title   = {{factory-sim}: a fast, tick-exact simulator of an early-game factory},
   year    = {2026},
-  version = {0.1.1},
+  version = {0.1.2},
   url     = {https://github.com/divagr18/factory-sim},
   license = {Apache-2.0}
 }

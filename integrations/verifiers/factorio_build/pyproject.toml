@@ -1,14 +1,14 @@
 [project]
 name = "factorio-build"
-version = "0.1.0"
-description = "Write a Python builder program that builds a working smelting line in factory-sim, a Factorio early-game simulator; scored by running it on held-fixed scene subsets."
-tags = ["program-synthesis", "code", "simulation", "single-turn", "train", "eval"]
+version = "0.1.1"
+description = "Write one program that builds a working Factorio smelting line, scored in a tick-exact simulator on scenes it has not seen."
+tags = ["program-synthesis", "code", "simulation", "planning", "single-turn", "train", "eval", "v1"]
 license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
     "verifiers>=0.3.1",
     "datasets",
-    "factory-sim>=0.1.1",
+    "factory-sim>=0.1.2",
 ]
 
 [build-system]

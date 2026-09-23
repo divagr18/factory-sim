@@ -21,3 +21,6 @@ opencode.json
 secrets/
 wheelhouse/
 .venv-*/
+
+# Prime CLI push metadata (per machine)
+.prime/
