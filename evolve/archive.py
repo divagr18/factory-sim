@@ -77,7 +77,7 @@ CREATE INDEX IF NOT EXISTS candidates_val_mean ON candidates (val_mean);
 
 
 def source_length(code: str) -> int:
-    """Non-blank source lines: what the length tie-break counts."""
+    """Non-blank source lines. Reported, not used for selection."""
     return sum(1 for line in code.splitlines() if line.strip())
 
 
@@ -143,8 +143,15 @@ class Candidate:
         return -math.inf if v is None or math.isnan(v) else v
 
     def rank_key(self, key: str = "val_mean") -> tuple:
-        """Ascending sort key: best first."""
-        return (-self.score(key), self.length, self.created, self.id)
+        """Ascending sort key: best first; among equal scores, the older program.
+
+        Length is deliberately not a criterion. It once was, as a readability
+        preference, and once validation saturates every program scores 1.000 and
+        the tie-break is the selector: it preferred short, wall-blind patches over
+        longer programs with real pathfinding, discarding general solutions the
+        search had found. The incumbent keeps a tie: a program must be strictly
+        better to displace it. Readability is a post-hoc simplify of the result."""
+        return (-self.score(key), self.created, self.id)
 
     @property
     def layout_signature(self) -> str | None:
@@ -250,9 +257,9 @@ class Store:
         return self._select("WHERE island = ?", (island,), "ORDER BY created, rowid")
 
     def best(self, n: int = 10, key: str = "val_mean") -> list[Candidate]:
-        """Top `n` by `key`, then shorter, then older. Unscored rows come last."""
+        """Top `n` by `key`, then older (the incumbent). Unscored rows come last."""
         if key in ("val_mean", "train_mean"):
-            tail = f"ORDER BY ({key} IS NULL), {key} DESC, length, created, id LIMIT ?"
+            tail = f"ORDER BY ({key} IS NULL), {key} DESC, created, id LIMIT ?"
             return self._select(tail=tail, args=(n,))
         return sorted(self.all(), key=lambda c: c.rank_key(key))[:n]
 

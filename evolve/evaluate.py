@@ -32,7 +32,7 @@ from evolve import sandbox
 from fsim import scenes
 from fsim.program_api import Entity, World, run_episode
 
-EVALUATOR_VERSION = 2  # 2: programs are stopped after PROGRAM_TIME_LIMIT_S per episode
+EVALUATOR_VERSION = 3  # 3: feedback traces come from training scenes only (2: 2 s program limit)
 TASK = "construct_smelting_line"
 FAMILIES_TRAIN = ("open_patch", "offset_patch", "varied_patch", "cluttered_patch")
 FAMILIES_HOLDOUT = ("obstructed_patch",)
@@ -83,16 +83,22 @@ def scene_digest(blueprint: dict) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
-def scene_sets(train_n=128, val_n=256, holdout_n=100) -> dict[str, list[tuple[str, int, dict]]]:
+def scene_sets(
+    train_n=128, val_n=256, holdout_n=100, holdout_start=0
+) -> dict[str, list[tuple[str, int, dict]]]:
     """{"train", "val", "holdout"}: lists of (family, seed, blueprint), deterministic.
 
     Holdout indices past the frozen 100 continue the same seed stream; they are
-    unseen, but no FactorioRL result was measured on them."""
+    unseen, but no FactorioRL result was measured on them. `holdout_start` skips
+    into the stream: a method changed after its holdout results were seen has to
+    be reported on scenes no run or analysis has touched."""
 
     def draw(split, seeds):
         return [(*scenes.sample(TASK, split, s), s) for s in seeds]
 
-    holdout_seeds = [holdout_seed(HOLDOUT_START_INDEX + k) for k in range(holdout_n)]
+    holdout_seeds = [
+        holdout_seed(HOLDOUT_START_INDEX + holdout_start + k) for k in range(holdout_n)
+    ]
     sets = {
         name: [(family, seed, bp) for family, bp, seed in drawn]
         for name, drawn in (
@@ -116,7 +122,7 @@ def set_digests(sets: dict) -> dict[str, str]:
     return out
 
 
-def verify_holdout(sets: dict, path: Path | str | None = None) -> dict:
+def verify_holdout(sets: dict, path: Path | str | None = None, start: int = 0) -> dict:
     """Compare the holdout set with FactorioRL's frozen file (read only).
 
     Returns {"file", "frozen", "compared", "matched", "mismatched": [index]};
@@ -130,13 +136,13 @@ def verify_holdout(sets: dict, path: Path | str | None = None) -> dict:
     frozen = {e["episode_index"]: e for e in episodes}
     matched, mismatched = 0, []
     for k, (family, _, bp) in enumerate(sets["holdout"]):
-        entry = frozen.get(HOLDOUT_START_INDEX + k)
+        entry = frozen.get(HOLDOUT_START_INDEX + start + k)
         if entry is None:
             continue
         if entry["blueprint_digest"] == scene_digest(bp) and entry["layout_family"] == family:
             matched += 1
         else:
-            mismatched.append(HOLDOUT_START_INDEX + k)
+            mismatched.append(HOLDOUT_START_INDEX + start + k)
     return {
         "file": str(path),
         "frozen": len(episodes),
@@ -472,8 +478,11 @@ class Evaluator:
         a prompt's parent dict take); the whole summaries are under "detail"."""
         st = self._run([source], ["train", "val"])[0]
         train, val = self._summarise(st, "train"), self._summarise(st, "val")
-        traces = dict(val["traces"])
-        traces.update(train["traces"])
+        # Training scenes only. Before version 3 a family whose training scenes
+        # all passed showed its first failing validation scene instead: exactly
+        # when training saturates, the model was handed the validation failures
+        # that selection ranks by, and could patch those scenes one by one.
+        traces = dict(train["traces"])
         return {
             "train": train["rates"],
             "val": val["rates"],

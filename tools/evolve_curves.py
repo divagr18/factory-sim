@@ -1,10 +1,11 @@
 """Learning curves of evolution runs against simulated interaction, scored on the holdout.
 
 Replays each run's genealogy in creation order and follows its best-so-far
-program (by `val_mean`, ties to the shorter). Every time the best changes, that
-program is scored on the frozen holdout, post hoc: the loop never saw these
-scenes. A program is scored once per invocation, keyed by the hash of its code,
-so a seed shared by several runs costs one holdout pass.
+program (by `val_mean`, ties to the incumbent; `--tie-break length` replays
+runs made before evaluator 3). Every time the best changes, that program is
+scored on the frozen holdout, post hoc: the loop never saw these scenes. A
+program is scored once per invocation, keyed by the hash of its code, so a seed
+shared by several runs costs one holdout pass.
 
 The x axis is simulated decisions: each evaluated row's `scores["episodes"]`
 times 600, the decision budget every `construct_smelting_line` episode runs to
@@ -89,10 +90,16 @@ def _val(c) -> float:
     return float(v)
 
 
-def _better(c, best) -> bool:
+def _better(c, best, tie_break: str = "incumbent") -> bool:
+    """Whether `c` displaces `best` under the run's selection rule.
+
+    "incumbent" (evaluator 3 on): strictly higher validation only. "length":
+    ties go to the shorter program, the rule runs made before then selected by."""
     if best is None:
         return True
-    return (_val(c), -c.length) > (_val(best), -best.length)
+    if tie_break == "length":
+        return (_val(c), -c.length) > (_val(best), -best.length)
+    return _val(c) > _val(best)
 
 
 def first_reach(curve: list[dict], threshold: float):
@@ -103,7 +110,7 @@ def first_reach(curve: list[dict], threshold: float):
     return "never"
 
 
-def replay(rows: list, score, duplicates: int = 0) -> dict:
+def replay(rows: list, score, duplicates: int = 0, tie_break: str = "incumbent") -> dict:
     """Walk `rows` (creation order) and score each new best-so-far with `score(code)`."""
     llm_rows = sum(1 for c in rows if c.operator != "seed")
     dup_rate = duplicates / llm_rows if llm_rows else 0.0
@@ -114,7 +121,7 @@ def replay(rows: list, score, duplicates: int = 0) -> dict:
         episodes += _episodes(c)
         if c.operator != "seed":
             done += 1
-        if c.operator in FAILED or not _better(c, best):
+        if c.operator in FAILED or not _better(c, best, tie_break):
             continue
         best = c
         curve.append(
@@ -153,14 +160,14 @@ def replay(rows: list, score, duplicates: int = 0) -> dict:
     }
 
 
-def analyse_run(run_dir, score) -> dict:
+def analyse_run(run_dir, score, tie_break: str = "incumbent") -> dict:
     run_dir = Path(run_dir)
     status_path = run_dir / "status.json"
     status = json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}
     name = run_dir.name.removeprefix("evolve-")
     with Store(run_dir / "genealogy.sqlite", readonly=True) as store:
         rows = store.all()
-    out = replay(rows, score, int(status.get("duplicates") or 0))
+    out = replay(rows, score, int(status.get("duplicates") or 0), tie_break)
     out.update(
         {
             "run": name,
@@ -343,10 +350,15 @@ def load_ppo(path) -> list[dict]:
     return list(doc["rows"] if isinstance(doc, dict) else doc)
 
 
-def build_report(run_dirs, score, ppo: list[dict], holdout_n: int) -> dict:
-    runs = [analyse_run(d, score) for d in run_dirs]
+def build_report(
+    run_dirs, score, ppo: list[dict], holdout_n: int, holdout_start: int = 0,
+    tie_break: str = "incumbent",
+) -> dict:  # fmt: skip
+    runs = [analyse_run(d, score, tie_break) for d in run_dirs]
     return {
         "holdout_n": holdout_n,
+        "holdout_start": holdout_start,
+        "tie_break": tie_break,
         "decisions_per_episode": DECISIONS_PER_EPISODE,
         "verify_decisions_per_episode": VERIFY_PER_EPISODE,
         "ppo_budget_decisions": PPO_BUDGET,
@@ -362,6 +374,18 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("runs", nargs="+", help="run directories holding genealogy.sqlite")
     ap.add_argument("--holdout-n", type=int, default=1000)
+    ap.add_argument(
+        "--holdout-start",
+        type=int,
+        default=0,
+        help="first holdout-stream index; report changed methods on unseen indices (e.g. 1000)",
+    )
+    ap.add_argument(
+        "--tie-break",
+        choices=("incumbent", "length"),
+        default="incumbent",
+        help="the selection rule the runs used: 'length' for runs before evaluator 3",
+    )
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--out", required=True)
     ap.add_argument("--svg")
@@ -372,12 +396,16 @@ def main(argv=None) -> int:
     from evolve.pool import EvalPool
 
     ppo = load_ppo(args.ppo)
-    sets = evaluate.scene_sets(train_n=0, val_n=0, holdout_n=args.holdout_n)
+    sets = evaluate.scene_sets(
+        train_n=0, val_n=0, holdout_n=args.holdout_n, holdout_start=args.holdout_start
+    )
     with EvalPool(
         args.workers, "evolve.evaluate:worker_init", "evolve.evaluate:worker_job", timeout_s=600
     ) as pool:
         cache = HoldoutCache(evaluate.Evaluator(pool, sets))
-        report = build_report(args.runs, cache.score, ppo, args.holdout_n)
+        report = build_report(
+            args.runs, cache.score, ppo, args.holdout_n, args.holdout_start, args.tie_break
+        )
         report["holdout_programs_scored"] = cache.calls
     Path(args.out).write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
     if args.svg:

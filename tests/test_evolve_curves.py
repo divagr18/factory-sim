@@ -68,11 +68,11 @@ def test_replay_best_so_far_and_decisions():
     rows = genealogy()
     out = ec.replay(rows, score, duplicates=3)
     ids = [p["candidate_id"] for p in out["curve"]]
-    assert ids == [rows[0].id, rows[3].id, rows[4].id, rows[6].id]
+    assert ids == [rows[0].id, rows[3].id, rows[6].id]  # the shorter tie does not displace
     dec = [p["sim_decisions"] for p in out["curve"]]
-    assert dec == [392 * 600, 3 * 392 * 600, 4 * 392 * 600, (5 * 392 + 8) * 600]
-    assert [p["rows"] for p in out["curve"]] == [0, 3, 4, 6]
-    assert [p["val_mean"] for p in out["curve"]] == [0.5, 0.75, 0.75, 1.0]
+    assert dec == [392 * 600, 3 * 392 * 600, (5 * 392 + 8) * 600]
+    assert [p["rows"] for p in out["curve"]] == [0, 3, 6]
+    assert [p["val_mean"] for p in out["curve"]] == [0.5, 0.75, 1.0]
     assert out["totals"]["episodes"] == 5 * 392 + 8
     assert out["totals"]["verify_decisions"] == (5 * 392 + 8) * 120
     assert out["totals"]["failed_rows"] == 1
@@ -80,7 +80,7 @@ def test_replay_best_so_far_and_decisions():
     assert out["final"]["candidate_id"] == rows[6].id
     assert out["final"]["completions"] == 9
     assert out["curve"][-1]["completions"] == 6 + 3  # prorated duplicates
-    assert len(seen) == 4  # the failed and non-improving rows are never scored
+    assert len(seen) == 3  # the failed, non-improving and tied rows are never scored
     assert ec.first_reach(out["curve"], 0.9) == 3 * 392 * 600
     assert ec.first_reach(out["curve"], 1.0) == "never"
 
@@ -127,8 +127,8 @@ def test_holdout_cache_scores_each_code_once(tmp_path, pool):
         write_run(tmp_path, "grid-C-s1", genealogy(seed_code=TRIVIAL, best_code=SEED)),
     ]
     report = ec.build_report(dirs, cache.score, [], HOLDOUT_N)
-    # SEED, LOOP + padding, LOOP, TRIVIAL: four distinct codes over three runs
-    assert cache.calls == 4
+    # SEED, LOOP + padding, TRIVIAL: three distinct codes over three runs
+    assert cache.calls == 3
     by = {r["run"]: r for r in report["runs"]}
     assert by["grid-A-s1"]["curve"][0]["holdout"] == by["grid-C-s1"]["final"]["holdout"]
     assert by["grid-A-s1"]["final"]["holdout"] == 0.0  # waiting builds nothing
@@ -165,9 +165,17 @@ def test_main_writes_json_svg_and_table(tmp_path, capsys):
     assert rc == 0
     report = json.loads(out.read_text(encoding="utf-8"))
     assert set(report["arms"]) == {"A", "D"}
-    assert report["holdout_programs_scored"] == 4
+    assert report["holdout_programs_scored"] == 3
+    assert report["tie_break"] == "incumbent" and report["holdout_start"] == 0
     assert report["ppo"][0]["steps"] == 40_000_000
     text = svg.read_text(encoding="utf-8")
     assert text.startswith("<svg") and text.count("<polyline") == 2 and "PPO" in text
     printed = capsys.readouterr().out
     assert "grid-A-s1" in printed and "ppo-s1" in printed
+
+
+def test_replay_length_rule_reproduces_runs_before_evaluator_3():
+    rows = genealogy()
+    out = ec.replay(rows, lambda code: 0.5, tie_break="length")
+    ids = [p["candidate_id"] for p in out["curve"]]
+    assert ids == [rows[0].id, rows[3].id, rows[4].id, rows[6].id]

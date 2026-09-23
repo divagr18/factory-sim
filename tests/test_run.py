@@ -119,6 +119,7 @@ def make(tmp_path, client, *, evaluator=None, **cfg):
     cfg.setdefault("islands", 2)
     cfg.setdefault("island_size", 6)
     cfg.setdefault("seed", 7)
+    cfg.setdefault("seed_program", "builder")  # FakeEvaluator scores the builder's SOURCE
     config = Config(name="t", **cfg)
     run_dir = tmp_path / "evolve-t"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -611,3 +612,10 @@ def test_sandbox_accepts_the_test_programs():
     sandbox.check(program(3))
     with pytest.raises(sandbox.SandboxError):
         sandbox.check("import os\n\ndef build(world):\n    world.wait()\n")
+
+
+def test_defaults_start_from_the_trivial_seed_without_simplify():
+    config = Config(name="t")
+    assert config.seed_program == "trivial"
+    assert "simplify" not in config.operators
+    assert evo_run.build_parser().parse_args(["--name", "t"]).seed_program == "trivial"

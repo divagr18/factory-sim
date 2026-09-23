@@ -90,7 +90,7 @@ def test_duplicate_id_is_refused(store):
     assert store.count() == 1
 
 
-def test_best_orders_by_score_then_length_then_age(store):
+def test_best_orders_by_score_then_age_not_length(store):
     a = cand(0.9, length=10)
     b = cand(0.9, length=4)
     c = cand(0.9, length=4)  # same score and length as b, but younger
@@ -101,9 +101,9 @@ def test_best_orders_by_score_then_length_then_age(store):
     for x in (e, unscored, a, c, b, d):
         store.add(x)
     ids = [x.id for x in store.best(10)]
-    assert ids == [d.id, b.id, c.id, a.id, e.id, unscored.id]
-    assert [x.id for x in store.best(2)] == [d.id, b.id]
-    assert [x.id for x in store.best(10, key="train_mean")][:2] == [d.id, b.id]
+    assert ids == [d.id, a.id, b.id, c.id, e.id, unscored.id]  # a is oldest, not shortest
+    assert [x.id for x in store.best(2)] == [d.id, a.id]
+    assert [x.id for x in store.best(10, key="train_mean")][:2] == [d.id, a.id]
 
 
 def test_best_by_a_key_outside_the_columns(store):
@@ -200,15 +200,16 @@ def test_admit_keeps_the_best_size_and_evicts():
     assert len(isl.members[1]) == 3
 
 
-def test_admit_breaks_ties_by_length():
+def test_admit_keeps_the_incumbent_on_ties():
     isl = Islands(n=1, size=2, seed=0)
     long1, long2 = cand(0.5, length=20), cand(0.5, length=20)
     isl.admit(long1)
     isl.admit(long2)
-    short = cand(0.5, length=3)
-    assert isl.admit(short)
-    assert {m.id for m in isl.members[0]} == {short.id, long1.id}
-    assert not isl.admit(cand(0.5, length=25))
+    assert not isl.admit(cand(0.5, length=3))  # shorter is not better
+    assert {m.id for m in isl.members[0]} == {long1.id, long2.id}
+    better = cand(0.6, length=40)
+    assert isl.admit(better)
+    assert {m.id for m in isl.members[0]} == {better.id, long1.id}
 
 
 def test_select_is_a_deterministic_tournament():
@@ -326,8 +327,7 @@ def test_map_elites_bins_and_replaces():
     assert me.admit(a)
     assert not me.admit(cand(0.4, desc={"walk": 7.0, "entities": 1}))
     assert not me.admit(cand(0.5, length=9, desc={"walk": 7.0, "entities": 1}))
-    shorter = cand(0.5, length=2, desc={"walk": 7.0, "entities": 1})
-    assert me.admit(shorter)
+    assert not me.admit(cand(0.5, length=2, desc={"walk": 7.0, "entities": 1}))
     better = cand(0.8, length=40, desc={"walk": 1.0, "entities": 0})
     assert me.admit(better)
     assert me.cells() == {(0, 0): better}

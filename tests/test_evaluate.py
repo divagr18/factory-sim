@@ -141,6 +141,30 @@ def test_traces_never_come_from_the_holdout(pool, sets):
     assert holdout["n"] == len(sets["holdout"])
 
 
+def test_feedback_traces_never_come_from_validation(sets, monkeypatch):
+    """Training passes everywhere, validation fails: the prompt sees no trace."""
+    evaluator = ev.Evaluator(None, sets)
+    monkeypatch.setattr(evaluator, "_run", lambda sources, splits: [{"error": None}])
+
+    def summarise(st, split):
+        failing = {"open_patch": ["val scene 7: walked into a wall"]} if split == "val" else {}
+        return {"rates": {}, "mean": 1.0, "traces": failing, "descriptors": None, "n": 1}
+
+    monkeypatch.setattr(evaluator, "_summarise", summarise)
+    assert evaluator.full(IDLE)["traces"] == {}
+
+
+def test_holdout_start_moves_to_unseen_indices():
+    first = ev.scene_sets(train_n=0, val_n=0, holdout_n=4)
+    later = ev.scene_sets(train_n=0, val_n=0, holdout_n=4, holdout_start=2)
+    assert digests(later["holdout"][:2]) == digests(first["holdout"][2:])
+    assert not digests(later["holdout"][2:]) & digests(first["holdout"])
+    check = ev.verify_holdout(first)
+    if check["file"] is not None:
+        shifted = ev.verify_holdout(later, start=2)
+        assert shifted["matched"] == shifted["compared"] == 4
+
+
 def test_a_chunk_the_pool_lost_counts_as_failed_scenes(sets):
     class Lost:
         workers = 3

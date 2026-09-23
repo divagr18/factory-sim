@@ -67,7 +67,10 @@ SOURCE = SEEDS["builder"]
 
 log = logging.getLogger("evolve.run")
 
-DEFAULT_OPERATORS = {"fix": 0.4, "rewrite": 0.3, "crossover": 0.2, "simplify": 0.1}
+# No "simplify" by default: selection no longer prefers shorter programs, so a
+# same-score rewrite can never displace its parent and the call is wasted. It
+# stays available (`--operators ...,simplify:0.1`) and for tidying a result.
+DEFAULT_OPERATORS = {"fix": 0.4, "rewrite": 0.3, "crossover": 0.2}
 #: Operators of rows that hold no runnable program; they never join an island.
 FAILED = ("extract_failed", "sandbox_error", "eval_error")
 STATE_VERSION = 1
@@ -114,7 +117,7 @@ class Config:
     #: Seconds between writes of `state.json` and `status.json`.
     status_every_s: float = 30.0
     #: Which of `SEEDS` the population starts from.
-    seed_program: str = "builder"
+    seed_program: str = "trivial"
 
 
 def _now_iso() -> str:
@@ -879,9 +882,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--seed-program",
         choices=tuple(SEEDS),
-        default="builder",
-        help="the program the population starts from: the scripted builder, or a "
-        "trivial one that builds nothing (the counterpart of PPO from scratch)",
+        default="trivial",
+        help="the program the population starts from: a trivial one that builds "
+        "nothing (the counterpart of PPO from scratch), or the scripted builder. "
+        "In the matched grid the builder seed anchored search on its wall-blind "
+        "walker and generalised worse (0.79-0.88 holdout against 0.99)",
     )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument(
@@ -1012,6 +1017,7 @@ def main(argv=None) -> int:
         name=args.name,
         model=provider.model,
         evaluator_version=evaluate.EVALUATOR_VERSION,
+        selection="val_mean, ties to the incumbent (older program)",
         scene_digests=digests,
         scene_set_digests=evaluate.set_digests(sets),
         game_notes=config.game_notes,
