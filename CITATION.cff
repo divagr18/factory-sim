@@ -7,7 +7,7 @@ authors:
   - family-names: Agrawal
     given-names: Divyansh
     orcid: "https://orcid.org/0009-0003-0739-2473"
-version: "0.1.0"
+version: "0.1.1"
 license: Apache-2.0
 repository-code: "https://github.com/divagr18/factory-sim"
 keywords:

@@ -2,4 +2,4 @@
 
 from setuptools import setup
 
-setup(cffi_modules=["build.py:ffibuilder"])
+setup(cffi_modules=["build_fsim.py:ffibuilder"])

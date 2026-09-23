@@ -76,7 +76,7 @@ adapter, `[puffer]` for PufferLib's (see `docs/interfaces.md`).
 
 ```
 uv sync                         # installs the checkout editable, compiling csrc/
-uv run python build.py          # rebuilds fsim/_fsim in place after a C change
+uv run python build_fsim.py          # rebuilds fsim/_fsim in place after a C change
 uv run pytest                   # parity against tests/golden
 uv run python bench/bench.py
 ```
@@ -94,7 +94,7 @@ repository" button reads [CITATION.cff](CITATION.cff); in BibTeX:
   author  = {Agrawal, Divyansh},
   title   = {{factory-sim}: a fast, tick-exact simulator of an early-game factory},
   year    = {2026},
-  version = {0.1.0},
+  version = {0.1.1},
   url     = {https://github.com/divagr18/factory-sim},
   license = {Apache-2.0}
 }

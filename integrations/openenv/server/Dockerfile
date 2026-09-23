@@ -21,7 +21,7 @@ RUN pip install --no-cache-dir "openenv>=0.5.0" "cffi>=1.17" "numpy>=2" setuptoo
 WORKDIR /app/factory-sim
 
 # The simulator and the evolution harness (sandbox, evaluator, pool, prompts).
-COPY build.py pyproject.toml LICENSE NOTICE ./
+COPY build_fsim.py pyproject.toml LICENSE NOTICE ./
 COPY csrc ./csrc
 COPY fsim ./fsim
 COPY evolve ./evolve
@@ -30,9 +30,9 @@ COPY integrations/openenv ./integrations/openenv
 # and every scene would be simulated on a map with no water.
 COPY tests/golden/sim-mechanics-m3.json ./tests/golden/sim-mechanics-m3.json
 
-# Linux flags from build.py: -std=c11 -O2 -ffp-contract=off. Drop the Windows
+# Linux flags from build_fsim.py: -std=c11 -O2 -ffp-contract=off. Drop the Windows
 # extension copied from a developer checkout, build, and check it imports.
-RUN rm -f fsim/_fsim*.pyd && python build.py && python -c "import fsim; assert fsim.water_tiles(), 'no water'; from fsim.rl import RlEnv; RlEnv()"
+RUN rm -f fsim/_fsim*.pyd && python build_fsim.py && python -c "import fsim; assert fsim.water_tiles(), 'no water'; from fsim.rl import RlEnv; RlEnv()"
 
 ENV PYTHONPATH=/app/factory-sim \
     PYTHONUNBUFFERED=1 \

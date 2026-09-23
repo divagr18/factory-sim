@@ -1,2 +1,2 @@
-include build.py LICENSE NOTICE README.md
+include build_fsim.py LICENSE NOTICE README.md
 include csrc/fsim.c csrc/fsim.h csrc/fsim_rl.c

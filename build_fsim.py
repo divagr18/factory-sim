@@ -3,7 +3,7 @@
 Installing the package compiles it (setup.py names `ffibuilder` below). For a
 checkout used in place, without installing:
 
-uv run python build.py
+uv run python build_fsim.py
 """
 
 from __future__ import annotations
