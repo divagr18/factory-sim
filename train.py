@@ -399,6 +399,11 @@ def parse(argv=None) -> argparse.Namespace:
     p.add_argument("--out", type=Path, default=ROOT / "runs")
     p.add_argument("--no-graph", action="store_true", help="rollout inference without CUDA graphs")
     p.add_argument(
+        "--slow-eval",
+        action="store_true",
+        help="the original evaluator (eager, float observations, 64 environments), for A/B",
+    )
+    p.add_argument(
         "--compile",
         action="store_true",
         help="fuse the PPO minibatch (gather, extractor, heads, losses) with torch.compile. "
@@ -698,11 +703,91 @@ def wilson(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
     return (max(0.0, centre - half), min(1.0, centre + half))
 
 
-@torch.no_grad()
-def evaluate(
-    policy, device, args, split: str, episodes: int, greedy: bool, epsilon: float = 0.0
-) -> dict:
-    """Success over fresh evaluation seeds, disjoint from every training seed."""
+class EvalRollout(Rollout):
+    """`Rollout` for the evaluator: the same compact, pinned, graph-captured
+    inference, deciding greedily or epsilon-greedily as asked, without the
+    value head."""
+
+    #: Rows per forward pass. The kernels a bf16 forward pass gets depend on
+    #: the batch shape, and a different shape moves a logit by an ulp often
+    #: enough to flip a near-tied greedy argmax: at 256 rows, 2 of 256 greedy
+    #: episodes of one checkpoint came out differently from the 64-environment
+    #: evaluator. At 64 rows every episode is bit-identical to it, and the
+    #: passes still replay in the one graph launch.
+    CHUNK = 64
+
+    def __init__(self, policy, n, device, greedy: bool, epsilon: float, graph: bool = True):
+        super().__init__(policy, n, device, graph)
+        self.greedy, self.epsilon = greedy, epsilon
+
+    def _infer(self):
+        obs = self.decode(self.block, self.n)
+        out = []
+        with torch.no_grad():
+            for lo in range(0, self.n, self.CHUNK):
+                part = unpacked({k: v[lo : lo + self.CHUNK] for k, v in obs.items()})
+                f = features(self.policy, part)
+                mask = self.mask[lo : lo + self.CHUNK]
+                out.append(self.policy.act(f, mask, self.greedy, self.epsilon)[0])
+        return torch.cat(out)
+
+
+#: The evaluator's last `EvalRollout`, kept so the eval every 2M steps does not
+#: re-capture its graph. One entry: a new configuration replaces it, so the
+#: final report's six modes do not each pin a graph's memory pool.
+_EVAL_ROLLOUT: dict = {}
+
+#: The most environments one evaluation round runs at once.
+EVAL_BATCH = 512
+
+
+def _eval_rollout(policy, device, n, greedy, epsilon, graph) -> EvalRollout:
+    key = (id(policy), str(device), n, bool(greedy), float(epsilon), graph)
+    cached = _EVAL_ROLLOUT.get("entry")
+    if cached is None or cached[0] != key or cached[1].policy is not policy:
+        _EVAL_ROLLOUT.clear()
+        cached = (key, EvalRollout(policy, n, device, greedy, epsilon, graph))
+        _EVAL_ROLLOUT["entry"] = cached
+    return cached[1]
+
+
+def eval_records(policy, device, args, split, episodes, greedy, epsilon=0.0) -> list[dict]:
+    """The finished episodes for evaluation seeds 0 .. `episodes` - 1.
+
+    Every slot runs exactly one episode, the one with its own index as seed:
+    the scene set `_slow_eval_records` draws (the first `episodes` evaluation
+    seeds), at up to `EVAL_BATCH` environments a round instead of 64."""
+    n = min(EVAL_BATCH, episodes)
+    graph = not getattr(args, "no_graph", False)
+    rollout = _eval_rollout(policy, device, n, greedy, epsilon, graph)
+    env = VecEnv(
+        n, args.task, split=split, seed=args.seed, threads=args.threads,
+        shaping=False, gamma=args.gamma, eval_seeds=True, action_space=args.action_space,
+        max_steps=args.max_steps, tick_limit=args.tick_limit,
+        compact=True, autoreset=False, **rollout.memories(),
+    )  # fmt: skip
+    done: list[dict] = []
+    try:
+        for first in range(0, episodes, n):
+            count = min(n, episodes - first)
+            # Seeds are the episode counter, drawn in slot order on reset.
+            env.episodes_started = first
+            env.reset()
+            record: list[dict | None] = [None] * n
+            env.alive[count:] = False  # a short last round: extra slots never count
+            while env.alive.any():
+                actions = rollout()
+                _, _, _, term, trunc, finished = env.step(actions.cpu().numpy())
+                for i, r in zip(np.flatnonzero(term | trunc), finished, strict=True):
+                    record[i] = r
+            done.extend(record[:count])
+    finally:
+        env.close()
+    return done
+
+
+def _slow_eval_records(policy, device, args, split, episodes, greedy, epsilon=0.0) -> list[dict]:
+    """The original evaluator: eager, float observations, 64 environments."""
     n = min(64, episodes)
     env = VecEnv(
         n, args.task, split=split, seed=args.seed, threads=args.threads,
@@ -730,7 +815,19 @@ def evaluate(
         if not active.any():
             break
     env.close()
-    done = done[:episodes]
+    return done[:episodes]
+
+
+@torch.no_grad()
+def evaluate(
+    policy, device, args, split: str, episodes: int, greedy: bool, epsilon: float = 0.0
+) -> dict:
+    """Success over fresh evaluation seeds, disjoint from every training seed.
+
+    The episodes are evaluation seeds 0 .. `episodes` - 1 either way;
+    `--slow-eval` selects the original eager evaluator."""
+    records = _slow_eval_records if getattr(args, "slow_eval", False) else eval_records
+    done = records(policy, device, args, split, episodes, greedy, epsilon)
     wins = sum(r["success"] for r in done)
     low, high = wilson(wins, len(done))
     return {
