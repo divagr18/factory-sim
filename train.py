@@ -41,6 +41,7 @@ budget running out starts verification, a true terminal), and build_line's
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import math
 import random
@@ -397,6 +398,16 @@ def parse(argv=None) -> argparse.Namespace:
     p.add_argument("--eval-every", type=int, default=2_000_000)
     p.add_argument("--out", type=Path, default=ROOT / "runs")
     p.add_argument("--no-graph", action="store_true", help="rollout inference without CUDA graphs")
+    p.add_argument(
+        "--compile",
+        action="store_true",
+        help="fuse the PPO minibatch (gather, extractor, heads, losses) with torch.compile. "
+        "The update is memory-bandwidth-bound on unfused elementwise work -- casts, "
+        "copies and the zero-fills of a sliced feature tensor -- which is what fusion "
+        "removes. Needs Triton, so Linux or WSL2; plain PPO only (no prior, GRPO or "
+        "extra critic updates). Off, the update is the unchanged eager path",
+    )
+    p.add_argument("--compile-mode", default="default", help="torch.compile mode, with --compile")
     p.add_argument("--no-final", action="store_true", help="skip the final evaluation and export")
     p.add_argument(
         "--action-space",
@@ -622,6 +633,61 @@ def features(policy: Policy, obs: dict) -> torch.Tensor:
     return f.float()
 
 
+def ppo_minibatch(args, policy, flat, idx, masks, actions, old_logp, adv, ret, val):
+    """One plain-PPO minibatch loss, written as one function so it can be compiled.
+
+    The same arithmetic as the eager loop in `main`, for the configurations
+    `--compile` accepts: PPO, advantage normalisation as configured, the clipped
+    value loss, no prior and no extra critic updates. `idx` holds at least two
+    rows, so the standard deviation is never taken over one element.
+    """
+    f = features(policy, {k: v[idx] for k, v in flat.items()})
+    logp, entropy = policy.evaluate(f, masks[idx], actions[idx])
+    ratio_log = logp - old_logp[idx]
+    ratio = ratio_log.exp()
+    a = adv[idx]
+    if not args.no_adv_norm:
+        a = (a - a.mean()) / (a.std() + 1e-8)
+    pg = torch.max(-a * ratio, -a * ratio.clamp(1 - args.clip, 1 + args.clip)).mean()
+    ent = entropy.mean()
+    value = policy.value(f.detach() if args.critic_detach else f)
+    vf_clip = args.clip if args.vf_clip is None else args.vf_clip
+    v = val[idx]
+    v_clipped = v + (value - v).clamp(-vf_clip, vf_clip)
+    r = ret[idx]
+    v_loss = 0.5 * torch.max((value - r) ** 2, (v_clipped - r) ** 2).mean()
+    loss = pg - args.ent * ent + args.vf * v_loss
+    return loss, pg, v_loss, ent, ratio_log, ratio
+
+
+def compile_minibatch(args, prior, critic_opt):
+    """`ppo_minibatch` under torch.compile, or refuse the configuration loudly.
+
+    Refusing beats a silent eager fallback: a benchmark that thinks it measured
+    fusion and did not is worse than one that failed."""
+    unsupported = [
+        name
+        for name, bad in (
+            ("--algo grpo", args.algo != "ppo"),
+            ("--prior", prior is not None),
+            ("--critic-updates > 1", critic_opt is not None),
+        )
+        if bad
+    ]
+    if unsupported:
+        raise SystemExit(f"--compile supports plain PPO only; drop {', '.join(unsupported)}")
+    try:
+        import triton  # noqa: F401
+    except ImportError:
+        raise SystemExit(
+            "--compile needs Triton, which PyTorch does not ship for native Windows; "
+            "run under Linux or WSL2"
+        ) from None
+    return torch.compile(
+        functools.partial(ppo_minibatch, args), mode=args.compile_mode, dynamic=False
+    )
+
+
 def wilson(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
     """95% Wilson score interval for a success rate."""
     if n == 0:
@@ -726,6 +792,7 @@ def main(argv=None) -> int:
         if args.critic_updates > 1 and args.algo != "grpo"
         else None
     )
+    minibatch = compile_minibatch(args, prior, critic_opt) if args.compile else None
     rollout = Rollout(policy, args.envs, device, graph=not args.no_graph)
     curriculum = None
     if args.ued != "off":
@@ -945,6 +1012,22 @@ def main(argv=None) -> int:
                     # thirty-six further updates of garbage, and nothing in the
                     # metrics to say why. A one-sample minibatch teaches
                     # nothing anyway.
+                    continue
+                if minibatch is not None:
+                    loss, pg, v_loss, ent, ratio_log, ratio = minibatch(
+                        policy, flat, idx, b_masks, b_actions, b_logp, b_adv, b_ret, b_val
+                    )
+                    optimizer.zero_grad(set_to_none=True)
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(policy.parameters(), args.max_grad_norm)
+                    optimizer.step()
+                    with torch.no_grad():
+                        stats["pg"].append(pg.detach())
+                        stats["v"].append(v_loss.detach())
+                        stats["ent"].append(ent.detach())
+                        stats["kl"].append(((ratio - 1) - ratio_log).mean())
+                        stats["clipfrac"].append(((ratio - 1).abs() > args.clip).float().mean())
+                        stats["prior_kl"].append(torch.zeros((), device=device))
                     continue
                 f = features(policy, {k: v[idx] for k, v in flat.items()})
                 logp, entropy = policy.evaluate(f, b_masks[idx], b_actions[idx])
