@@ -15,6 +15,14 @@ A request abandoned for taking too long still runs to completion on the
 provider's side and is still billed, so its worst case stays reserved until
 its reply turns up, and a reply that never turns up keeps it reserved for the
 rest of the run.
+
+Holds live in the ledger file, not in the process, so runs sharing a ledger see
+each other's: sixteen runs at once must not each believe the room left is
+theirs. A run refreshes its holds while it is alive; the holds of a run that
+has not refreshed for `STALE_S` are treated as gone, so a crash cannot pin the
+budget. A run that exits with requests still unanswered books their worst case
+as spent, because the provider may yet bill them and nothing will be left to
+record it: the cap errs towards stopping early, never towards overshooting.
 """
 
 from __future__ import annotations
@@ -26,6 +34,8 @@ from pathlib import Path
 
 #: Pessimistic characters per token for sizing a prompt before it is sent.
 CHARS_PER_TOKEN = 3.0
+#: Seconds after which a run's unrefreshed holds are taken to be abandoned.
+STALE_S = 600.0
 
 
 class SpendCapError(RuntimeError):
@@ -85,22 +95,80 @@ class SpendLedger:
     def total(self) -> float:
         return float(self._read().get("total_usd", 0.0))
 
-    def allows(self, reserved_usd: float) -> bool:
-        """Whether spend so far plus `reserved_usd` stays within the cap."""
-        return self.total + reserved_usd <= self.cap_usd
+    def held(self, data: dict | None = None) -> float:
+        """Worst cases held by every live run sharing this ledger."""
+        data = self._read() if data is None else data
+        now = time.time()
+        return sum(
+            float(h.get("usd", 0.0))
+            for h in (data.get("held") or {}).values()
+            if now - float(h.get("t", 0.0)) <= STALE_S
+        )
 
-    def charge(self, usage: dict | None) -> float:
-        """Add a reply's cost to the ledger; returns what it cost."""
-        amount = self.cost(usage)
-        if amount <= 0:
-            return 0.0
+    def allows(self, new_usd: float, own_local: float = 0.0) -> bool:
+        """Whether spend, every live run's holds and `new_usd` stay within the cap.
+
+        `own_local` is held by the caller but not yet written to the ledger; the
+        caller's written holds are already counted."""
+        data = self._read()
+        spent = float(data.get("total_usd", 0.0))
+        return spent + self.held(data) + own_local + new_usd <= self.cap_usd
+
+    def reserve(self, key: str, amount: float) -> None:
+        """Hold `amount` for run `key` against every run's view of the cap."""
         with self._locked():
             data = self._read()
-            data["total_usd"] = float(data.get("total_usd", 0.0)) + amount
-            data["calls"] = int(data.get("calls", 0)) + 1
+            held = data.setdefault("held", {})
+            h = held.get(key) or {"usd": 0.0}
+            held[key] = {"usd": float(h["usd"]) + amount, "t": time.time()}
+            self._write(data)
+
+    def settle(self, key: str, release: float, usage: dict | None) -> float:
+        """Release a reply's hold and charge what it cost, in one write.
+
+        Returns what it cost."""
+        amount = self.cost(usage)
+        with self._locked():
+            data = self._read()
+            held = data.setdefault("held", {})
+            if key in held:
+                usd = max(0.0, float(held[key].get("usd", 0.0)) - release)
+                held[key] = {"usd": usd, "t": time.time()}
+            if amount > 0:
+                data["total_usd"] = float(data.get("total_usd", 0.0)) + amount
+                data["calls"] = int(data.get("calls", 0)) + 1
             data["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
             self._write(data)
         return amount
+
+    def heartbeat(self, key: str) -> None:
+        """Keep run `key`'s holds live."""
+        with self._locked():
+            data = self._read()
+            held = data.get("held") or {}
+            if key in held:
+                held[key]["t"] = time.time()
+                self._write(data)
+
+    def close(self, key: str) -> float:
+        """Book run `key`'s remaining holds as spent and drop them; returns the amount.
+
+        Called on exit: a request still unanswered may yet be billed, and once
+        this process is gone nothing will record it."""
+        with self._locked():
+            data = self._read()
+            held = data.get("held") or {}
+            h = held.pop(key, None)
+            amount = float(h.get("usd", 0.0)) if h else 0.0
+            if amount > 0:
+                data["total_usd"] = float(data.get("total_usd", 0.0)) + amount
+                data["unconfirmed_usd"] = float(data.get("unconfirmed_usd", 0.0)) + amount
+            self._write(data)
+        return amount
+
+    def charge(self, usage: dict | None) -> float:
+        """Add a reply's cost to the ledger, holding nothing; returns what it cost."""
+        return self.settle("", 0.0, usage)
 
     # --- files ---
 

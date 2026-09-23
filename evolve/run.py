@@ -57,7 +57,13 @@ from pathlib import Path
 from evolve import mutate, sandbox
 from evolve.archive import FACTORY_SIM, Candidate, Islands, Store, write_manifest
 from evolve.llm import extract_code
-from evolve.seeds.builder import SOURCE
+from evolve.seeds import builder as _builder_seed
+from evolve.seeds import trivial as _trivial_seed
+
+#: Seed programs by name. `builder` is the scripted expert rewritten against
+#: `World`; `trivial` waits and builds nothing, the counterpart of PPO from scratch.
+SEEDS = {"builder": _builder_seed.SOURCE, "trivial": _trivial_seed.SOURCE}
+SOURCE = SEEDS["builder"]
 
 log = logging.getLogger("evolve.run")
 
@@ -107,6 +113,8 @@ class Config:
     request_timeout: float = 600.0
     #: Seconds between writes of `state.json` and `status.json`.
     status_every_s: float = 30.0
+    #: Which of `SEEDS` the population starts from.
+    seed_program: str = "builder"
 
 
 def _now_iso() -> str:
@@ -146,6 +154,10 @@ def scores_from(result: dict) -> tuple[dict, dict | None]:
         "val_mean": float(result.get("val_mean", _mean(val)) or 0.0),
         "traces": {k: [str(x) for x in v] for k, v in (traces or {}).items()},
     }
+    n = result.get("n")
+    # Simulator episodes this evaluation ran: the interaction budget a matched
+    # comparison against PPO counts. A stage-1 rejection reports only what it ran.
+    scores["episodes"] = int(sum(n.values()) if isinstance(n, dict) else (n or 0))
     if result.get("error"):
         scores["error"] = str(result["error"])
     return scores, result.get("descriptors")
@@ -246,6 +258,9 @@ class Evolution:
         self.run_spent_usd = 0.0
         self._worst: dict[int, float] = {}  # worst-case cost held per unanswered request
         self._capped = False
+        self.unconfirmed_usd = 0.0
+        #: This process's name in the shared ledger's holds.
+        self._ledger_key = f"{config.name}:{os.getpid()}"
         self.client = client
         self.evaluator = evaluator
         self.store = store
@@ -405,6 +420,7 @@ class Evolution:
             "max_usd": self.ledger.cap_usd if self.ledger else None,
             "held_usd": round(sum(self._worst.values()), 6),
             "spend_capped": self._capped,
+            "unconfirmed_usd": round(self.unconfirmed_usd, 6),
         }
 
     def save(self) -> None:
@@ -443,15 +459,16 @@ class Evolution:
     # --- seeding ---
 
     def seed(self) -> Candidate | None:
-        """Evaluate `SOURCE` and put it on every island, unless the run has begun."""
+        """Evaluate the seed program and put it on every island, unless the run has begun."""
+        source = SEEDS[self.config.seed_program]
         if self.store.count() > 0:
             log.info("resuming: %d candidates in the genealogy", self.store.count())
             return None
         t0 = time.perf_counter()
-        scores, desc = scores_from(self.evaluator.full(SOURCE))
+        scores, desc = scores_from(self.evaluator.full(source))
         c = Candidate.new(
-            SOURCE,
-            code_hash=sandbox.normalized_hash(SOURCE),
+            source,
+            code_hash=sandbox.normalized_hash(source),
             operator="seed",
             island=0,
             scores=scores,
@@ -640,7 +657,7 @@ class Evolution:
                 return
             if self.ledger is not None:
                 worst = self.ledger.worst(job.messages, self.config.max_tokens)
-                if not self.ledger.allows(sum(self._worst.values()) + worst):
+                if not self.ledger.allows(worst):
                     self._capped = True
                     log.warning(
                         "spend cap reached: $%.4f spent, $%.4f held for %d unanswered; "
@@ -655,6 +672,7 @@ class Evolution:
             self._issued += 1
             if self.ledger is not None:
                 self._worst[token] = worst
+                self.ledger.reserve(self._ledger_key, worst)
             self._in_flight[token] = _Flight(job, time.monotonic() + self.config.request_timeout)
             threading.Thread(
                 target=self._request,
@@ -667,12 +685,13 @@ class Evolution:
         """Bill a reply against the cap and release what was held for it.
 
         A late reply to an abandoned request is billed too: the provider ran it."""
-        self._worst.pop(token, None)
-        if self.ledger is None or isinstance(res, BaseException):
-            # An error reply is released: a refused or failed request is not billed
-            # for output. Its prompt may be, but that is far below what was held.
+        held = self._worst.pop(token, 0.0)
+        if self.ledger is None:
             return
-        self.run_spent_usd += self.ledger.charge(getattr(res, "usage", None))
+        # An error reply is released and charged nothing: a refused or failed
+        # request is not billed for output, and its prompt is far below what was held.
+        usage = None if isinstance(res, BaseException) else getattr(res, "usage", None)
+        self.run_spent_usd += self.ledger.settle(self._ledger_key, held, usage)
 
     def _accept(self, item) -> None:
         """Move one posted reply from in flight to the scoring queue, or drop a late one."""
@@ -718,6 +737,8 @@ class Evolution:
             log.info("migrated after %d replies", replies)
 
     def _checkpoint(self) -> None:
+        if self.ledger is not None:
+            self.ledger.heartbeat(self._ledger_key)
         self.save()
         st = self.status()
         log.info(
@@ -778,6 +799,12 @@ class Evolution:
             # dropped here and cannot hold up the process's exit.
             self._abandoned.update(self._in_flight)
             self._in_flight.clear()
+            if self.ledger is not None:
+                # Unanswered requests may still be billed, and once this process is
+                # gone nothing will record them: book their worst case as spent.
+                self.unconfirmed_usd = self.ledger.close(self._ledger_key)
+                self.run_spent_usd += self.unconfirmed_usd
+                self._worst.clear()
             if self.stopped == "running":
                 self.stopped = "failed"
             self._checkpoint()
@@ -840,6 +867,13 @@ def build_parser() -> argparse.ArgumentParser:
         "sets how many requests fit in a minute; measured outputs ran 1.7k-4.2k tokens",
     )
     p.add_argument("--no-game-notes", action="store_true")
+    p.add_argument(
+        "--seed-program",
+        choices=tuple(SEEDS),
+        default="builder",
+        help="the program the population starts from: the scripted builder, or a "
+        "trivial one that builds nothing (the counterpart of PPO from scratch)",
+    )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument(
         "--migrate-every", type=int, default=200, help="model replies between migrations"
@@ -881,6 +915,7 @@ def config_from_args(args) -> Config:
         max_tokens=args.max_tokens,
         game_notes=not args.no_game_notes,
         seed=args.seed,
+        seed_program=args.seed_program,
         migrate_every=args.migrate_every,
         request_timeout=args.request_timeout,
     )
@@ -900,7 +935,7 @@ def dry_run(config: Config, run_dir: Path, api_reference: str, out=None) -> list
         store.close()
     else:
         islands = Islands(config.islands, config.island_size, config.seed)
-        seed = Candidate.new(SOURCE, operator="seed")
+        seed = Candidate.new(SEEDS[config.seed_program], operator="seed")
         for i in range(islands.n):
             islands.admit(replace(seed, island=i))
 

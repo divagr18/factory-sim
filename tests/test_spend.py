@@ -137,3 +137,48 @@ def test_the_lower_of_config_and_flag_wins(tmp_path):
     provider = types.SimpleNamespace(max_usd=5.0, price=PRICE, ledger_path=str(tmp_path / "l"))
     args = types.SimpleNamespace(no_spend_cap=False, max_usd=2.0)
     assert evo_run.spend_ledger(provider, args).cap_usd == 2.0
+
+
+def test_holds_are_shared_between_runs_on_one_ledger(tmp_path):
+    """Sixteen runs at once must not each believe the room left is theirs."""
+    path = tmp_path / "shared.json"
+    a = SpendLedger(path, PRICE, 1.0)
+    b = SpendLedger(path, PRICE, 1.0)
+    a.reserve("run-a", 0.7)
+    assert not b.allows(0.4)  # 0.7 held by a, so b cannot take 0.4
+    assert b.allows(0.3)
+    a.settle("run-a", 0.7, usage(1_000_000, 1_000_000))  # costs 0.30, releases 0.70
+    assert a.total == pytest.approx(0.30)
+    assert b.allows(0.7) and not b.allows(0.71)
+
+
+def test_a_crashed_runs_holds_go_stale(tmp_path, monkeypatch):
+    import evolve.spend as spend
+
+    path = tmp_path / "l.json"
+    a = SpendLedger(path, PRICE, 1.0)
+    a.reserve("dead-run", 0.9)
+    assert not a.allows(0.2)
+    real = spend.time.time
+    monkeypatch.setattr(spend.time, "time", lambda: real() + spend.STALE_S + 1)
+    assert a.allows(0.2)
+
+
+def test_exit_books_unanswered_holds_as_spent(tmp_path):
+    ledger = SpendLedger(tmp_path / "l.json", PRICE, 5.0)
+    ledger.reserve("r", 0.25)
+    assert ledger.close("r") == pytest.approx(0.25)
+    assert ledger.total == pytest.approx(0.25)
+    assert ledger.held() == 0.0
+
+
+def test_the_trivial_seed_passes_the_sandbox_and_builds_nothing():
+    from evolve import sandbox
+    from evolve.seeds.trivial import SOURCE
+    from fsim import scenes
+    from fsim.program_api import run_episode
+
+    sandbox.check(SOURCE)
+    _, scene = scenes.sample("construct_smelting_line", "train", 0)
+    result = run_episode(sandbox.load(SOURCE), scene)
+    assert not result.success and result.built == [] and result.error is None
