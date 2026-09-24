@@ -1,0 +1,30 @@
+# Evaluate a model on factorio-build against a running inference server:
+#
+#   uv run inference --vllm.model /root/models/sft            # GPU 0
+#   uv run eval @ eval.toml --model /root/models/sft          # other terminal
+#
+# Switch split to "holdout" only for final numbers. Results land in
+# outputs/<env>--<model>--<hash>/logs/attempt_1/eval.log and monitors/file/metrics.jsonl.
+
+model = "Qwen/Qwen3.5-9B"
+num_examples = 16
+group_size = 4
+
+[client]
+base_url = "http://localhost:8000/v1"
+
+[sampling]
+max_completion_tokens = 12288
+temperature = 0.6
+# Qwen3.5 4B/9B default to thinking; the eval path needs it off explicitly.
+extra_body = { chat_template_kwargs = { enable_thinking = false } }
+
+[[source]]
+name = "factorio-build"
+env.taskset.id = "factorio-build"
+env.taskset.split = "val"
+env.taskset.n_scenes = 8
+env.taskset.num_examples = 16
+env.taskset.task.workers = 4
+env.agent.harness.id = "null"
+env.agent.runtime.type = "subprocess"

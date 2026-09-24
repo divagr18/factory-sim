@@ -1,0 +1,70 @@
+# GRPO on factorio-build: Qwen3.5-9B after an SFT warm start, LoRA, 2 GPUs
+# (1 inference + 1 trainer). ~2.5 min/step on 2x A100 80GB.
+#
+#   FACTORIO_BUILD_MAX_POOLS=7 uv run rl @ rl.toml --model.name /root/models/sft
+
+max_steps = 60
+seq_len = 14336          # ~1.3k prompt + up to 12k completion
+
+[deployment]
+num_train_gpus = 1
+num_infer_gpus = 1
+
+[model]
+name = "/root/models/sft"
+
+[trainer.optim]
+lr = 2e-5
+weight_decay = 0.0
+
+[trainer.model.lora]
+rank = 16
+alpha = 32
+dropout = 0.0
+# Qwen3.5 mixes full attention (q/k/v/o) with Gated DeltaNet layers (in_proj_*, out_proj).
+target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj", "in_proj_qkv", "in_proj_z", "out_proj"]
+
+[trainer.model.ac]
+freq = 1                 # peak 41.6 GiB; checkpointing fewer layers risks OOM at 14k tokens
+
+[orchestrator]
+batch_size = 128
+group_size = 16
+
+[orchestrator.model.lora]
+
+# A local model path misses the renderer lookup, so name it; thinking off keeps
+# rollouts short and matches the SFT data.
+[orchestrator.renderer]
+name = "qwen3.5"
+enable_thinking = false
+
+[orchestrator.train.sampling]
+max_completion_tokens = 12288
+temperature = 0.7
+
+# Without this the orchestrator sizes concurrency for the model's 262k context
+# and starts at 5 episodes in flight. Real episodes are ~4k tokens.
+[orchestrator.concurrency]
+initial_inflight = 256
+min_inflight = 128
+max_inflight = 256
+
+[[orchestrator.train.source]]
+name = "factorio-build"
+curriculum = { gates = { zero_advantage = { type = "advantage_range" } } }
+env.taskset.id = "factorio-build"
+env.taskset.split = "train"
+env.taskset.n_scenes = 8
+env.taskset.num_examples = 512
+# Scenes per program run on `workers` processes; FACTORIO_BUILD_MAX_POOLS sets
+# how many programs score at once. 4 x 7 fills ~30 cores.
+env.taskset.task.workers = 4
+env.agent.harness.id = "null"
+env.agent.runtime.type = "subprocess"
+
+[ckpt]
+interval = 20
+
+# Present so `rl` starts vLLM itself (with LoRA enabled).
+[inference]
