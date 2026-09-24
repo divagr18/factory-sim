@@ -10,8 +10,9 @@ later: nothing it reads exists only in the simulator.
 An intent the action space cannot express -- a tile outside the placement
 window, an item not held, an entity row that is not there -- is refused before
 it reaches the simulator. It costs no decision and is counted in
-`world.refusals`. Legality is `fsim_rl_decode`'s, the check the environment
-itself runs, so a legal intent here is never a decode failure there. An intent
+`world.refusals`. Legality is the backend's own check -- `fsim_rl_decode` in the
+simulator, the action mask and decoder on the engine -- so a legal intent here
+is never a decode failure there. An intent
 that decodes but that the game then refuses (a drill onto a tile something
 else covers) does cost its decision, as it would for a policy; `last_refused()`
 reports it.
@@ -19,6 +20,11 @@ reports it.
 The evaluator side of an episode (success, the verified output, when the first
 plate appeared, how far the character walked) may read simulator internals.
 The program never can: it holds only a `World`.
+
+`World` talks to a backend: `SimBackend` here, or anything with the same five
+members (`obs`, `steps_left`, `done`, `legal`, `step`, plus `plate_tick` and
+`finish` for the evaluator). FactorioGym's `tools/program_transfer.py` supplies
+one over the real game, and `play` runs a program on either.
 """
 
 from __future__ import annotations
@@ -33,7 +39,15 @@ from fsim import ffi, lib
 from fsim.obsview import FACINGS, ITEMS, Entity, ObsView
 from fsim.rl import RlEnv
 
-__all__ = ["BudgetExhausted", "Entity", "EpisodeResult", "World", "run_episode"]
+__all__ = [
+    "BudgetExhausted",
+    "Entity",
+    "EpisodeResult",
+    "SimBackend",
+    "World",
+    "play",
+    "run_episode",
+]
 
 TILE = 256
 PLACEMENT_RADIUS = 5
@@ -120,17 +134,71 @@ class EpisodeResult:
     failures: int = 0  # legal actions the game refused (these did spend a decision)
 
 
+class SimBackend:
+    """A reset `RlEnv` under v2, as `World` drives it: the published observation,
+    `fsim_rl_decode` for legality, and one `fsim_rl_step` per decision."""
+
+    def __init__(self, env: RlEnv) -> None:
+        self.env = env
+        self.rl = env.rl
+        self._action = ffi.new("fsim_action *")
+        self._vector = ffi.new("int32_t[6]")
+        self._baseline_plates = self.rl.env.produced[lib.IT_IRON_PLATE]
+
+    @property
+    def obs(self) -> dict:
+        return self.env.obs
+
+    @property
+    def done(self) -> bool:
+        return bool(self.rl.done)
+
+    def steps_left(self) -> int:
+        return self.rl.task.max_steps - self.rl.steps
+
+    def legal(self, vector) -> bool:
+        for i in range(6):
+            self._vector[i] = vector[i]
+        return vector[0] == OP_WAIT or not lib.fsim_rl_decode(self.rl, self._vector, self._action)
+
+    def step(self, vector) -> float:
+        """One decision; returns the tiles the character moved."""
+        for i in range(6):
+            self._vector[i] = vector[i]
+        env = self.rl.env
+        before = env.char_pos.x, env.char_pos.y
+        lib.fsim_rl_step(self.rl, self._vector)
+        lib.fsim_rl_encode(self.rl, self.env.obs_c)
+        return math.hypot(env.char_pos.x - before[0], env.char_pos.y - before[1]) / TILE
+
+    def plate_tick(self) -> int | None:
+        env = self.rl.env
+        if env.produced[lib.IT_IRON_PLATE] > self._baseline_plates:
+            return int(env.tick)
+        return None
+
+    def finish(self, on_step) -> tuple[bool, int]:
+        """Wait out the episode -- without encoding observations -- so the task's
+        verification window runs; `on_step` after each wait."""
+        wait = ffi.new("int32_t[6]", list(WAIT))
+        for _ in range(self.rl.task.max_steps + 1):
+            if self.rl.done:
+                break
+            lib.fsim_rl_step(self.rl, wait)
+            on_step()
+        return bool(self.rl.success), int(self.rl.verified_output)
+
+
 class World:
     """What a builder program holds: observation queries and one-decision actions."""
 
-    def __init__(self, env: RlEnv, decision_budget: int = 600) -> None:
-        self._env = env
-        self._rl = env.rl
+    def __init__(self, env, decision_budget: int = 600) -> None:
+        """`env` is a reset `RlEnv`, or any backend with `SimBackend`'s members."""
+        self._backend = env if hasattr(env, "legal") else SimBackend(env)
+        if isinstance(self._backend, SimBackend):
+            self._env, self._rl = self._backend.env, self._backend.rl
         self._budget = decision_budget
         self._view: ObsView | None = None
-        self._action = ffi.new("fsim_action *")
-        self._vector = ffi.new("int32_t[6]")
-        self._baseline_plates = self._rl.env.produced[lib.IT_IRON_PLATE]
         self.decisions = 0
         self.refusals = 0
         self.failures = 0
@@ -143,7 +211,7 @@ class World:
 
     def _obs(self) -> ObsView:
         if self._view is None:
-            self._view = ObsView(self._env.obs)
+            self._view = ObsView(self._backend.obs)
         return self._view
 
     def me(self) -> tuple[float, float]:
@@ -180,7 +248,7 @@ class World:
         return self._obs().patch()
 
     def decisions_left(self) -> int:
-        return max(0, min(self._budget - self.decisions, self._rl.task.max_steps - self._rl.steps))
+        return max(0, min(self._budget - self.decisions, self._backend.steps_left()))
 
     def last_refused(self) -> bool:
         """Whether the game refused the last action (a legal intent that failed)."""
@@ -283,21 +351,13 @@ class World:
         return False
 
     def _act(self, intent: str, vector, illegal: str = "illegal") -> bool:
-        if self.decisions_left() <= 0 or self._rl.done:
+        if self.decisions_left() <= 0 or self._backend.done:
             raise BudgetExhausted(f"no decisions left ({self.decisions} spent)")
-        for i in range(6):
-            self._vector[i] = vector[i]
-        if vector[0] != OP_WAIT and lib.fsim_rl_decode(self._rl, self._vector, self._action):
+        if not self._backend.legal(vector):
             return self._refuse(intent, illegal)
-        before = self._rl.env.char_pos.x, self._rl.env.char_pos.y
-        lib.fsim_rl_step(self._rl, self._vector)
-        lib.fsim_rl_encode(self._rl, self._env.obs_c)
+        self.walk_distance += self._backend.step(vector)
         self._view = None
         self.decisions += 1
-        env = self._rl.env
-        self.walk_distance += (
-            math.hypot(env.char_pos.x - before[0], env.char_pos.y - before[1]) / TILE
-        )
         self._note_plate()
         failed = self.last_refused() and vector[0] != OP_WAIT
         self.failures += failed
@@ -305,12 +365,8 @@ class World:
         return True
 
     def _note_plate(self) -> None:
-        env = self._rl.env
-        if (
-            self._first_plate_tick is None
-            and env.produced[lib.IT_IRON_PLATE] > self._baseline_plates
-        ):
-            self._first_plate_tick = int(env.tick)
+        if self._first_plate_tick is None:
+            self._first_plate_tick = self._backend.plate_tick()
 
 
 def _whole(v) -> int | None:
@@ -349,10 +405,16 @@ def run_episode(
     """
     env = env if env is not None else RlEnv()
     env.reset(task, scene, action_space="v2")
-    rl = env.rl
-    if rl.task.action_space != lib.ACTION_SPACE_V2:
+    if env.rl.task.action_space != lib.ACTION_SPACE_V2:
         raise RuntimeError("the environment did not reset into the v2 action space")
-    world = World(env, decision_budget)
+    return play(build, SimBackend(env), decision_budget=decision_budget, time_limit_s=time_limit_s)
+
+
+def play(
+    build, backend, *, decision_budget: int = 600, time_limit_s: float | None = None
+) -> EpisodeResult:
+    """Run `build(world)` on a reset backend, then wait out the episode and score it."""
+    world = World(backend, decision_budget)
     error = None
     try:
         with _Watchdog(time_limit_s):
@@ -363,15 +425,10 @@ def run_episode(
         pass
     except Exception as exc:  # the program's own bug: recorded, and the episode still ends
         error = f"{type(exc).__name__}: {exc}"
-    wait = ffi.new("int32_t[6]", list(WAIT))
-    for _ in range(rl.task.max_steps + 1):
-        if rl.done:
-            break
-        lib.fsim_rl_step(rl, wait)
-        world._note_plate()
+    success, verified_output = backend.finish(world._note_plate)
     return EpisodeResult(
-        success=bool(rl.success),
-        verified_output=int(rl.verified_output),
+        success=success,
+        verified_output=verified_output,
         decisions=world.decisions,
         refusals=world.refusals,
         first_plate_tick=world._first_plate_tick,
