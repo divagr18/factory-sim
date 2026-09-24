@@ -264,6 +264,7 @@ class Rigs:
             "coal": fuel.count if fuel.count and fuel.item == ITEM_IDS["coal"] else 0,
             "wood": fuel.count if fuel.count and fuel.item == ITEM_IDS["wood"] else 0,
             "status": STATUS_NAME[s.status],
+            **({"_hand_y_unknown": True} if s.lift < 0 else {}),
         }
 
     def fur(self, index: int) -> dict:
@@ -291,7 +292,27 @@ class Rigs:
 
     def sample(self) -> dict:
         P = self.P
+        ore, plate = "iron-ore", "iron-plate"
         out = {
+            "bend_belt": self.lanes(P["bend_belt"]),
+            "bend": self.ins(P["bend_ins"]),
+            "bend_furnace": self.fur(P["bend_furnace"]),
+            "flow_belt": self.lanes(P["flow_belt"][5:11]),
+            "flow": self.ins(P["flow_ins"]),
+            "flow_chest": self.box(P["flow_chest"], plate),
+            "flow2_belt": self.lanes(P["flow2_belt"][5:11]),
+            "flow2": self.ins(P["flow2_ins"]),
+            "flow2_chest": self.box(P["flow2_chest"], plate),
+            "same": {
+                "drill": self.drill(P["same_drill"]),
+                "belt": self.lanes(P["same_belt"]),
+                "ins": self.ins(P["same_ins"]),
+                "chest": self.box(P["same_chest"], ore),
+            },
+            "tick_drill": self.drill(P["tick_drill"]),
+            "tick_belt": self.lanes(P["tick_belt"]),
+            "tick_ins": self.ins(P["tick_ins"]),
+            "tick_chest": self.box(P["tick_chest"], ore),
             "straight": self.lanes(P["straight"]),
             "curve": self.lanes(P["curve"]),
             "side_main": self.lanes(P["side_main"]),

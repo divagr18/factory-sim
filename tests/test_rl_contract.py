@@ -48,10 +48,11 @@ def check(record, env) -> str | None:
     return None
 
 
-#: Traces that reach the engine's chase of moving belt items (not modelled; see
-#: tests/test_parity.py): the decision whose tensors first differ, all earlier
-#: ones matching.
-KNOWN_GAPS = {"logistics_belt_pickup": 7, "logistics_smelting_chain": 16}
+#: Traces whose tensors are known to depart from the engine: the decision whose
+#: tensors first differ, all earlier ones matching. None since inserters chase
+#: belt items (fsim.c, inserter_chase); logistics_smelting_chain's remaining
+#: gap (tests/test_parity.py) is in state the tensors do not carry.
+KNOWN_GAPS: dict[str, int] = {}
 
 
 @pytest.mark.parametrize("name", SCENARIOS)

@@ -207,7 +207,21 @@ typedef struct {
     fsim_stack chest[16];         /* FSIM_CHEST_SLOTS */
     /* inserter */
     int32_t phase;                /* INS_* */
-    double swing;                 /* ticks of the current move done; fractional after a short tick */
+    double swing;                 /* ticks of the current move done */
+    /* The arm (fsim.c, arm_step): orientation, turns clockwise from north in
+     * [0, 1), kept in single precision as the engine keeps it, and length in
+     * tiles. While the hand rests on its target, the target's offset from the
+     * inserter (1/256 tile) is where it is drawn. */
+    float arm_w;
+    double arm_len;
+    int32_t arm_at;
+    double arm_vx, arm_vy;
+    int32_t chase_id;             /* the belt item it is chasing, or 0 */
+    int32_t lift;                 /* the drawn lift in use: 0 none, 1 a swing, 2 to itself, -1 unknown */
+    int32_t lift_step;            /* ticks into that move */
+    int32_t hand_x, hand_y;       /* held_stack_position less the position, 1/256 */
+    int32_t belt_asleep;          /* asleep on its pickup belt's line (rule 6) */
+    int64_t woke_tick;            /* the tick an item on that line woke it */
     /* belt */
     fsim_lane lanes[2];           /* lane 1 (left of travel), lane 2 */
     /* Derived from the neighbours, rebuilt whenever entities change
@@ -219,6 +233,12 @@ typedef struct {
     int32_t lane_entry[2];        /* ...at this position on that lane */
     int32_t pickup_target;        /* inserter: entity at its pickup point, or -1 */
     int32_t drop_target;          /* ...and at its drop point */
+    /* inserter: 0 while in the update list; else when it fell asleep, waiting
+     * on a machine, until that machine's contents change (fsim.c, wake) */
+    int64_t sleep_seq;
+    /* drill: its drop belt's links when its output was refused (fsim.c,
+     * drill_block_signature) */
+    int32_t block_sig;
 } fsim_entity;
 
 typedef struct {
@@ -280,7 +300,8 @@ typedef struct {
     fsim_pos pos;
     int32_t has_dir;
     int32_t direction;
-    fsim_stack contents;  /* the one item a record of these kinds can hold */
+    fsim_stack contents;  /* a pile's or a furnace's one stack; a chest's first item */
+    uint16_t amounts[16]; /* IT_COUNT: a chest's whole contents, item by item */
     int64_t last_seen;
 } fsim_memory;
 
@@ -397,11 +418,15 @@ typedef struct {
      * moves past `logistics_version` (fsim.c, rebuild_logistics). */
     int32_t logistics_version;
     int32_t inserter_count;
-    int32_t inserters[512];     /* entity indices, in creation order */
+    int32_t inserters[512];     /* the inserters awake, run last first (fsim.c, update_world) */
+    int64_t sleep_counter;
+    int32_t sleeper_count;      /* inserters asleep */
     int32_t chain_count;
     int32_t chain_first[1024];  /* FSIM_MAX_LANES: a chain's first lane in chain_lanes */
     int32_t chain_size[1024];   /* its lanes; negative for a closed loop */
     int32_t chain_lanes[1024];  /* lane refs, each chain front (downstream) first */
+    int32_t lane_chain[1024];   /* the chain a lane ref is in, or -1 */
+    int32_t belt_sleepers;      /* inserters asleep on a belt line */
     int32_t next_item_id;
 } fsim_env;
 
@@ -466,6 +491,18 @@ int32_t fsim_entity_insert(fsim_env *env, int32_t index, int32_t item, int32_t c
 int32_t fsim_belt_insert(fsim_env *env, int32_t index, int32_t lane, int32_t position,
                          int32_t item);
 int32_t fsim_belt_insert_back(fsim_env *env, int32_t index, int32_t lane, int32_t item);
+/* LuaEntity.remove_item on a chest (slot 1 first); returns what came out. */
+int32_t fsim_entity_remove(fsim_env *env, int32_t index, int32_t item, int32_t count);
+/* Put inserter `index` `step` ticks into move `phase` (INS_*) from where that
+ * move starts, as a hidden-state load reads it off the drawn hand. */
+void fsim_inserter_set(fsim_env *env, int32_t index, int32_t phase, int32_t step);
+/* LuaEntity.held_stack.set_stack on inserter `index`: `item` in its hand. */
+void fsim_inserter_hold(fsim_env *env, int32_t index, int32_t item);
+/* A script changed entity `index`'s contents directly: what the engine
+ * notifies (waiting inserters, blocked drills) is told. */
+void fsim_script_touched(fsim_env *env, int32_t index);
+/* LuaEntity.destroy on the item pile `index`. */
+void fsim_remove_pile(fsim_env *env, int32_t index);
 /* Bring belt shapes and links and inserter targets up to date with the
  * entities; ticks do this themselves, a render between them calls it. */
 void fsim_refresh(fsim_env *env);

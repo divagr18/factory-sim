@@ -446,6 +446,10 @@ static void rl_encode_into(fsim_rl *rl, rl_fields *obs) {
             working_known = 0;
             working = 0;
             contents = m->contents.count;
+            if (m->kind == K_CHEST) {
+                contents = 0;
+                for (int32_t it = 0; it < IT_COUNT; it++) contents += m->amounts[it];
+            }
             age = (double)(env->tick - m->last_seen);
         }
         f[0] = (float)rl_clip((px - ox) / RL_RADIUS, -1.0, 1.0);

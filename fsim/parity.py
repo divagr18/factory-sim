@@ -15,7 +15,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from fsim import Sim
-from fsim.trace import Normaliser, comparable_hidden, first_difference, read_trace
+from fsim.trace import (
+    Normaliser,
+    comparable_hidden,
+    first_difference,
+    read_trace,
+    relax_hand_y,
+)
 
 GOLDEN = Path(__file__).resolve().parents[1] / "tests" / "golden"
 
@@ -155,6 +161,8 @@ def _relax(record: dict, tiles: dict) -> dict:
 def compare(expected: dict, actual: dict, parts=PARTS) -> tuple[str, str] | None:
     tiles = _footprint_totals(expected)
     expected, actual = _relax(expected, tiles), _relax(actual, tiles)
+    if "hidden" in actual and "hidden" in expected:
+        actual = {**actual, "hidden": relax_hand_y(expected["hidden"], actual["hidden"])}
     for part in parts:
         found = first_difference(expected[part], actual[part])
         if found:
@@ -205,7 +213,8 @@ def tick_run(name: str) -> Divergence | None:
         return normaliser.hidden(raw)
 
     def check(index):
-        found = first_difference(comparable_hidden(rows[index]), comparable_hidden(hidden()))
+        ours = relax_hand_y(rows[index], hidden())
+        found = first_difference(comparable_hidden(rows[index]), comparable_hidden(ours))
         return Divergence(index, "hidden", found) if found else None
 
     bad = check(0)

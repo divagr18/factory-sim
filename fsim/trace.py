@@ -208,6 +208,43 @@ def first_difference(a, b, path: str = "") -> str | None:
     return None if a == b else f"{path}: {a!r} != {b!r}"
 
 
+def relax_hand_y(expected: dict, actual: dict) -> dict:
+    """`actual` with the drawn hand y of inserters the simulator marks as not
+    knowing it taken from `expected`, and the marks removed.
+
+    Declared relaxation (FactorioRL docs/sim-logistics.md, "Inserter belt
+    pickup", accepted 2026-09-24): the engine draws the hand lifted during a
+    swing, by an amount known only for swings that start from rest at the
+    pickup, the drop or the inserter's own fuel slot. For any other swing --
+    after taking an item off a belt, a chase that turns a return swing, a
+    tick short of energy -- the simulator draws x exactly and cannot draw y.
+    """
+    records = actual.get("entities")
+    if not isinstance(records, list) or not any(HAND_Y_KEY in r for r in records):
+        return actual
+    engine = {
+        (r.get("name"), tuple(r.get("position") or ())): r
+        for r in expected.get("entities") or []
+        if isinstance(r, dict)
+    }
+    out = dict(actual)
+    out["entities"] = []
+    for record in records:
+        if HAND_Y_KEY in record:
+            record = dict(record)
+            del record[HAND_Y_KEY]
+            other = engine.get((record.get("name"), tuple(record.get("position") or ())))
+            hand = record.get("held_stack_position")
+            theirs = (other or {}).get("held_stack_position")
+            if isinstance(hand, list) and isinstance(theirs, list) and len(theirs) == 2:
+                record["held_stack_position"] = [hand[0], theirs[1]]
+        out["entities"].append(record)
+    return out
+
+
+HAND_Y_KEY = "_hand_y_unknown"
+
+
 def comparable_hidden(hidden: dict) -> dict:
     """Hidden state without what a one-tick replay changes by construction."""
     body = {k: v for k, v in hidden.items() if k != "event_seq"}

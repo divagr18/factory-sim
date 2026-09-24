@@ -13,10 +13,11 @@ Doubles are compared to 1e-12 (see fsim/trace.py), and ore under a drill as a
 footprint total (see fsim/parity.py). Everything else is exact.
 
 Scenarios the index marks `"requires": "logistics"` run belts, inserters and
-chests. Each reaches a mechanic the simulator does not reproduce yet, so the
-strict tests skip them until it does, and `test_logistics_agree_until_known_gap`
-holds them to exact agreement up to that point and checks the first difference
-is the known one.
+chests. Those in `KNOWN_GAPS` reach a mechanic the simulator does not
+reproduce yet, so the strict tests skip them until it does, and
+`test_logistics_agree_until_known_gap` holds them to exact agreement up to
+that point and checks the first difference is the known one. The others are
+held to the strict tests like every other scenario.
 """
 
 from __future__ import annotations
@@ -38,26 +39,20 @@ LOGISTICS = {name for name, entry in INDEX.items() if entry.get("requires") == "
 #: (free-running and sync alike), the start of the differing path, the first
 #: differing tick of the per-tick trace, and why.
 KNOWN_GAPS = {
-    # A waiting inserter starts moving the tick after an ore lands anywhere on
-    # its pickup belt's line (t=243, four belts and a turn upstream): the
-    # engine's chase of moving belt items, not modelled (inserter_belt_pickup).
-    "logistics_smelting_chain": (9, ".remaining_burning_fuel", 244, "belt chase"),
-    "logistics_belt_pickup": (2, ".remaining_burning_fuel", 48, "belt chase"),
+    # The inserter at the end of the ore line comes back to rest at t=776 with
+    # an ore five belts upstream, and the engine lets it fall asleep (keeping
+    # 1,910 J) where the measured rule keeps it awake, refilled; it wakes when
+    # the ore crosses onto the belt before the turn (t=803). The same rest at
+    # t=536 stayed awake. What decides it is not found (inserter_chase).
+    "logistics_smelting_chain": (26, ".remaining_burning_fuel", 776, "belt-line sleep"),
     # Both feed lanes reach the main belt on the same tick for the first time
     # and the engine moves one of the two items 8/256 further (update_belts).
     "logistics_sideload_merge": (5, ".entities[8].lanes", 127, "first sideload arrival"),
-    # After a tick with less than a full tick's energy the hand is drawn part
-    # of a step on; the tick itself leaves 875/2^26 J in the buffer.
-    "logistics_inserter_fuel_exhaustion": (
-        19, ".entities[1].held_stack_position", 555, "part-energy tick"),
-    # A loaded turn rotated back to straight: its items are re-placed by a
-    # rule the simulator does not have (act_rotate).
-    "logistics_belt_rotate_and_mine": (22, ".entities[5].lanes", 631, "rotated loaded belt"),
 }  # fmt: skip
 
 
 def _strict(name: str) -> None:
-    if name in LOGISTICS:
+    if name in KNOWN_GAPS:
         pytest.skip(f"{name}: known gap, {KNOWN_GAPS[name][3]}")
 
 
@@ -108,8 +103,16 @@ def test_logistics_agree_until_known_gap(name):
     assert found is not None and found.decision == tick, found
 
 
-def test_every_logistics_scenario_has_a_known_gap():
-    assert set(KNOWN_GAPS) == LOGISTICS
+def test_known_gaps_are_logistics_scenarios():
+    # Agreeing exactly: logistics_belt_rotate_and_mine since loaded belts that
+    # change shape re-place their items (rebuild_logistics); logistics_belt_pickup
+    # and logistics_inserter_fuel_exhaustion since the arm model (arm_step,
+    # inserter_chase) -- the hand's y compared only where its lift is known
+    # (fsim.trace.relax_hand_y).
+    assert set(KNOWN_GAPS) <= LOGISTICS
+    assert LOGISTICS - set(KNOWN_GAPS) == {
+        "logistics_belt_rotate_and_mine", "logistics_belt_pickup",
+        "logistics_inserter_fuel_exhaustion"}  # fmt: skip
 
 
 @pytest.mark.parametrize("name", ["construct_smelting_line_reference", "masked_random_rollout"])

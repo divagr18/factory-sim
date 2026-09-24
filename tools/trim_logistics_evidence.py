@@ -21,14 +21,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEST = ROOT / "tests" / "golden" / "sim-mechanics-m4-logistics.json.xz"
 
-#: Rigs whose engine readings the simulator is held to. Left out: `bend`,
-#: `flow`, `flow2`, `same` and `tick_*`, where an inserter takes items still
-#: moving on a belt (not modelled; see inserter_belt_pickup in csrc/fsim.c).
+#: Rigs whose engine readings the simulator is held to: every rig of the probe.
 KEYS = (
     "straight", "curve", "side_main", "side_feed", "drill", "drill_belt", "c2c", "c2c_dst",
     "fout", "fout_furnace", "fout_belt", "fill_ore", "fill_ore_furnace", "fill_coal",
     "fill_coal_furnace", "fuel", "fuel_dst", "wood", "wood_dst", "self", "hot", "order_a",
-    "order_b", "drop1", "drop2", "drop3",
+    "order_b", "drop1", "drop2", "drop3", "bend_belt", "bend", "bend_furnace", "flow_belt",
+    "flow", "flow_chest", "flow2_belt", "flow2", "flow2_chest", "same", "tick_drill",
+    "tick_belt", "tick_ins", "tick_chest",
 ) + tuple(f"phase{i}" for i in range(1, 17))  # fmt: skip
 
 

@@ -349,19 +349,23 @@ def _face(offset: tuple[int, int], lift: int, direction: int) -> tuple[int, int]
     return x, y - lift
 
 
-def _load_hand(e, record: dict) -> None:
-    """Where inserter `e` is in its cycle, read back from a recording.
+def _load_hand(env, index: int, record: dict) -> None:
+    """Where inserter `index` is in its cycle, read back from a recording.
 
-    The engine exports the hand's drawn position, not the cycle; the tables
-    above map one to the other wherever the hand is on a drawn swing. A hand
-    they do not place (see `hand_position`) keeps the simulator's own cycle.
+    The engine exports the hand's drawn position, not the arm; the tables
+    above map one to the other wherever the hand is on a swing from rest, and
+    the arm is then put where that swing takes it (`fsim_inserter_set`). A
+    hand they do not place (a chase, a swing cut short) keeps the
+    simulator's own arm.
     """
+    e = env.entities[index]
     status = record.get("status")
-    if status == "waiting_for_source_items":
-        e.phase, e.swing = lib.INS_WAIT_PICKUP, 0.0
+    if status == "waiting_for_source_items" and e.phase in (lib.INS_WAIT_PICKUP, lib.INS_APPROACH,
+                                                            lib.INS_TO_PICKUP):  # fmt: skip
+        lib.fsim_inserter_set(env, index, lib.INS_WAIT_PICKUP, 0)
         return
-    if status == "waiting_for_space_in_destination":
-        e.phase, e.swing = lib.INS_WAIT_DROP, 0.0
+    if status == "waiting_for_space_in_destination" and e.held:
+        lib.fsim_inserter_set(env, index, lib.INS_WAIT_DROP, 0)
         return
     hand = record.get("held_stack_position")
     if not hand:
@@ -385,27 +389,19 @@ def _load_hand(e, record: dict) -> None:
                     and e.held in (lib.IT_COAL, lib.IT_WOOD)
                 ):
                     phase = lib.INS_TO_SELF
-                e.phase, e.swing = phase, float(step)
+                lib.fsim_inserter_set(env, index, phase, step)
                 return
 
 
-def hand_position(e, pickup: list, drop: list) -> list:
-    """`held_stack_position` for inserter `e`, from where it is in its cycle.
+#: Marks an inserter record whose drawn hand y the simulator does not know.
+HAND_Y_UNKNOWN = "_hand_y_unknown"
 
-    Exact for every swing between chests, furnaces and belt drops the engine
-    recorded, in all four facings. Not reproduced: a hand that took an item
-    from a belt (it is drawn at the item, and the swing from there differs)
-    and a tick with less than a full tick's energy (the hand moves part of a
-    step), where this reads the step it is on.
-    """
-    if e.phase == lib.INS_WAIT_PICKUP:
-        return list(pickup)
-    if e.phase == lib.INS_WAIT_DROP:
-        return list(drop)
-    table, lift = HAND_TABLES[e.phase]
-    step = min(int(e.swing), len(table) - 1)
-    x, y = _face(table[step], lift[step], e.direction)
-    return [e.pos.x + x, e.pos.y + y]
+
+def hand_position(e, pickup: list, drop: list) -> list:
+    """`held_stack_position` for inserter `e`: where the simulator draws the
+    hand (fsim.c, arm_draw). Its y is not the engine's when `e.lift` is -1:
+    the lift of a swing that did not start from rest is not known."""
+    return [e.pos.x + e.hand_x, e.pos.y + e.hand_y]
 
 
 class Sim:
@@ -544,7 +540,11 @@ class Sim:
             }
             if m.has_dir:
                 record["d"] = m.direction
-            if m.contents.count > 0:
+            if m.kind == lib.K_CHEST:
+                amounts = {ITEM_NAMES[i]: m.amounts[i] for i in range(lib.IT_COUNT) if m.amounts[i]}
+                if amounts:
+                    record["contents"] = amounts
+            elif m.contents.count > 0:
                 record["contents"] = {ITEM_NAMES[m.contents.item]: m.contents.count}
             remembered.append(record)
         inflight = []
@@ -733,6 +733,10 @@ class Sim:
                     record["pickup_position"] = pickup
                     record["drop_position"] = drop
                     record["held_stack_position"] = hand_position(e, pickup, drop)
+                    if e.lift < 0:
+                        # The lift of this swing is not known (fsim.c, arm_draw):
+                        # comparisons take y as the engine's (trace.relax_hand_y).
+                        record[HAND_Y_UNKNOWN] = True
                     if e.held:
                         record["held"] = {"name": ITEM_NAMES[e.held], "count": 1}
                 else:
@@ -893,11 +897,12 @@ class Sim:
         for i in range(env.entity_count):
             e = env.entities[i]
             if e.alive and e.kind != lib.K_PILE:
-                by_place[(KIND_NAME[e.kind], e.pos.x, e.pos.y)] = e
+                by_place[(KIND_NAME[e.kind], e.pos.x, e.pos.y)] = i
         for record in hidden["entities"]:
-            e = by_place.get((record["name"], record["position"][0], record["position"][1]))
-            if e is None:
+            index = by_place.get((record["name"], record["position"][0], record["position"][1]))
+            if index is None:
                 continue
+            e = env.entities[index]
             e.direction = record["direction"]
             e.status = {v: k for k, v in STATUS_NAME.items()}.get(record.get("status"), e.status)
             if record["name"] == "stone-wall":
@@ -941,7 +946,7 @@ class Sim:
             elif record["name"] == "burner-inserter":
                 held = record.get("held")
                 e.held = ITEM_IDS[held["name"]] if held else 0
-                _load_hand(e, record)
+                _load_hand(env, index, record)
             else:
                 load(e.source, "furnace_source")
                 load(e.result, "furnace_result")
