@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import atexit
 import math
+import os
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from evolve import evaluate, mutate, sandbox
@@ -145,33 +147,58 @@ def rows(
 
 # ------------------------------------------------------------------ running
 
-_POOLS: dict[tuple[int, float], object] = {}
+MAX_POOLS = int(os.environ.get("FACTORIO_BUILD_MAX_POOLS", "1"))
+"""Pools per (workers, timeout) key: how many programs can score at once.
+
+`EvalPool.map` is not re-entrant, so a pool serves one program at a time. RL
+trainers score hundreds of rollouts concurrently; with one pool they queue
+behind a single program. Each concurrent call borrows an idle pool, creating
+one while fewer than MAX_POOLS exist, and otherwise waits for one to free up.
+"""
+
+_POOLS: dict[tuple[int, float], list] = {}
+_IDLE: dict[tuple[int, float], list] = {}
 _POOL_LOCK = threading.Lock()
+_POOL_FREED = threading.Condition(_POOL_LOCK)
 
 
-def _pool(workers: int, timeout_s: float):
+@contextmanager
+def _borrow_pool(workers: int, timeout_s: float):
     from evolve.pool import EvalPool
 
     key = (workers, float(timeout_s))
-    with _POOL_LOCK:
-        pool = _POOLS.get(key)
-        if pool is None:
-            pool = EvalPool(
-                workers,
-                initializer="evolve.evaluate:worker_init",
-                job="evolve.evaluate:worker_job",
-                timeout_s=timeout_s,
-            )
-            _POOLS[key] = pool
-        return pool
+    with _POOL_FREED:
+        while True:
+            idle = _IDLE.setdefault(key, [])
+            if idle:
+                pool = idle.pop()
+                break
+            if len(_POOLS.setdefault(key, [])) < max(1, MAX_POOLS):
+                pool = EvalPool(
+                    workers,
+                    initializer="evolve.evaluate:worker_init",
+                    job="evolve.evaluate:worker_job",
+                    timeout_s=timeout_s,
+                )
+                _POOLS[key].append(pool)
+                break
+            _POOL_FREED.wait()
+    try:
+        yield pool
+    finally:
+        with _POOL_FREED:
+            _IDLE[key].append(pool)
+            _POOL_FREED.notify()
 
 
 @atexit.register
 def close_pools() -> None:
     with _POOL_LOCK:
-        for pool in _POOLS.values():
-            pool.close()
+        for pools in _POOLS.values():
+            for pool in pools:
+                pool.close()
         _POOLS.clear()
+        _IDLE.clear()
 
 
 def run_program(
@@ -193,8 +220,7 @@ def run_program(
     size = max(1, math.ceil(len(triples) / workers))
     parts = [triples[k : k + size] for k in range(0, len(triples), size)]
     payloads = [{"source": source, "scenes": p, "decision_budget": decision_budget} for p in parts]
-    pool = _pool(workers, timeout_s)
-    with _POOL_LOCK:  # EvalPool.map is not re-entrant; one candidate at a time per process
+    with _borrow_pool(workers, timeout_s) as pool:
         answers = pool.map(payloads)
     out: list[dict] = []
     for part, res in zip(parts, answers, strict=True):
