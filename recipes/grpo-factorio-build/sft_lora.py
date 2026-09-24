@@ -1,10 +1,12 @@
 """LoRA SFT warm start on evolved builder programs, then merge into a full HF checkpoint.
 
-    CUDA_VISIBLE_DEVICES=0 uv run --no-sync python sft_lora.py --data sft.jsonl --out /root/models/sft
+    CUDA_VISIBLE_DEVICES=0 uv run --no-sync python sft_lora.py
+        --data sft.jsonl --out /root/models/sft
 
 Loss is on the assistant completion only. The prompt is rendered exactly as it is
 at RL time: Qwen3.5 chat template with enable_thinking=False.
 """
+
 import argparse
 import json
 import math
@@ -13,8 +15,8 @@ import random
 import shutil
 
 import torch
-from peft import LoraConfig, get_peft_model
 from huggingface_hub import snapshot_download
+from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForImageTextToText, AutoTokenizer
 
 ap = argparse.ArgumentParser()
@@ -29,11 +31,13 @@ args = ap.parse_args()
 
 torch.manual_seed(0)
 tok = AutoTokenizer.from_pretrained(args.model)
-rows = [json.loads(l) for l in open(args.data, encoding="utf-8")]
+rows = [json.loads(line) for line in open(args.data, encoding="utf-8")]
 
 examples = []
 for r in rows:
-    prompt = tok.apply_chat_template(r["prompt"], tokenize=False, add_generation_prompt=True, enable_thinking=False)
+    prompt = tok.apply_chat_template(
+        r["prompt"], tokenize=False, add_generation_prompt=True, enable_thinking=False
+    )
     completion = r["completion"][0]["content"] + "<|im_end|>\n"
     p = tok(prompt, add_special_tokens=False)["input_ids"]
     c = tok(completion, add_special_tokens=False)["input_ids"]
@@ -41,7 +45,9 @@ for r in rows:
 print("examples", len(examples), "max len", max(len(e[0]) for e in examples))
 print("prompt tail:", repr(prompt[-80:]))
 
-model = AutoModelForImageTextToText.from_pretrained(args.model, dtype=torch.bfloat16, device_map={"": 0})
+model = AutoModelForImageTextToText.from_pretrained(
+    args.model, dtype=torch.bfloat16, device_map={"": 0}
+)
 model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 model.enable_input_require_grads()
 cfg = LoraConfig(
@@ -54,9 +60,13 @@ cfg = LoraConfig(
 model = get_peft_model(model, cfg)
 model.print_trainable_parameters()
 
-opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr, weight_decay=0.0)
+opt = torch.optim.AdamW(
+    [p for p in model.parameters() if p.requires_grad], lr=args.lr, weight_decay=0.0
+)
 total = math.ceil(len(examples) * args.epochs / args.accum)
-sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / 3) * 0.5 * (1 + math.cos(math.pi * min(s, total) / total)))
+sched = torch.optim.lr_scheduler.LambdaLR(
+    opt, lambda s: min(1.0, (s + 1) / 3) * 0.5 * (1 + math.cos(math.pi * min(s, total) / total))
+)
 model.train()
 step = 0
 rng = random.Random(0)
@@ -77,7 +87,10 @@ for ep in range(args.epochs):
             sched.step()
             opt.zero_grad(set_to_none=True)
             step += 1
-            print(f"epoch {ep} step {step}/{total} loss {run:.4f} lr {sched.get_last_lr()[0]:.2e}", flush=True)
+            print(
+                f"epoch {ep} step {step}/{total} loss {run:.4f} lr {sched.get_last_lr()[0]:.2e}",
+                flush=True,
+            )
             run = 0.0
 
 model = model.merge_and_unload()
@@ -86,6 +99,11 @@ model.save_pretrained(args.out, safe_serialization=True)
 tok.save_pretrained(args.out)
 snap = snapshot_download(args.model, local_files_only=True)  # tokenizer/processor files vLLM needs
 for f in os.listdir(snap):
-    if not f.endswith(".safetensors") and not f.endswith(".index.json") and f != "config.json" and not os.path.exists(os.path.join(args.out, f)):
+    if (
+        not f.endswith(".safetensors")
+        and not f.endswith(".index.json")
+        and f != "config.json"
+        and not os.path.exists(os.path.join(args.out, f))
+    ):
         shutil.copy(os.path.join(snap, f), args.out)
 print("SFT_DONE", args.out)

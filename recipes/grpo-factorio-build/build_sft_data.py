@@ -10,6 +10,7 @@ kept; the rest is filled from >= 0.9 programs spread round-robin over
 (run, island) lineages, so no single lineage dominates. Selection never reads
 validation or holdout scores.
 """
+
 import argparse
 import collections
 import glob
@@ -22,6 +23,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1] / "integrations" / "verifiers" / "factorio_build"))
 from factorio_build import core  # noqa: E402
+
 from evolve import sandbox  # noqa: E402
 
 ap = argparse.ArgumentParser()
@@ -36,7 +38,9 @@ rng = random.Random(args.seed)
 progs = {}
 for db in sorted(glob.glob(args.archives)):
     run = Path(db).stem if Path(db).stem != "genealogy" else Path(db).parent.name
-    for code, tm, island in sqlite3.connect(db).execute("select code, train_mean, island from candidates"):
+    for code, tm, island in sqlite3.connect(db).execute(
+        "select code, train_mean, island from candidates"
+    ):
         if tm is None or tm < args.min_train:
             continue
         try:
@@ -66,7 +70,9 @@ for code, tm, _ in chosen:
     r = rng.choice(rows)
     user = r["prompt"]
     user_msgs = user if isinstance(user, list) else [{"role": "user", "content": user}]
-    prompt = ([{"role": "system", "content": r["system_prompt"]}] if r["system_prompt"] else []) + user_msgs
+    prompt = (
+        [{"role": "system", "content": r["system_prompt"]}] if r["system_prompt"] else []
+    ) + user_msgs
     completion = [{"role": "assistant", "content": f"```python\n{code.strip()}\n```"}]
     lines.append({"prompt": prompt, "completion": completion, "train_mean": tm})
 rng.shuffle(lines)

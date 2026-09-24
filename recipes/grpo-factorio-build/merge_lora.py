@@ -1,18 +1,19 @@
 """Merge a prime-rl LoRA broadcast (adapter_config.json + adapter_model.safetensors)
 into a full HF checkpoint: W += (alpha / r) * B @ A for every adapted module.
 
-    python merge_lora.py --base /root/models/sft --adapter outputs/<run>/broadcasts/step_20 --out /root/models/grpo
+    python merge_lora.py --base /root/models/sft --out /root/models/grpo
+        --adapter outputs/<run>/broadcasts/step_20
 
 prime-rl writes adapter keys as plain module paths (`<module>.lora_A.weight`),
 which PEFT's loader can skip without an error; this merges them directly and
 fails if any adapted module has no base weight.
 """
+
 import argparse
 import json
 import os
 import shutil
 
-import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
@@ -51,6 +52,10 @@ print(f"merged {merged} modules at scale {scale}")
 os.makedirs(args.out, exist_ok=True)
 save_file(weights, os.path.join(args.out, "model.safetensors"), metadata={"format": "pt"})
 for f in os.listdir(args.base):
-    if not f.endswith(".safetensors") and not f.endswith(".index.json") and os.path.isfile(os.path.join(args.base, f)):
+    if (
+        not f.endswith(".safetensors")
+        and not f.endswith(".index.json")
+        and os.path.isfile(os.path.join(args.base, f))
+    ):
         shutil.copy(os.path.join(args.base, f), args.out)
 print("MERGE_DONE", args.out)
