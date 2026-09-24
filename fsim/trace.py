@@ -55,6 +55,10 @@ class Normaliser:
     def __init__(self) -> None:
         self.base_tick = 0
         self.request_ids: dict[str, str] = {}
+        #: Belt items' ids, renamed 1, 2, ... in order of first appearance, as
+        #: FactorioRL's recorder does (`Normaliser._item`): the engine's come
+        #: from a counter that runs across episodes, the simulator's are its own.
+        self.item_ids: dict[int, int] = {}
 
     def begin(self, observation: dict) -> None:
         self.base_tick = int(observation.get("absolute_tick") or 0) - int(
@@ -90,6 +94,20 @@ class Normaliser:
             return [self._rename(v) for v in value]
         return value
 
+    def _item(self, item: list) -> list:
+        """`[name, position, raw id]` -> `[name, position, episode id]`.
+
+        Named in the order the records meet them: entities by position, lane 1
+        before lane 2, items along a lane by position.
+        """
+        name, position = item[0], item[1]
+        if len(item) < 3 or item[2] is None:
+            return [name, position]
+        raw = int(item[2])
+        if raw not in self.item_ids:
+            self.item_ids[raw] = len(self.item_ids) + 1
+        return [name, position, self.item_ids[raw]]
+
     def _relative(self, tick):
         return None if tick is None else int(tick) - self.base_tick
 
@@ -121,6 +139,11 @@ class Normaliser:
             record["inventories"] = record.get("inventories") or {}
             for inventory in record["inventories"].values():
                 inventory["stacks"] = _listify(inventory.get("stacks") or [])
+            if "lanes" in record:
+                record["lanes"] = [
+                    [self._item(item) for item in _listify(lane or [])]
+                    for lane in _listify(record["lanes"])
+                ]
         character = body.get("character")
         if character and character.get("main"):
             character["main"]["stacks"] = _listify(character["main"].get("stacks") or [])
@@ -202,4 +225,16 @@ def comparable_hidden(hidden: dict) -> dict:
         for entry in handles.get("order") or []
     ]
     body["handles"] = handles
+    # Belt item ids are named by first appearance, and a trace sampled every
+    # tick meets two items made in one decision in the order they were made,
+    # where the decision trace meets them in list order. Which item is where
+    # must still agree; the names need not.
+    if any("lanes" in e for e in body.get("entities") or []):
+        entities = []
+        for entity in body["entities"]:
+            if "lanes" in entity:
+                entity = dict(entity)
+                entity["lanes"] = [[item[:2] for item in lane] for lane in entity["lanes"]]
+            entities.append(entity)
+        body["entities"] = entities
     return body

@@ -47,11 +47,16 @@ KINDS = {
     lib.K_FURNACE: ("stone-furnace", "furnace"),
     lib.K_WALL: ("stone-wall", "wall"),
     lib.K_PILE: ("item-on-ground", "item-entity"),
+    lib.K_CHEST: ("wooden-chest", "container"),
+    lib.K_BELT: ("transport-belt", "transport-belt"),
+    lib.K_INSERTER: ("burner-inserter", "inserter"),
 }
 KIND_NAME = {kind: name for kind, (name, _) in KINDS.items()}
 KIND_TYPE = {kind: type_ for kind, (_, type_) in KINDS.items()}
 STATUS_NAME = {
     lib.ST_WORKING: "working",
+    lib.ST_NORMAL: "normal",
+    lib.ST_WAITING_FOR_SOURCE: "waiting_for_source_items",
     lib.ST_NO_INGREDIENTS: "no_ingredients",
     lib.ST_WAITING_FOR_SPACE: "waiting_for_space_in_destination",
     lib.ST_NO_FUEL: "no_fuel",
@@ -87,9 +92,17 @@ VERB_NAME = {
     lib.V_TRANSFER: "transfer",
 }
 DIRECTIONS = ("north", "east", "south", "west")
-#: Machines a scene may place itself, rather than the agent building them --
-#: plate_line is handed an aligned drill and furnace, both empty.
-SCENE_MACHINES = {"burner-mining-drill": lib.K_DRILL, "stone-furnace": lib.K_FURNACE}
+#: Entities a scene may place itself, rather than the agent building them --
+#: plate_line is handed an aligned drill and furnace, both empty; the logistics
+#: scenes a rig of belts, inserters and chests, with fuel and contents.
+SCENE_MACHINES = {
+    "burner-mining-drill": lib.K_DRILL,
+    "stone-furnace": lib.K_FURNACE,
+    "wooden-chest": lib.K_CHEST,
+    "transport-belt": lib.K_BELT,
+    "burner-inserter": lib.K_INSERTER,
+}
+BELT_SHAPES = {lib.BELT_STRAIGHT: "straight", lib.BELT_LEFT: "left", lib.BELT_RIGHT: "right"}
 STRIDES = {"move": 30, "step": 7, "nudge": 2}
 
 BASE_RECIPES = (
@@ -208,6 +221,17 @@ def scene_struct(blueprint: dict):
     scene.machine_x = array(fixed(m["position"][0]) for m in machines)
     scene.machine_y = array(fixed(m["position"][1]) for m in machines)
     scene.machine_dir = array(DIRECTIONS.index(m.get("direction") or "north") * 4 for m in machines)
+    # What each is given, as the mod's `LuaEntity.insert` calls: item names in
+    # sorted order, one entity at a time.
+    contents = [
+        (index, ITEM_IDS[item], int(count))
+        for index, m in enumerate(machines)
+        for item, count in sorted((m.get("contents") or {}).items())
+    ]
+    scene.content_count = len(contents)
+    scene.content_machine = array(c[0] for c in contents)
+    scene.content_item = array(c[1] for c in contents)
+    scene.content_amount = array(c[2] for c in contents)
     character = blueprint.get("character") or {}
     position = character.get("position") or [0, 0]
     scene.character.x = fixed(position[0])
@@ -253,6 +277,135 @@ def action_struct(key: str, arguments: dict | None = None):
     else:
         raise ValueError(f"unsupported action {key}")
     return a
+
+
+#: Where a burner inserter's hand is drawn (`held_stack_position`), per tick of
+#: each move, relative to the inserter in 1/256 tile, for one facing north
+#: (pickup at (0, -256), drop at (0, 307)). Read off the engine by FactorioRL's
+#: logistics probe (docs/evidence/sim-mechanics-m4-logistics.json, rigs `c2c`
+#: and `self`); every chest, furnace and belt-drop swing it recorded follows
+#: these exactly. It is a drawing position, not a path the hand's timing
+#: depends on. Row k is the hand after k ticks of the move.
+#:
+#: The drawing is the hand's place on the ground raised by `HAND_LIFT` on
+#: screen (y up), and the ground path of another facing is the north one turned
+#: (east) or mirrored (south, west), so the hand swings through the west side
+#: whether the inserter faces north or south. The lift and the facings were
+#: read off FactorioRL's logistics parity traces, which have inserters facing
+#: all four ways and match this on every chest, furnace and belt-drop swing.
+HAND_APPROACH = ((0, -179), (0, -188), (0, -197), (0, -206), (0, -215), (0, -224), (0, -232),
+                 (0, -241), (0, -256))  # fmt: skip
+HAND_TO_DROP = (
+    (0, -256), (-21, -279), (-44, -300), (-68, -318), (-93, -333), (-122, -351), (-144, -352),
+    (-166, -350), (-186, -344), (-206, -337), (-223, -328), (-240, -316), (-255, -303),
+    (-268, -286), (-279, -269), (-289, -249), (-296, -228), (-302, -205), (-305, -181),
+    (-307, -156), (-306, -132), (-303, -105), (-299, -79), (-292, -50), (-284, -23), (-273, 5),
+    (-261, 33), (-247, 60), (-231, 87), (-214, 113), (-195, 140), (-175, 165), (-154, 190),
+    (-132, 214), (-109, 237), (-85, 258), (-61, 279), (-36, 298), (0, 307),
+)  # fmt: skip
+HAND_TO_PICKUP = (
+    (0, 307), (-24, 282), (-47, 255), (-68, 227), (-87, 200), (-101, 164), (-120, 144),
+    (-138, 123), (-155, 102), (-171, 79), (-186, 57), (-200, 34), (-212, 10), (-223, -13),
+    (-232, -36), (-240, -59), (-247, -82), (-251, -104), (-254, -126), (-255, -147),
+    (-255, -167), (-253, -185), (-249, -204), (-243, -220), (-236, -236), (-228, -250),
+    (-217, -262), (-206, -273), (-193, -282), (-178, -289), (-163, -293), (-146, -295),
+    (-128, -296), (-110, -293), (-91, -289), (-71, -282), (-51, -272), (-30, -261), (0, -256),
+)  # fmt: skip
+HAND_TO_SELF = (
+    (0, -256), (20, -253), (38, -248), (55, -241), (70, -232), (83, -221), (95, -209),
+    (104, -196), (112, -181), (117, -165), (121, -148), (123, -132), (123, -114), (121, -96),
+    (118, -79), (114, -61), (108, -44), (101, -27), (94, -10), (85, -1), (76, 4), (67, 9),
+    (57, 13), (47, 15), (37, 15), (28, 14), (19, 12), (11, 8), (2, 2),
+)  # fmt: skip
+HAND_SELF_BACK = (
+    (2, 2), (9, 1), (17, -2), (26, -4), (35, -7), (45, -11), (54, -15), (64, -20), (74, -26),
+    (84, -31), (93, -37), (101, -45), (109, -53), (115, -61), (120, -70), (124, -78),
+    (127, -88), (128, -97), (127, -105), (125, -120), (120, -137), (114, -153), (106, -170),
+    (96, -186), (84, -201), (70, -216), (54, -230), (36, -242), (0, -256),
+)  # fmt: skip
+#: How high the hand is drawn above the ground, per tick of a swing (both
+#: ways) and of a swing to its own fuel slot (both ways); 0 while extending.
+HAND_LIFT = (
+    0, 15, 30, 44, 57, 70, 81, 92, 101, 110, 118, 125, 132, 137, 142, 145, 148, 150, 151, 151,
+    151, 149, 147, 143, 139, 134, 128, 122, 114, 106, 96, 86, 75, 63, 50, 37, 22, 7, 0,
+)  # fmt: skip
+HAND_SELF_LIFT = (
+    0, 7, 14, 19, 24, 28, 31, 34, 35, 35, 35, 34, 32, 29, 25, 20, 15, 9, 1, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0,
+)  # fmt: skip
+HAND_TABLES = {
+    lib.INS_APPROACH: (HAND_APPROACH, (0,) * len(HAND_APPROACH)),
+    lib.INS_TO_DROP: (HAND_TO_DROP, HAND_LIFT),
+    lib.INS_TO_PICKUP: (HAND_TO_PICKUP, HAND_LIFT),
+    lib.INS_TO_SELF: (HAND_TO_SELF, HAND_SELF_LIFT),
+    lib.INS_SELF_BACK: (HAND_SELF_BACK, HAND_SELF_LIFT),
+}
+
+
+def _face(offset: tuple[int, int], lift: int, direction: int) -> tuple[int, int]:
+    """A north-facing drawn offset as an inserter facing `direction` draws it."""
+    x, y = offset[0], offset[1] + lift
+    x, y = {0: (x, y), 4: (-y, x), 8: (x, -y), 12: (y, x)}[direction]
+    return x, y - lift
+
+
+def _load_hand(e, record: dict) -> None:
+    """Where inserter `e` is in its cycle, read back from a recording.
+
+    The engine exports the hand's drawn position, not the cycle; the tables
+    above map one to the other wherever the hand is on a drawn swing. A hand
+    they do not place (see `hand_position`) keeps the simulator's own cycle.
+    """
+    status = record.get("status")
+    if status == "waiting_for_source_items":
+        e.phase, e.swing = lib.INS_WAIT_PICKUP, 0.0
+        return
+    if status == "waiting_for_space_in_destination":
+        e.phase, e.swing = lib.INS_WAIT_DROP, 0.0
+        return
+    hand = record.get("held_stack_position")
+    if not hand:
+        return
+    offset = (hand[0] - e.pos.x, hand[1] - e.pos.y)
+    holding = bool(e.held)
+    phases = (
+        (lib.INS_TO_DROP, lib.INS_TO_SELF)
+        if holding
+        else (lib.INS_TO_PICKUP, lib.INS_SELF_BACK, lib.INS_APPROACH)
+    )
+    for phase in phases:
+        table, lift = HAND_TABLES[phase]
+        # The last row is the arrival, which ends the move on the same tick.
+        for step, row in enumerate(table[:-1]):
+            if _face(row, lift[step], e.direction) == offset:
+                if (
+                    phase == lib.INS_TO_DROP
+                    and step == 0
+                    and e.fuel.count == 0
+                    and e.held in (lib.IT_COAL, lib.IT_WOOD)
+                ):
+                    phase = lib.INS_TO_SELF
+                e.phase, e.swing = phase, float(step)
+                return
+
+
+def hand_position(e, pickup: list, drop: list) -> list:
+    """`held_stack_position` for inserter `e`, from where it is in its cycle.
+
+    Exact for every swing between chests, furnaces and belt drops the engine
+    recorded, in all four facings. Not reproduced: a hand that took an item
+    from a belt (it is drawn at the item, and the swing from there differs)
+    and a tick with less than a full tick's energy (the hand moves part of a
+    step), where this reads the step it is on.
+    """
+    if e.phase == lib.INS_WAIT_PICKUP:
+        return list(pickup)
+    if e.phase == lib.INS_WAIT_DROP:
+        return list(drop)
+    table, lift = HAND_TABLES[e.phase]
+    step = min(int(e.swing), len(table) - 1)
+    x, y = _face(table[step], lift[step], e.direction)
+    return [e.pos.x + x, e.pos.y + y]
 
 
 class Sim:
@@ -337,6 +490,10 @@ class Sim:
             record["contents"] = {ITEM_NAMES[e.pile.item]: e.pile.count}
         if e.kind == lib.K_FURNACE and e.source.count > 0:
             record["contents"] = {ITEM_NAMES[e.source.item]: e.source.count}
+        if e.kind == lib.K_CHEST:
+            contents = self._chest_totals(e)
+            if contents:
+                record["contents"] = contents
         if e.kind != lib.K_PILE:
             record["status"] = e.status
             record["st"] = STATUS_NAME[e.status]
@@ -496,8 +653,40 @@ class Sim:
         stacks = [[1, ITEM_NAMES[stack.item], stack.count]] if stack.count > 0 else []
         return {"size": size, "stacks": stacks}
 
+    @staticmethod
+    def _chest_totals(e) -> dict:
+        totals: dict[str, int] = {}
+        for i in range(lib.FSIM_CHEST_SLOTS):
+            s = e.chest[i]
+            if s.count > 0:
+                totals[ITEM_NAMES[s.item]] = totals.get(ITEM_NAMES[s.item], 0) + s.count
+        return totals
+
+    @staticmethod
+    def _lanes(e) -> list:
+        """A belt's lanes as `[name, position, id]`, ascending position then id;
+        ids are the simulator's own, for the trace normaliser to rename."""
+        out = []
+        for lane in range(2):
+            items = [
+                [ITEM_NAMES[it.item], it.pos, it.id]
+                for it in e.lanes[lane].items[0 : e.lanes[lane].count]
+            ]
+            out.append(sorted(items, key=lambda item: (item[1], item[2])))
+        return out
+
+    @staticmethod
+    def _inserter_points(e) -> tuple[list, list]:
+        """Pickup and drop position, 1/256 tile: 1 and 1.19921875 tiles out
+        along the inserter's direction, which points at the pickup."""
+        ux, uy = {0: (0, -1), 4: (1, 0), 8: (0, 1), 12: (-1, 0)}[e.direction]
+        pickup = [e.pos.x + 256 * ux, e.pos.y + 256 * uy]
+        drop = [e.pos.x - 307 * ux, e.pos.y - 307 * uy]
+        return pickup, drop
+
     def hidden(self) -> dict:
         env = self.env
+        lib.fsim_refresh(env)
         entities = []
         for i in range(env.entity_count):
             e = env.entities[i]
@@ -517,6 +706,17 @@ class Sim:
             }
             if e.kind == lib.K_WALL:
                 record["inventories"] = {}
+            elif e.kind == lib.K_CHEST:
+                stacks = [
+                    [i + 1, ITEM_NAMES[e.chest[i].item], e.chest[i].count]
+                    for i in range(lib.FSIM_CHEST_SLOTS)
+                    if e.chest[i].count > 0
+                ]
+                record["inventories"] = {"chest": {"size": lib.FSIM_CHEST_SLOTS, "stacks": stacks}}
+            elif e.kind == lib.K_BELT:
+                record["inventories"] = {}
+                record["belt_shape"] = BELT_SHAPES[e.shape]
+                record["lanes"] = self._lanes(e)
             else:
                 record["remaining_burning_fuel"] = g(e.remaining)
                 if e.burning:
@@ -528,6 +728,13 @@ class Sim:
                 if e.kind == lib.K_DRILL:
                     record["mining_progress"] = g(e.progress)
                     record["bonus_mining_progress"] = "0"
+                elif e.kind == lib.K_INSERTER:
+                    pickup, drop = self._inserter_points(e)
+                    record["pickup_position"] = pickup
+                    record["drop_position"] = drop
+                    record["held_stack_position"] = hand_position(e, pickup, drop)
+                    if e.held:
+                        record["held"] = {"name": ITEM_NAMES[e.held], "count": 1}
                 else:
                     record["crafting_progress"] = g(e.progress)
                     record["bonus_progress"] = "0"
@@ -650,10 +857,13 @@ class Sim:
         """Overwrite state with an engine recording of the same world.
 
         Everything the engine exports is taken from it: the character, every
-        machine's energy, fuel, slots and progress, ore amounts and ground
-        piles. What it does not export -- which tile a drill is on in its
-        cycle, whether it has delivered to its target before, whether a
-        furnace has consumed its current ingredient -- stays the simulator's.
+        machine's energy, fuel, slots and progress, chests' slots, belt lanes,
+        what an inserter holds, ore amounts and ground piles. Where an inserter
+        is in its cycle is read back from its drawn hand (`_load_hand`). What
+        the engine does not export -- which tile a drill is on in its cycle,
+        whether it has delivered to its target before, whether a furnace has
+        consumed its current ingredient, which belt items moved last tick --
+        stays the simulator's.
         Entities are matched by name and position; a world whose entities
         differ is not the same world, and the comparison after the step says
         so.
@@ -692,6 +902,28 @@ class Sim:
             e.status = {v: k for k, v in STATUS_NAME.items()}.get(record.get("status"), e.status)
             if record["name"] == "stone-wall":
                 continue
+            if record["name"] == "wooden-chest":
+                for i in range(lib.FSIM_CHEST_SLOTS):
+                    e.chest[i].item = 0
+                    e.chest[i].count = 0
+                for index, name, count in (record["inventories"].get("chest") or {}).get(
+                    "stacks"
+                ) or []:
+                    e.chest[index - 1].item = ITEM_IDS[name]
+                    e.chest[index - 1].count = count
+                continue
+            if record["name"] == "transport-belt":
+                for lane, items in enumerate(record.get("lanes") or [[], []]):
+                    items = items or []
+                    e.lanes[lane].count = len(items)
+                    for k, (name, position, *rest) in enumerate(items):
+                        it = e.lanes[lane].items[k]
+                        it.item = ITEM_IDS[name]
+                        it.pos = position
+                        it.id = rest[0] if rest else 0
+                        it.moved = 1
+                        env.next_item_id = max(env.next_item_id, it.id)
+                continue
             e.energy = float(record["energy"])
             e.remaining = float(record["remaining_burning_fuel"])
             e.burning = ITEM_IDS.get(record.get("currently_burning"), 0)
@@ -706,6 +938,10 @@ class Sim:
             if record["name"] == "burner-mining-drill":
                 e.progress = float(record["mining_progress"])
                 e.seconds = e.progress * 1.0
+            elif record["name"] == "burner-inserter":
+                held = record.get("held")
+                e.held = ITEM_IDS[held["name"]] if held else 0
+                _load_hand(e, record)
             else:
                 load(e.source, "furnace_source")
                 load(e.result, "furnace_result")
@@ -719,6 +955,8 @@ class Sim:
             key = (r.tx * 256 + 128, r.ty * 256 + 128)
             if r.alive and key in amounts:
                 r.amount = amounts[key]
+        # Belt links and inserter targets follow what was loaded.
+        env.entities_version += 1
         piles = {tuple(g["position"]): g for g in hidden["ground_items"]}
         for i in range(env.entity_count):
             e = env.entities[i]

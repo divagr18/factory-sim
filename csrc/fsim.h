@@ -37,6 +37,9 @@
 #define FSIM_MAX_MEMORY 2048
 #define FSIM_MAX_BLOCKED 4225
 #define FSIM_MAX_FILLERS 1024
+#define FSIM_MAX_LANES 1024       /* two per entity */
+#define FSIM_CHEST_SLOTS 16
+#define FSIM_LANE_ITEMS 8         /* items one belt lane can hold (fsim.c, lane_insert) */
 
 /* Items. Order is fixed: it is the simulator's own numbering, not the
  * encoder's. Names live in fsim/items.py. */
@@ -64,7 +67,10 @@
 #define K_FURNACE 2
 #define K_WALL 3
 #define K_PILE 4
-#define K_COUNT 5
+#define K_CHEST 5
+#define K_BELT 6
+#define K_INSERTER 7
+#define K_COUNT 8
 
 /* What a kind is, as flags (fsim_kind_flags). Everything else constant about
  * a kind is its row in fsim.c's KIND table. */
@@ -77,10 +83,12 @@
 /* Engine status names, by the codes the game reports. */
 #define ST_NONE 0
 #define ST_WORKING 1
+#define ST_NORMAL 2
 #define ST_NO_INGREDIENTS 18
 #define ST_WAITING_FOR_SPACE 34
 #define ST_NO_FUEL 53
 #define ST_NO_MINABLE 30
+#define ST_WAITING_FOR_SOURCE 32
 
 /* Verbs, as the mod's action names. */
 #define V_WAIT 0
@@ -89,6 +97,20 @@
 #define V_PLACE 3
 #define V_ROTATE 4
 #define V_TRANSFER 5
+
+/* Belt shapes, as the engine's belt_shape. */
+#define BELT_STRAIGHT 0
+#define BELT_LEFT 1
+#define BELT_RIGHT 2
+
+/* Where a burner inserter's hand is in its cycle (fsim.c, update_inserter). */
+#define INS_APPROACH 0        /* as built: the hand extends to the pickup */
+#define INS_TO_DROP 1         /* holding, swinging to the drop */
+#define INS_TO_PICKUP 2       /* empty, swinging back */
+#define INS_WAIT_PICKUP 3     /* at the pickup, nothing to take */
+#define INS_WAIT_DROP 4       /* at the drop, nowhere to put it */
+#define INS_TO_SELF 5         /* holding fuel for its own empty fuel slot */
+#define INS_SELF_BACK 6       /* from its own fuel slot back to the pickup */
 
 /* Request results. */
 #define R_NONE 0
@@ -138,6 +160,20 @@ typedef struct {
     int32_t amount;
 } fsim_resource;
 
+/* One item on a belt lane. Positions are 1/256 tile from the downstream end
+ * of this belt's own lane, as the engine's get_line_item_position reads them. */
+typedef struct {
+    int16_t pos;
+    uint8_t item;
+    uint8_t moved;        /* it moved in this tick's belt update */
+    int32_t id;           /* the simulator's own item number, not the engine's */
+} fsim_belt_item;
+
+typedef struct {
+    int32_t count;
+    fsim_belt_item items[8];  /* FSIM_LANE_ITEMS, front (lowest position) first */
+} fsim_lane;
+
 typedef struct {
     int32_t alive;
     int32_t kind;
@@ -160,13 +196,29 @@ typedef struct {
     /* progress: seconds accumulated towards the current craft or ore */
     double seconds;
     double progress;
-    /* drill */
-    int32_t held;         /* item mined and not yet delivered */
+    /* drill; inserter */
+    int32_t held;         /* item mined and not yet delivered; the item in an inserter's hand */
     int32_t linked_unit;  /* the machine it has delivered into before, or 0 */
     int32_t mine_cursor;  /* which of its four tiles it is mining */
     int32_t mine_count;   /* ore taken from that tile so far */
     /* pile */
     fsim_stack pile;
+    /* chest */
+    fsim_stack chest[16];         /* FSIM_CHEST_SLOTS */
+    /* inserter */
+    int32_t phase;                /* INS_* */
+    double swing;                 /* ticks of the current move done; fractional after a short tick */
+    /* belt */
+    fsim_lane lanes[2];           /* lane 1 (left of travel), lane 2 */
+    /* Derived from the neighbours, rebuilt whenever entities change
+     * (fsim.c, rebuild_logistics); a hidden-state load rebuilds them too. */
+    int32_t shape;                /* BELT_* */
+    int32_t lane_length[2];       /* 256 straight; 295 / 106 on a turn */
+    int32_t lane_next[2];         /* lane ref (entity * 2 + lane) it runs into, or -1 */
+    int32_t lane_side[2];         /* lane ref it sideloads into, or -1 */
+    int32_t lane_entry[2];        /* ...at this position on that lane */
+    int32_t pickup_target;        /* inserter: entity at its pickup point, or -1 */
+    int32_t drop_target;          /* ...and at its drop point */
 } fsim_entity;
 
 typedef struct {
@@ -340,6 +392,17 @@ typedef struct {
     int32_t act_step;           /* request number of the current step */
     fsim_act_result act;
     int32_t act_inflight;       /* inflight index of its ongoing action, -1 */
+
+    /* Belts and inserters: the update schedule, rebuilt when `entities_version`
+     * moves past `logistics_version` (fsim.c, rebuild_logistics). */
+    int32_t logistics_version;
+    int32_t inserter_count;
+    int32_t inserters[512];     /* entity indices, in creation order */
+    int32_t chain_count;
+    int32_t chain_first[1024];  /* FSIM_MAX_LANES: a chain's first lane in chain_lanes */
+    int32_t chain_size[1024];   /* its lanes; negative for a closed loop */
+    int32_t chain_lanes[1024];  /* lane refs, each chain front (downstream) first */
+    int32_t next_item_id;
 } fsim_env;
 
 typedef struct {
@@ -351,15 +414,22 @@ typedef struct {
     int32_t wall_count;
     int32_t *wall_x;            /* declared positions, 1/256 */
     int32_t *wall_y;
-    /* Machines the scene places rather than the agent: plate_line is handed a
-     * drill and a furnace already aligned, and both start empty, which is what
-     * `new_entity` gives them (ST_NO_FUEL). Declared positions are already the
-     * integer centres a 2x2 entity snaps to, so they are used as given. */
+    /* Entities the scene places rather than the agent: plate_line is handed a
+     * drill and a furnace already aligned, both empty, which is what
+     * `new_entity` gives them (ST_NO_FUEL); logistics scenes place belts,
+     * chests and inserters. Declared positions are already the centres the
+     * entity snaps to, so they are used as given. */
     int32_t machine_count;
     int32_t *machine_kind;
     int32_t *machine_x;         /* declared positions, 1/256 */
     int32_t *machine_y;
     int32_t *machine_dir;
+    /* What those entities are given once built, as `LuaEntity.insert` calls in
+     * this order (fsim_entity_insert): fuel, ore, a chest's contents. */
+    int32_t content_count;
+    int32_t *content_machine;   /* index into the machine arrays */
+    int32_t *content_item;
+    int32_t *content_amount;
     fsim_pos character;         /* already truncated to 1/256 */
     int32_t inventory_count;    /* already in insertion order */
     int32_t *inventory_item;
@@ -383,6 +453,24 @@ void fsim_after_load(fsim_env *env);
 void fsim_walk_ticks(fsim_env *env, int32_t dir16, int32_t ticks, int32_t *xy);
 int32_t fsim_resolve(fsim_env *env, int32_t handle, int32_t *kind, int32_t *index);
 double fsim_capacity(int32_t kind);
+/* Script-side construction, as LuaSurface.create_entity and friends: what
+ * scenes and the mechanics tests build worlds with. An entity at `x, y`
+ * (1/256, used as given) facing `dir16`; its index, or -1 when full. */
+int32_t fsim_add_entity(fsim_env *env, int32_t kind, int32_t x, int32_t y, int32_t dir16);
+/* LuaEntity.insert: fuel to a burner's fuel slot, anything else to a
+ * furnace's source or a chest. Returns what went in. */
+int32_t fsim_entity_insert(fsim_env *env, int32_t index, int32_t item, int32_t count);
+/* LuaTransportLine.insert_at / insert_at_back on belt `index`, lane 1 or 2
+ * (0-based here): 1 when the item went on. Both see the line as it stands
+ * between ticks and move the item once, as the engine's readback does. */
+int32_t fsim_belt_insert(fsim_env *env, int32_t index, int32_t lane, int32_t position,
+                         int32_t item);
+int32_t fsim_belt_insert_back(fsim_env *env, int32_t index, int32_t lane, int32_t item);
+/* Bring belt shapes and links and inserter targets up to date with the
+ * entities; ticks do this themselves, a render between them calls it. */
+void fsim_refresh(fsim_env *env);
+/* Run `ticks` world ticks with no request in flight. */
+void fsim_advance(fsim_env *env, int32_t ticks);
 /* KF_* flags of an entity kind, and the seconds the character takes to mine one. */
 int32_t fsim_kind_flags(int32_t kind);
 double fsim_kind_mining_time(int32_t kind);

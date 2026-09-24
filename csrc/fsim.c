@@ -31,6 +31,43 @@
 #define STEAM_POWER_PLATES 50
 #define STEAM_POWER_LAG 24        /* ticks from the 50th plate to the research */
 
+/* Belts and burner inserters, measured tick by tick on the engine by
+ * FactorioRL tools/probe_logistics.py (docs/sim-logistics.md,
+ * docs/evidence/sim-mechanics-m4-logistics.json). */
+#define BELT_BOX 102              /* 0.3984375, the collision box the probe read */
+#define INSERTER_BOX 38           /* 0.1484375 */
+#define CHEST_BOX 89              /* 0.35 truncated to 1/256 like the others: not measured */
+#define BELT_MINING_TIME 0.1      /* not measured: the prototypes' value */
+#define CHEST_MINING_TIME 0.1     /* not measured */
+#define INSERTER_MINING_TIME 0.1  /* not measured */
+#define BELT_SPEED 8              /* 0.03125 tiles per tick */
+#define BELT_GAP 64               /* the closest two items on one lane come */
+#define BELT_CURVE_OUTER 295      /* lane lengths on a turn */
+#define BELT_CURVE_INNER 106
+#define SIDELOAD_FAR 188          /* where a sideloading feed lane joins: the lane upstream... */
+#define SIDELOAD_NEAR 67          /* ...and the one downstream (68 by geometry; 67 measured) */
+#define INSERTER_PICKUP 256       /* pickup (0, -1) and drop (0, 1.19921875) from the */
+#define INSERTER_DROP 307         /* inserter, along its direction, which points at the pickup */
+#define INSERTER_USAGE 2400.0     /* max_energy_usage; the buffer holds 16/15 of it */
+#define INSERTER_BUILT_FUEL 500000.0  /* a new inserter burns a quarter of a wood */
+#define INSERTER_APPROACH_TICKS 8 /* as built, the hand reaches the pickup at t=9 */
+/* Pickup to drop and drop to pickup take 38 ticks: a swing is half a turn at
+ * 0.013 turn per tick, and the tick that picks up or drops is its first step,
+ * so it ends once swing + 1 reaches this. A hand restarted after a tick short
+ * of energy arrives when the fractions add up (FactorioRL's
+ * logistics_inserter_fuel_exhaustion trace, the refuelled inserter's drop at
+ * t=3025). */
+#define INSERTER_SWING_STEPS (0.5 / 0.013)
+#define INSERTER_FAST_TICKS 5     /* the first five ticks of a swing draw more */
+#define INSERTER_SELF_TICKS 28    /* pickup to its own fuel slot, and back */
+#define INSERTER_SOURCE_LIMIT 2   /* ore it keeps in a furnace's source */
+#define INSERTER_FUEL_LIMIT 5     /* fuel it keeps in a fuel slot */
+/* Burner draw per tick, from remaining_burning_fuel differences. Every swing
+ * tick draws 900/2^26 J above the round figure, the approach one ulp. */
+#define INSERTER_DRAW_APPROACH 0x1.b580000000001p+10   /* 1750.0000000000002 */
+#define INSERTER_DRAW_FAST 0x1.2c00001c2p+11           /* 2400 + 900/2^26 */
+#define INSERTER_DRAW_SLOW 0x1.450000708p+9            /* 650 + 900/2^26 */
+
 static const int32_t STACK_SIZE[IT_COUNT] = {
     0, 50, 50, 50, 50, 100, 100, 50, 50, 100, 100, 100, 100, 50, 50, 50,
 };
@@ -76,15 +113,25 @@ static const kind_info KIND[K_COUNT] = {
     [K_NONE] = {0, 0, 0, IT_NONE, 9, ST_NONE, 1.0, 0.0, 11},
     /* burner-mining-drill */
     [K_DRILL] = {KF_COLLIDES | KF_BLOCKS_WALKING | KF_BURNER | KF_MACHINE | KF_DIRECTED,
-                 MACHINE_BOX, 2, IT_BURNER_DRILL, 0, ST_NO_FUEL, 0.3, DRILL_USAGE, 3},
+                 MACHINE_BOX, 2, IT_BURNER_DRILL, 1, ST_NO_FUEL, 0.3, DRILL_USAGE, 3},
     /* stone-furnace */
     [K_FURNACE] = {KF_COLLIDES | KF_BLOCKS_WALKING | KF_BURNER | KF_MACHINE,
-                   MACHINE_BOX, 2, IT_STONE_FURNACE, 2, ST_NO_FUEL, 0.2, FURNACE_USAGE, 1},
+                   MACHINE_BOX, 2, IT_STONE_FURNACE, 3, ST_NO_FUEL, 0.2, FURNACE_USAGE, 1},
     /* stone-wall */
     [K_WALL] = {KF_COLLIDES | KF_BLOCKS_WALKING,
-                WALL_BOX, 1, IT_STONE_WALL, 3, ST_WORKING, 0.2, 0.0, 10},
+                WALL_BOX, 1, IT_STONE_WALL, 4, ST_WORKING, 0.2, 0.0, 10},
     /* item-on-ground: never placed, and mining it returns its pile */
-    [K_PILE] = {0, PILE_BOX, 1, IT_NONE, 1, ST_NONE, 0.025, 0.0, 11},
+    [K_PILE] = {0, PILE_BOX, 1, IT_NONE, 2, ST_NONE, 0.025, 0.0, 11},
+    /* wooden-chest: the engine reports it `normal` */
+    [K_CHEST] = {KF_COLLIDES | KF_BLOCKS_WALKING | KF_MACHINE,
+                 CHEST_BOX, 1, IT_WOODEN_CHEST, 6, ST_NORMAL, CHEST_MINING_TIME, 0.0, 0},
+    /* transport-belt: the character walks over it */
+    [K_BELT] = {KF_COLLIDES | KF_DIRECTED,
+                BELT_BOX, 1, IT_TRANSPORT_BELT, 5, ST_WORKING, BELT_MINING_TIME, 0.0, 4},
+    /* burner-inserter: its direction points at its pickup tile */
+    [K_INSERTER] = {KF_COLLIDES | KF_BLOCKS_WALKING | KF_BURNER | KF_MACHINE | KF_DIRECTED,
+                    INSERTER_BOX, 1, IT_BURNER_INSERTER, 0, ST_WORKING, INSERTER_MINING_TIME,
+                    INSERTER_USAGE, 5},
 };
 
 static const kind_info *kind_of(int32_t kind) {
@@ -137,6 +184,13 @@ _Static_assert(FIELD_COUNT(seen) == FSIM_MAX_SWEEP, "seen");
 _Static_assert(FIELD_COUNT(tiles) == FSIM_MAX_TILES, "tiles");
 _Static_assert(FIELD_COUNT(blocked) == 2 * FSIM_MAX_BLOCKED, "blocked");
 _Static_assert(FIELD_COUNT(remembered) == FSIM_MAX_MEMORY, "remembered");
+_Static_assert(FIELD_COUNT(inserters) == FSIM_MAX_ENTITIES, "inserters");
+_Static_assert(FIELD_COUNT(chain_first) == FSIM_MAX_LANES, "chain_first");
+_Static_assert(FIELD_COUNT(chain_size) == FSIM_MAX_LANES, "chain_size");
+_Static_assert(FIELD_COUNT(chain_lanes) == FSIM_MAX_LANES, "chain_lanes");
+_Static_assert(FSIM_MAX_LANES == 2 * FSIM_MAX_ENTITIES, "lanes");
+_Static_assert(sizeof(((fsim_entity *)0)->chest) / sizeof(fsim_stack) == FSIM_CHEST_SLOTS, "chest");
+_Static_assert(sizeof(((fsim_lane *)0)->items) / sizeof(fsim_belt_item) == FSIM_LANE_ITEMS, "lane");
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -242,6 +296,40 @@ static int32_t slot_remove(fsim_stack *s, int32_t item, int32_t count) {
     s->count -= take;
     if (s->count == 0) s->item = IT_NONE;
     return take;
+}
+
+/* A chest: sixteen slots, filled as the main inventory is. */
+static int32_t chest_count(const fsim_entity *c, int32_t item) {
+    int32_t total = 0;
+    for (int i = 0; i < FSIM_CHEST_SLOTS; i++)
+        if (c->chest[i].count > 0 && c->chest[i].item == item) total += c->chest[i].count;
+    return total;
+}
+
+static int32_t chest_room(const fsim_entity *c, int32_t item) {
+    int32_t room = 0;
+    for (int i = 0; i < FSIM_CHEST_SLOTS; i++) {
+        if (c->chest[i].count == 0) room += STACK_SIZE[item];
+        else if (c->chest[i].item == item) room += STACK_SIZE[item] - c->chest[i].count;
+    }
+    return room;
+}
+
+static int32_t chest_insert(fsim_entity *c, int32_t item, int32_t count) {
+    int32_t left = count;
+    for (int i = 0; i < FSIM_CHEST_SLOTS && left > 0; i++)
+        if (c->chest[i].count > 0 && c->chest[i].item == item)
+            left -= slot_insert(&c->chest[i], item, left, STACK_SIZE[item]);
+    for (int i = 0; i < FSIM_CHEST_SLOTS && left > 0; i++)
+        if (c->chest[i].count == 0) left -= slot_insert(&c->chest[i], item, left, STACK_SIZE[item]);
+    return count - left;
+}
+
+static int32_t chest_remove(fsim_entity *c, int32_t item, int32_t count) {
+    int32_t left = count;
+    for (int i = 0; i < FSIM_CHEST_SLOTS && left > 0; i++)
+        left -= slot_remove(&c->chest[i], item, left);
+    return count - left;
 }
 
 /* ------------------------------------------------------------------ events */
@@ -656,6 +744,18 @@ static int32_t new_entity(fsim_env *env, int32_t kind, fsim_pos pos, int32_t dir
     e->pos = pos;
     e->direction = direction;
     e->status = kind_of(kind)->status;
+    e->pickup_target = e->drop_target = -1;
+    for (int lane = 0; lane < 2; lane++) {
+        e->lane_length[lane] = TILE;
+        e->lane_next[lane] = e->lane_side[lane] = -1;
+    }
+    if (kind == K_INSERTER) {
+        /* As built: empty fuel slot, but already burning a quarter of a wood,
+         * the hand retracted on the pickup side. */
+        e->burning = IT_WOOD;
+        e->remaining = INSERTER_BUILT_FUEL;
+        e->phase = INS_APPROACH;
+    }
     return i;
 }
 
@@ -726,9 +826,13 @@ static int32_t drill_resource(const fsim_env *env, fsim_entity *d) {
     return -1;
 }
 
-/* An output dropped into a machine: fuel into a burner's fuel slot, anything
- * else into a furnace's source. */
+/* An output dropped into a machine: into a chest, fuel into a burner's fuel
+ * slot, anything else into a furnace's source. */
 static int32_t machine_accepts(fsim_entity *m, int32_t item, int32_t count, int do_insert) {
+    if (m->kind == K_CHEST) {
+        if (do_insert) return chest_insert(m, item, count);
+        return chest_room(m, item) >= count ? count : 0;
+    }
     if (has_flag(m->kind, KF_BURNER) && is_fuel(item)) {
         if (do_insert) return slot_insert(&m->fuel, item, count, STACK_SIZE[item]);
         return slot_room(&m->fuel, item, STACK_SIZE[item]) >= count ? count : 0;
@@ -779,10 +883,726 @@ static double burner_work(fsim_entity *e, double usage) {
     return fraction;
 }
 
+/* ------------------------------------------------------------------ belts
+ *
+ * Measured on the engine (docs/sim-logistics.md):
+ *
+ * - Each belt has one line per lane: lane 1 left of the direction of travel,
+ *   lane 2 right, their centre lines 60/256 either side of the belt's.
+ *   Positions are 1/256 tile from the belt's downstream edge; a straight lane
+ *   is 256 long, a turn's outer lane 295 and its inner lane 106.
+ * - Lines of consecutive belts chain: an item at p goes to p - 8 each tick,
+ *   and below 0 it is on the next belt at p - 8 + that belt's lane length.
+ *   The front item of a chain stops at exactly 0; behind it items keep 64
+ *   apart and never move backwards.
+ * - A belt pointing into the side of another feeds both its lanes onto the
+ *   target's lane on that side, joining 188 from the target's downstream edge
+ *   for the feed lane upstream and 67 for the other.
+ * - Anything put on a lane (a drill's output, an inserter's drop, a
+ *   sideloaded item) goes at the first place at or behind its target that is
+ *   64 clear of every item ahead of it -- items behind are not consulted --
+ *   and only if that is less than 64 behind the target. It then moves once
+ *   at once, as if it had been there when the line moved: an output aimed at
+ *   128 reads 120 on the tick it lands, or stays at 128 behind a stopped item
+ *   at 64 (see lane_insert).
+ *
+ * A lane is named by a ref, entity index * 2 + lane (0 for lane 1). Chains of
+ * lanes are found once per change of the entities (rebuild_logistics) and run
+ * front first, a chain before the chains that sideload into it, so a
+ * sideloaded item joins a line that has already moved this tick.
+ */
+
+static fsim_lane *lane_of(fsim_env *env, int32_t ref) {
+    return &env->entities[ref >> 1].lanes[ref & 1];
+}
+
+static int32_t lane_length_of(const fsim_env *env, int32_t ref) {
+    return env->entities[ref >> 1].lane_length[ref & 1];
+}
+
+/* The unit vector of a 16-way direction: north, east, south, west. */
+static void dir_vec(int32_t dir16, int32_t *ux, int32_t *uy) {
+    switch (dir16) {
+    case 0: *ux = 0; *uy = -1; break;
+    case 4: *ux = 1; *uy = 0; break;
+    case 8: *ux = 0; *uy = 1; break;
+    default: *ux = -1; *uy = 0; break;
+    }
+}
+
+static void lane_put(fsim_lane *lane, int32_t at, int32_t pos, int32_t item, int32_t id,
+                     int32_t moved) {
+    for (int32_t k = lane->count; k > at; k--) lane->items[k] = lane->items[k - 1];
+    lane->items[at].pos = (int16_t)pos;
+    lane->items[at].item = (uint8_t)item;
+    lane->items[at].moved = (uint8_t)moved;
+    lane->items[at].id = id;
+    lane->count++;
+}
+
+static void lane_take(fsim_lane *lane, int32_t at) {
+    for (int32_t k = at; k + 1 < lane->count; k++) lane->items[k] = lane->items[k + 1];
+    lane->count--;
+}
+
+/* Put `item` on lane `ref` aimed at `target`. Returns 1 when it went on.
+ * `exact`: only at `target` itself (insert_at_back, whose target is the lane's
+ * upstream edge). The placement is measured for drops at 128 (the drill on a
+ * free, a stopped and a just-extended line) and for sideloads; `exact` is the
+ * script call's behaviour and fits the probe's feed timing. */
+static int lane_insert(fsim_env *env, int32_t ref, int32_t target, int32_t item, int32_t id,
+                       int exact) {
+    fsim_lane *lane = lane_of(env, ref);
+    int32_t length = lane_length_of(env, ref);
+    int32_t next = env->entities[ref >> 1].lane_next[ref & 1];
+    /* The nearest item ahead, in this lane's coordinates: the back of the
+     * lane it runs into, then this lane's own items up to the insertion. */
+    int32_t q = target, ahead = INT32_MIN;
+    if (next >= 0) {
+        const fsim_lane *down = lane_of(env, next);
+        if (down->count > 0) {
+            ahead = down->items[down->count - 1].pos - lane_length_of(env, next);
+            if (ahead + BELT_GAP > q) q = ahead + BELT_GAP;
+        }
+    }
+    int32_t at = 0;
+    for (; at < lane->count; at++) {
+        int32_t p = lane->items[at].pos;
+        if (p > q) break;
+        ahead = p;
+        if (p + BELT_GAP > q) q = p + BELT_GAP;
+    }
+    if (q - target >= BELT_GAP || (exact && q != target)) return 0;
+    if (lane->count >= FSIM_LANE_ITEMS) return 0;
+    /* The move it makes at once. With nothing ahead on a line that ends here
+     * it stops at 0 -- also on a lane that sideloads onward, where an item
+     * put within 8 of the edge would otherwise transfer mid-insert; no drop or
+     * sideload aims that close. */
+    int32_t moved_to = q - BELT_SPEED;
+    if (ahead != INT32_MIN) {
+        if (ahead + BELT_GAP > moved_to) moved_to = ahead + BELT_GAP;
+    } else if (next < 0 && moved_to < 0) {
+        moved_to = 0;
+    }
+    if (moved_to > q) moved_to = q;
+    if (moved_to >= length) return 0;
+    if (moved_to < 0) {
+        fsim_lane *down = lane_of(env, next);
+        if (down->count >= FSIM_LANE_ITEMS) return 0;
+        lane_put(down, down->count, moved_to + lane_length_of(env, next), item, id, 1);
+        return 1;
+    }
+    lane_put(lane, at, moved_to, item, id, moved_to != q);
+    return 1;
+}
+
+static int32_t new_item_id(fsim_env *env) { return ++env->next_item_id; }
+
+/* Belt `index` under point `p`: which lane's half holds it, and the target
+ * position, the point's distance from the belt's downstream edge. On the
+ * centre line it is lane 2 (measured once: a belt running south, away from
+ * the inserter). Returns 0 on a turn, where no drop was measured. */
+static int belt_drop_target(const fsim_env *env, int32_t index, fsim_pos p, int32_t *ref,
+                            int32_t *target) {
+    const fsim_entity *b = &env->entities[index];
+    if (b->shape != BELT_STRAIGHT) return 0;
+    int32_t ux, uy;
+    dir_vec(b->direction, &ux, &uy);
+    int32_t dx = p.x - b->pos.x, dy = p.y - b->pos.y;
+    int32_t along = dx * ux + dy * uy;
+    int32_t lateral = -dx * uy + dy * ux;   /* towards the right of travel */
+    *ref = index * 2 + (lateral < 0 ? 0 : 1);
+    *target = TILE / 2 - along;
+    return 1;
+}
+
+static int belt_drop(fsim_env *env, int32_t index, fsim_pos p, int32_t item) {
+    int32_t ref, target;
+    if (!belt_drop_target(env, index, p, &ref, &target)) return 0;
+    return lane_insert(env, ref, target, item, new_item_id(env), 0);
+}
+
+/* The belt whose tile holds `p`, or -1. */
+static int32_t belt_at(const fsim_env *env, fsim_pos p) {
+    int64_t tx = floordiv(p.x, TILE), ty = floordiv(p.y, TILE);
+    for (int32_t i = 0; i < env->entity_count; i++) {
+        const fsim_entity *e = &env->entities[i];
+        if (e->alive && e->kind == K_BELT && floordiv(e->pos.x, TILE) == tx &&
+            floordiv(e->pos.y, TILE) == ty)
+            return i;
+    }
+    return -1;
+}
+
+/* One tick of a chain of lanes, front lane first. */
+static void update_chain(fsim_env *env, const int32_t *refs, int32_t size) {
+    int32_t total = 0;
+    for (int32_t k = 0; k < size; k++) total += lane_of(env, refs[k])->count;
+    if (total == 0) return;
+    const fsim_entity *front = &env->entities[refs[0] >> 1];
+    int32_t side = front->lane_side[refs[0] & 1];
+    int32_t entry = front->lane_entry[refs[0] & 1];
+    int has_ahead = 0;
+    int32_t ahead = 0;          /* the item ahead after its move, in chain coordinates */
+    int32_t offset = 0;         /* chain coordinate of this lane's downstream edge */
+    for (int32_t k = 0; k < size; k++) {
+        fsim_lane *lane = lane_of(env, refs[k]);
+        int32_t i = 0;
+        while (i < lane->count) {
+            fsim_belt_item *it = &lane->items[i];
+            int32_t old = offset + it->pos;
+            int32_t want = old - BELT_SPEED;
+            if (has_ahead) {
+                if (ahead + BELT_GAP > want) want = ahead + BELT_GAP;
+            } else if (want < 0) {
+                /* The front of the chain at its end: across into the side of
+                 * another belt if it sideloads, else it stops at 0. */
+                if (side >= 0 && lane_insert(env, side, entry + old, it->item, it->id, 0)) {
+                    lane_take(lane, i);
+                    continue;
+                }
+                want = 0;
+            }
+            if (want > old) want = old;
+            has_ahead = 1;
+            ahead = want;
+            if (want < offset) {
+                /* Onto the lane ahead, behind everything already there. */
+                fsim_lane *down = lane_of(env, refs[k - 1]);
+                int32_t down_length = lane_length_of(env, refs[k - 1]);
+                if (down->count < FSIM_LANE_ITEMS) {
+                    fsim_belt_item moving = *it;
+                    lane_take(lane, i);
+                    lane_put(down, down->count, want - (offset - down_length), moving.item,
+                             moving.id, 1);
+                    continue;
+                }
+                want = offset;      /* no room: cannot happen at 64 apart */
+                ahead = want;
+            }
+            it->moved = (uint8_t)(want != old);
+            it->pos = (int16_t)(want - offset);
+            i++;
+        }
+        offset += lane_length_of(env, refs[k]);
+    }
+}
+
+typedef struct {
+    int32_t pos;                /* chain coordinate */
+    int32_t move;
+    fsim_belt_item it;
+} ring_item;
+
+/* One tick of a closed loop of lanes. Not measured: every item moves 8 unless
+ * that brings it within 64 of the item ahead after that one's own move -- the
+ * largest movement that keeps the straight-line rule, found by relaxation. */
+static void update_ring(fsim_env *env, const int32_t *refs, int32_t size) {
+    int32_t total = 0, length = 0;
+    for (int32_t k = 0; k < size; k++) total += lane_of(env, refs[k])->count;
+    if (total == 0) return;
+    ring_item *items = (ring_item *)malloc(sizeof(ring_item) * (size_t)total);
+    int32_t *offsets = (int32_t *)malloc(sizeof(int32_t) * (size_t)size);
+    if (!items || !offsets) {
+        free(items);
+        free(offsets);
+        return;
+    }
+    int32_t n = 0;
+    for (int32_t k = 0; k < size; k++) {
+        fsim_lane *lane = lane_of(env, refs[k]);
+        offsets[k] = length;
+        for (int32_t i = 0; i < lane->count; i++) {
+            items[n].pos = length + lane->items[i].pos;
+            items[n].move = BELT_SPEED;
+            items[n].it = lane->items[i];
+            n++;
+        }
+        length += lane_length_of(env, refs[k]);
+        lane->count = 0;
+    }
+    for (int changed = 1; changed;) {
+        changed = 0;
+        for (int32_t i = 0; i < n; i++) {
+            int32_t a = i > 0 ? i - 1 : n - 1;
+            int32_t gap = items[i].pos - items[a].pos + (i > 0 ? 0 : length);
+            int32_t move = n > 1 ? gap + items[a].move - BELT_GAP : BELT_SPEED;
+            if (move > BELT_SPEED) move = BELT_SPEED;
+            if (move < 0) move = 0;
+            if (move < items[i].move) {
+                items[i].move = move;
+                changed = 1;
+            }
+        }
+    }
+    for (int32_t i = 0; i < n; i++) {
+        int32_t pos = items[i].pos - items[i].move;
+        if (pos < 0) pos += length;
+        int32_t k = size - 1;
+        while (k > 0 && offsets[k] > pos) k--;
+        fsim_lane *lane = lane_of(env, refs[k]);
+        int32_t at = lane->count;
+        while (at > 0 && lane->items[at - 1].pos > pos - offsets[k]) at--;
+        if (lane->count < FSIM_LANE_ITEMS)
+            lane_put(lane, at, pos - offsets[k], items[i].it.item, items[i].it.id,
+                     items[i].move != 0);
+    }
+    free(items);
+    free(offsets);
+}
+
+/* Chains run in the order rebuild_logistics found. Not settled by the
+ * evidence: when both lanes of a feed reach a target on the same tick for the
+ * first time, the engine moves one of the two items 8 further than this does
+ * (feed lane 1 in the probe's sideload rig, t=128; feed lane 2 in FactorioRL's
+ * logistics_sideload_merge trace, t=127) -- apparently whichever lane the
+ * engine updates first, which looks like the order the lanes first got
+ * items. Every later transfer in both recordings matches. */
+static void update_belts(fsim_env *env) {
+    for (int32_t c = 0; c < env->chain_count; c++) {
+        int32_t size = env->chain_size[c];
+        const int32_t *refs = &env->chain_lanes[env->chain_first[c]];
+        if (size < 0) update_ring(env, refs, -size);
+        else update_chain(env, refs, size);
+    }
+}
+
+typedef struct {
+    int64_t key;
+    int32_t index;
+} tile_entry;
+
+static int64_t tile_key(int64_t tx, int64_t ty) { return ty * 4294967296LL + tx; }
+
+static int tile_cmp(const void *pa, const void *pb) {
+    const tile_entry *a = pa, *b = pb;
+    if (a->key != b->key) return a->key < b->key ? -1 : 1;
+    return a->index < b->index ? -1 : (a->index > b->index);
+}
+
+/* The belt on tile (tx, ty) facing `dir16`, or -1 (any facing: dir16 < 0). */
+static int32_t belt_on(const fsim_env *env, const tile_entry *belts, int32_t n, int64_t tx,
+                       int64_t ty, int32_t dir16) {
+    int64_t key = tile_key(tx, ty);
+    int32_t lo = 0, hi = n - 1;
+    while (lo <= hi) {
+        int32_t mid = (lo + hi) / 2;
+        if (belts[mid].key < key) lo = mid + 1;
+        else hi = mid - 1;
+    }
+    if (lo >= n || belts[lo].key != key) return -1;
+    int32_t index = belts[lo].index;
+    if (dir16 >= 0 && env->entities[index].direction != dir16) return -1;
+    return index;
+}
+
+/* The direction of a unit vector. */
+static int32_t vec_dir(int32_t ux, int32_t uy) {
+    if (uy < 0) return 0;
+    if (ux > 0) return 4;
+    if (uy > 0) return 8;
+    return 12;
+}
+
+/* The entity at an inserter's pickup or drop point: a machine, else a belt. */
+static int32_t point_target(const fsim_env *env, fsim_pos p, int32_t except) {
+    int32_t m = machine_at(env, p, except);
+    return m >= 0 ? m : belt_at(env, p);
+}
+
+static fsim_pos inserter_point(const fsim_entity *s, int32_t distance) {
+    int32_t ux, uy;
+    dir_vec(s->direction, &ux, &uy);
+    fsim_pos p = {s->pos.x + ux * distance, s->pos.y + uy * distance};
+    return p;
+}
+
+/* Belt shapes, lane links, the chains and the order they run in, and every
+ * inserter's pickup and drop target. */
+static void rebuild_logistics(fsim_env *env) {
+    tile_entry belts[FSIM_MAX_ENTITIES];
+    int32_t n = 0;
+    env->inserter_count = 0;
+    for (int32_t i = 0; i < env->entity_count; i++) {
+        const fsim_entity *e = &env->entities[i];
+        if (!e->alive) continue;
+        if (e->kind == K_BELT) {
+            belts[n].key = tile_key(floordiv(e->pos.x, TILE), floordiv(e->pos.y, TILE));
+            belts[n].index = i;
+            n++;
+        } else if (e->kind == K_INSERTER) {
+            env->inserters[env->inserter_count++] = i;
+        }
+    }
+    qsort(belts, (size_t)n, sizeof(belts[0]), tile_cmp);
+
+    /* Shapes: a belt fed from behind is straight; fed from exactly one side
+     * and not from behind, it turns (a right turn when that side is its
+     * right). A left turn mirrors the measured right turn: not measured. */
+    for (int32_t k = 0; k < n; k++) {
+        fsim_entity *b = &env->entities[belts[k].index];
+        int32_t ux, uy;
+        dir_vec(b->direction, &ux, &uy);
+        int64_t tx = floordiv(b->pos.x, TILE), ty = floordiv(b->pos.y, TILE);
+        int32_t rx = -uy, ry = ux;
+        int behind = belt_on(env, belts, n, tx - ux, ty - uy, b->direction) >= 0;
+        int from_right = belt_on(env, belts, n, tx + rx, ty + ry, vec_dir(-rx, -ry)) >= 0;
+        int from_left = belt_on(env, belts, n, tx - rx, ty - ry, vec_dir(rx, ry)) >= 0;
+        b->shape = BELT_STRAIGHT;
+        if (!behind && from_right != from_left) b->shape = from_right ? BELT_RIGHT : BELT_LEFT;
+        b->lane_length[0] = b->shape == BELT_RIGHT ? BELT_CURVE_OUTER
+                          : b->shape == BELT_LEFT ? BELT_CURVE_INNER : TILE;
+        b->lane_length[1] = b->shape == BELT_RIGHT ? BELT_CURVE_INNER
+                          : b->shape == BELT_LEFT ? BELT_CURVE_OUTER : TILE;
+        /* A belt that became or stopped being a turn keeps its items, clipped
+         * to the new lane: how the engine re-places them is not measured. */
+        for (int lane = 0; lane < 2; lane++) {
+            fsim_lane *l = &b->lanes[lane];
+            int32_t limit = b->lane_length[lane] - 1;
+            for (int32_t j = l->count - 1; j >= 0; j--) {
+                if (l->items[j].pos > limit) l->items[j].pos = (int16_t)limit;
+                if (j + 1 < l->count && l->items[j].pos > l->items[j + 1].pos)
+                    l->items[j].pos = l->items[j + 1].pos;
+                limit = l->items[j].pos;
+            }
+        }
+    }
+
+    /* Links: into the belt ahead, lane to lane, unless it faces back at this
+     * one; into its side when that belt is straight. */
+    int32_t pred[FSIM_MAX_LANES];
+    for (int32_t r = 0; r < FSIM_MAX_LANES; r++) pred[r] = -1;
+    for (int32_t k = 0; k < n; k++) {
+        int32_t index = belts[k].index;
+        fsim_entity *b = &env->entities[index];
+        int32_t ux, uy;
+        dir_vec(b->direction, &ux, &uy);
+        int64_t tx = floordiv(b->pos.x, TILE), ty = floordiv(b->pos.y, TILE);
+        for (int lane = 0; lane < 2; lane++) b->lane_next[lane] = b->lane_side[lane] = -1;
+        int32_t ahead = belt_on(env, belts, n, tx + ux, ty + uy, -1);
+        if (ahead < 0) continue;
+        const fsim_entity *a = &env->entities[ahead];
+        if (a->direction == (b->direction + 8) % 16) continue;
+        if (a->direction == b->direction || a->shape != BELT_STRAIGHT) {
+            for (int lane = 0; lane < 2; lane++) {
+                b->lane_next[lane] = ahead * 2 + lane;
+                pred[ahead * 2 + lane] = index * 2 + lane;
+            }
+            continue;
+        }
+        /* Sideload: onto the target's lane on the side this belt comes from.
+         * Only a feed into the right side of the target was measured. */
+        int32_t ax, ay;
+        dir_vec(a->direction, &ax, &ay);
+        int from_right = tx - floordiv(a->pos.x, TILE) == -ay &&
+                         ty - floordiv(a->pos.y, TILE) == ax;
+        int32_t target = ahead * 2 + (from_right ? 1 : 0);
+        for (int lane = 0; lane < 2; lane++) {
+            /* Lane 1 lies to the left of this belt's travel, (uy, -ux). */
+            int32_t sx = lane == 0 ? uy : -uy, sy = lane == 0 ? -ux : ux;
+            int upstream = sx * ax + sy * ay < 0;
+            b->lane_side[lane] = target;
+            b->lane_entry[lane] = upstream ? SIDELOAD_FAR : SIDELOAD_NEAR;
+        }
+    }
+
+    /* Chains: from each lane that runs into nothing, back along its feeders;
+     * what is left over is closed loops. By ref, so the order does not depend
+     * on where the belts are. */
+    int32_t chain_of[FSIM_MAX_LANES];
+    int32_t first[FSIM_MAX_LANES], size[FSIM_MAX_LANES], lanes[FSIM_MAX_LANES];
+    for (int32_t r = 0; r < FSIM_MAX_LANES; r++) chain_of[r] = -1;
+    int32_t chains = 0, used = 0;
+    int32_t refs[FSIM_MAX_LANES];
+    int32_t nrefs = 0;
+    for (int32_t k = 0; k < n; k++) {
+        refs[nrefs++] = belts[k].index * 2;
+        refs[nrefs++] = belts[k].index * 2 + 1;
+    }
+    /* By entity, lane 2 first: of the two lanes of one feed, lane 2 joins the
+     * target first (a stuck target in FactorioRL's logistics_sideload_merge
+     * trace, t=583). Measured once; see the note on update_belts. */
+    for (int32_t i = 1; i < nrefs; i++) {
+        int32_t v = refs[i], j = i - 1;
+        while (j >= 0 && (refs[j] ^ 1) > (v ^ 1)) {
+            refs[j + 1] = refs[j];
+            j--;
+        }
+        refs[j + 1] = v;
+    }
+    for (int32_t pass = 0; pass < 2; pass++) {
+        for (int32_t i = 0; i < nrefs; i++) {
+            int32_t r = refs[i];
+            if (chain_of[r] >= 0) continue;
+            if (pass == 0 && env->entities[r >> 1].lane_next[r & 1] >= 0) continue;
+            first[chains] = used;
+            int32_t count = 0;
+            for (int32_t at = r; at >= 0 && chain_of[at] < 0; at = pred[at]) {
+                chain_of[at] = chains;
+                lanes[used++] = at;
+                count++;
+            }
+            size[chains] = pass == 0 ? count : -count;
+            chains++;
+        }
+    }
+
+    /* Order: a chain after the chain it sideloads into. Depth first; a cycle
+     * of sideloads runs in chain order. */
+    int32_t state[FSIM_MAX_LANES], order[FSIM_MAX_LANES], stack[FSIM_MAX_LANES];
+    int32_t done = 0;
+    for (int32_t c = 0; c < chains; c++) state[c] = 0;
+    for (int32_t c = 0; c < chains; c++) {
+        int32_t depth = 0;
+        stack[depth++] = c;
+        while (depth > 0) {
+            int32_t at = stack[depth - 1];
+            if (state[at] == 2) {
+                depth--;
+                continue;
+            }
+            int32_t target = -1;
+            if (size[at] > 0) {
+                int32_t front = lanes[first[at]];
+                int32_t side = env->entities[front >> 1].lane_side[front & 1];
+                if (side >= 0) target = chain_of[side];
+            }
+            if (state[at] == 0 && target >= 0 && state[target] == 0) {
+                state[at] = 1;
+                stack[depth++] = target;
+                continue;
+            }
+            state[at] = 2;
+            order[done++] = at;
+            depth--;
+        }
+    }
+    int32_t out = 0;
+    for (int32_t k = 0; k < done; k++) {
+        int32_t c = order[k];
+        env->chain_first[k] = out;
+        env->chain_size[k] = size[c];
+        int32_t count = size[c] < 0 ? -size[c] : size[c];
+        for (int32_t j = 0; j < count; j++) env->chain_lanes[out++] = lanes[first[c] + j];
+    }
+    env->chain_count = done;
+
+    for (int32_t k = 0; k < env->inserter_count; k++) {
+        int32_t index = env->inserters[k];
+        fsim_entity *s = &env->entities[index];
+        s->pickup_target = point_target(env, inserter_point(s, INSERTER_PICKUP), index);
+        s->drop_target = point_target(env, inserter_point(s, -INSERTER_DROP), index);
+    }
+    env->logistics_version = env->entities_version;
+}
+
+/* ------------------------------------------------------------------ inserters
+ *
+ * Measured on the engine (docs/sim-logistics.md), burner inserters only:
+ *
+ * - As built the hand extends to the pickup for 8 ticks, 1,750 J each, and
+ *   takes an item on the 8th; from then on pickup to drop and drop to pickup
+ *   are 38 ticks each, the first 5 at 2,400 J and the rest at 650 J.
+ * - An item goes into the drop target on the 38th tick; the hand then
+ *   swings back empty, the same 38 ticks.
+ * - With nothing to take, or nowhere to put it, the hand waits and draws
+ *   nothing -- the tick it arrived is not even refilled. Inserters run before
+ *   drills and furnaces, so a change there is acted on the tick after; the
+ *   tick it acts, it refills the buffer and moves on the next.
+ * - It keeps a furnace at 2 ore and 5 fuel, checked before it picks up: a hand
+ *   that would overfill waits empty at the pickup.
+ * - Holding fuel with its own fuel slot empty, it swings to itself instead
+ *   (28 ticks, 2,400 J each), fills the slot and swings back (28 more).
+ *
+ * Not modelled (see docs/sim-logistics.md, open questions): taking an item
+ * that is still moving on a belt (inserter_belt_pickup), the redirect to its
+ * own fuel slot when that empties mid-swing, and the draw of a hand that got
+ * less than a full tick of energy, which is known only to stop it.
+ */
+
+static int32_t smelt_product(int32_t item);
+
+/* Whether `s` would take `item` now: for its own empty fuel slot, or for a
+ * drop target that would take it without passing the fill limits. A chest or
+ * a belt is checked at the drop instead, where the hand waits (not measured
+ * for a full chest). */
+static int inserter_wants(const fsim_env *env, const fsim_entity *s, int32_t item) {
+    if (is_fuel(item) && s->fuel.count == 0) return 1;
+    if (s->drop_target < 0) return 0;
+    const fsim_entity *d = &env->entities[s->drop_target];
+    switch (d->kind) {
+    case K_CHEST:
+    case K_BELT:
+        return 1;
+    case K_FURNACE:
+        if (is_fuel(item))
+            return d->fuel.count < INSERTER_FUEL_LIMIT &&
+                   slot_room(&d->fuel, item, STACK_SIZE[item]) > 0;
+        if (smelt_product(item) == IT_NONE) return 0;
+        return d->source.count < INSERTER_SOURCE_LIMIT &&
+               slot_room(&d->source, item, STACK_SIZE[item]) > 0;
+    case K_DRILL:
+    case K_INSERTER:
+        /* The furnace's fuel limit; not measured for these. */
+        return is_fuel(item) && d->fuel.count < INSERTER_FUEL_LIMIT &&
+               slot_room(&d->fuel, item, STACK_SIZE[item]) > 0;
+    default:
+        return 0;
+    }
+}
+
+/* Taking from a belt. The engine chases moving items (`chases_belt_items`):
+ * the hand follows an item along the belt and takes it where they meet, which
+ * the probe recorded tick by tick (rigs `same`, `tick_*`, `flow*`, `bend`) but
+ * did not reduce to a rule. That model goes here.
+ *
+ * In: the inserter `s` (its hand is at the pickup this tick: arriving there,
+ * or waiting) and the belt `belt` under its pickup point, after this tick's
+ * belt update. Out: 1 with the item removed from its lane and returned in
+ * `*item`, or 0 to wait.
+ *
+ * TODO(chase): implemented is only what the probe pinned down -- items that
+ * did not move in this tick's belt update are taken like a chest's
+ * (`bend`: the pickup 38 ticks after the drop), the one nearest the tile
+ * centre, lane 2 first on a tie (measured twice, with the inserter on lane
+ * 2's side, so "near lane" is as likely), then the downstream one. A moving
+ * item is not taken: the hand waits until it stops. */
+static int inserter_belt_pickup(fsim_env *env, const fsim_entity *s, int32_t belt,
+                                int32_t *item) {
+    fsim_entity *b = &env->entities[belt];
+    int32_t best_lane = -1, best_at = -1, best_distance = 0;
+    for (int32_t lane = 1; lane >= 0; lane--) {
+        const fsim_lane *l = &b->lanes[lane];
+        for (int32_t at = 0; at < l->count; at++) {
+            const fsim_belt_item *it = &l->items[at];
+            if (it->moved || it->pos >= TILE || !inserter_wants(env, s, it->item)) continue;
+            int32_t distance = abs(it->pos - TILE / 2);
+            if (best_lane < 0 || distance < best_distance) {
+                best_lane = lane;
+                best_at = at;
+                best_distance = distance;
+            }
+        }
+    }
+    if (best_lane < 0) return 0;
+    *item = b->lanes[best_lane].items[best_at].item;
+    lane_take(&b->lanes[best_lane], best_at);
+    return 1;
+}
+
+/* The hand at the pickup: take one item if there is one it wants. */
+static int inserter_pickup(fsim_env *env, int32_t index) {
+    fsim_entity *s = &env->entities[index];
+    if (s->pickup_target < 0) return 0;
+    fsim_entity *src = &env->entities[s->pickup_target];
+    int32_t item = IT_NONE;
+    if (src->kind == K_CHEST) {
+        for (int i = 0; i < FSIM_CHEST_SLOTS && item == IT_NONE; i++)
+            if (src->chest[i].count > 0 && inserter_wants(env, s, src->chest[i].item)) {
+                item = src->chest[i].item;
+                slot_remove(&src->chest[i], item, 1);
+            }
+    } else if (src->kind == K_FURNACE) {
+        if (src->result.count > 0 && inserter_wants(env, s, src->result.item)) {
+            item = src->result.item;
+            slot_remove(&src->result, item, 1);
+        }
+    } else if (src->kind == K_BELT) {
+        if (!inserter_belt_pickup(env, s, s->pickup_target, &item)) item = IT_NONE;
+    }
+    if (item == IT_NONE) return 0;
+    s->held = item;
+    s->phase = is_fuel(item) && s->fuel.count == 0 ? INS_TO_SELF : INS_TO_DROP;
+    s->swing = 0;
+    return 1;
+}
+
+/* The hand at the drop: put the item in. With nothing there it waits (the
+ * engine drops it on the ground: not measured). */
+static int inserter_drop(fsim_env *env, int32_t index) {
+    fsim_entity *s = &env->entities[index];
+    if (s->drop_target < 0) return 0;
+    fsim_entity *d = &env->entities[s->drop_target];
+    int done;
+    if (d->kind == K_BELT)
+        done = belt_drop(env, s->drop_target, inserter_point(s, -INSERTER_DROP), s->held);
+    else
+        done = machine_accepts(d, s->held, 1, 1) == 1;
+    if (!done) return 0;
+    s->held = IT_NONE;
+    s->phase = INS_TO_PICKUP;
+    s->swing = 0;
+    return 1;
+}
+
+/* Whether the move in progress has ended. The approach and the swing to its
+ * own slot were only seen in whole ticks. */
+static int inserter_arrived(const fsim_entity *s) {
+    switch (s->phase) {
+    case INS_APPROACH: return s->swing >= INSERTER_APPROACH_TICKS;
+    case INS_TO_SELF: case INS_SELF_BACK: return s->swing >= INSERTER_SELF_TICKS;
+    default: return s->swing + 1.0 >= INSERTER_SWING_STEPS;
+    }
+}
+
+static double inserter_draw(const fsim_entity *s) {
+    switch (s->phase) {
+    case INS_APPROACH: return INSERTER_DRAW_APPROACH;
+    case INS_TO_SELF: case INS_SELF_BACK: return INSERTER_DRAW_FAST;
+    default: return s->swing < INSERTER_FAST_TICKS ? INSERTER_DRAW_FAST : INSERTER_DRAW_SLOW;
+    }
+}
+
+/* The hand has reached the end of its move. Returns 0 when it now waits. */
+static int inserter_arrive(fsim_env *env, int32_t index) {
+    fsim_entity *s = &env->entities[index];
+    switch (s->phase) {
+    case INS_TO_DROP:
+        if (inserter_drop(env, index)) return 1;
+        s->phase = INS_WAIT_DROP;
+        s->status = ST_WAITING_FOR_SPACE;
+        return 0;
+    case INS_TO_SELF:
+        s->swing = 0;
+        if (slot_insert(&s->fuel, s->held, 1, STACK_SIZE[s->held]) == 1) {
+            s->held = IT_NONE;
+            s->phase = INS_SELF_BACK;
+        } else {
+            s->phase = INS_TO_DROP;   /* its slot filled meanwhile: not measured */
+        }
+        return 1;
+    default:
+        if (inserter_pickup(env, index)) return 1;
+        s->phase = INS_WAIT_PICKUP;
+        s->status = ST_WAITING_FOR_SOURCE;
+        return 0;
+    }
+}
+
+static void update_inserter(fsim_env *env, int32_t index) {
+    fsim_entity *s = &env->entities[index];
+    if (s->phase == INS_WAIT_PICKUP || s->phase == INS_WAIT_DROP) {
+        int picking = s->phase == INS_WAIT_PICKUP;
+        int acted = picking ? inserter_pickup(env, index) : inserter_drop(env, index);
+        if (!acted) {
+            s->status = picking ? ST_WAITING_FOR_SOURCE : ST_WAITING_FOR_SPACE;
+            return;
+        }
+    } else {
+        double fraction = burner_work(s, inserter_draw(s));
+        s->swing += fraction;
+        if (fraction > 0 && inserter_arrived(s) && !inserter_arrive(env, index))
+            return;
+    }
+    burner_refill(s);
+    s->status = s->energy > 0 ? ST_WORKING : ST_NO_FUEL;
+}
+
 static void update_drill(fsim_env *env, int32_t index) {
     fsim_entity *d = &env->entities[index];
     fsim_pos drop = drop_position(d);
     int32_t target = machine_at(env, drop, index);
+    int32_t belt = target < 0 ? belt_at(env, drop) : -1;
     if (d->held != IT_NONE) {
         if (target >= 0) {
             if (machine_accepts(&env->entities[target], d->held, 1, 1) == 1) {
@@ -792,6 +1612,15 @@ static void update_drill(fsim_env *env, int32_t index) {
                 d->status = ST_WAITING_FOR_SPACE;
                 return;
             }
+        } else if (belt >= 0) {
+            /* Onto the lane whose half holds the drop point: lane 1 at 128
+             * for a drill facing south onto a belt running east. */
+            if (!belt_drop(env, belt, drop, d->held)) {
+                d->status = ST_WAITING_FOR_SPACE;
+                return;
+            }
+            d = &env->entities[index];
+            d->held = IT_NONE;
         } else {
             if (pile_blocks(env, drop)) {
                 d->status = ST_WAITING_FOR_SPACE;
@@ -841,7 +1670,7 @@ static void update_drill(fsim_env *env, int32_t index) {
         /* Only an output into a machine it has not delivered to before shows
          * as waiting; after that the drill keeps working while it delivers. */
         d->status = ST_WAITING_FOR_SPACE;
-    } else if (produced && target < 0 && pile_blocks(env, drop)) {
+    } else if (produced && target < 0 && belt < 0 && pile_blocks(env, drop)) {
         d->status = ST_WAITING_FOR_SPACE;
     } else {
         d->status = ST_WORKING;
@@ -929,6 +1758,16 @@ static void pick_up(fsim_env *env, int32_t index) {
         if (source > 0) insert_main(env, source_item, source);
         if (e->result.count > 0) insert_main(env, e->result.item, e->result.count);
     }
+    /* Not measured: the order a chest's, a belt's and an inserter's contents
+     * come back in, which only decides the slots they land in. */
+    if (e->kind == K_CHEST)
+        for (int i = 0; i < FSIM_CHEST_SLOTS; i++)
+            if (e->chest[i].count > 0) insert_main(env, e->chest[i].item, e->chest[i].count);
+    if (e->kind == K_BELT)
+        for (int lane = 0; lane < 2; lane++)
+            for (int32_t k = 0; k < e->lanes[lane].count; k++)
+                insert_main(env, e->lanes[lane].items[k].item, 1);
+    if (e->kind == K_INSERTER && e->held != IT_NONE) insert_main(env, e->held, 1);
     if (e->kind == K_PILE) {
         insert_main(env, e->pile.item, e->pile.count);
     } else {
@@ -982,11 +1821,30 @@ static void update_character(fsim_env *env) {
     }
 }
 
+/* One tick, in the engine's order as the probes read it off same-tick
+ * evidence (docs/sim-logistics.md):
+ *
+ * 1. the character;
+ * 2. belts: an item a drill or an inserter puts on a lane moves once as it
+ *    lands, and the line it lands on has already moved (a drill output onto a
+ *    just-extended line lands 64 behind the item ahead as it stands after the
+ *    move); an inserter reacts to an item arriving on its pickup tile in the
+ *    tick it arrives;
+ * 3. inserters, in creation order (not measured between inserters): before
+ *    drills and furnaces, since a drill's output into a chest, a furnace's
+ *    product and room made in a furnace's source are all acted on a tick
+ *    later, whichever was built first;
+ * 4. drills and furnaces in reverse creation order: a furnace sees ore a
+ *    drill delivered this tick only on the next one. */
 static void update_world(fsim_env *env) {
     if (env->steam_power_at && env->tick >= env->steam_power_at) env->steam_power = 1;
     update_character(env);
-    /* Machines in reverse creation order: a furnace sees ore a drill
-     * delivered this tick only on the next one. */
+    if (env->logistics_version != env->entities_version) rebuild_logistics(env);
+    if (env->chain_count) update_belts(env);
+    for (int32_t k = 0; k < env->inserter_count; k++) {
+        int32_t i = env->inserters[k];
+        if (env->entities[i].alive) update_inserter(env, i);
+    }
     for (int32_t i = env->entity_count - 1; i >= 0; i--) {
         fsim_entity *e = &env->entities[i];
         if (!e->alive) continue;
@@ -1146,7 +2004,8 @@ static int placeable(const fsim_env *env, int32_t kind, fsim_pos centre) {
         if (abs(e->pos.x - centre.x) < reach && abs(e->pos.y - centre.y) < reach) return 0;
     }
     int32_t reach = CHAR_BOX + r;
-    if (abs(env->char_pos.x - centre.x) < reach && abs(env->char_pos.y - centre.y) < reach)
+    if (has_flag(kind, KF_BLOCKS_WALKING) && abs(env->char_pos.x - centre.x) < reach &&
+        abs(env->char_pos.y - centre.y) < reach)
         return 0;
     if (box_hits_water(env, centre, r, 0)) return 0;
     if (kind == K_DRILL) {
@@ -1191,6 +2050,15 @@ static int32_t act_rotate(fsim_env *env, const fsim_action *a) {
         return reject(env, E_INVALID_TARGET);
     fsim_entity *d = &env->entities[index];
     d->direction = (d->direction + (a->reverse ? 12 : 4)) % 16;
+    if (d->kind == K_BELT || d->kind == K_INSERTER) {
+        /* New links and targets (rebuild_logistics). Not measured: where a
+         * turned belt's items go when its lane lengths change -- the engine
+         * re-places them (a loaded turn rotated back to straight in
+         * FactorioRL's logistics_belt_rotate_and_mine trace) by a rule this
+         * does not have -- and what a turned inserter does with a swing in
+         * progress: it carries on. */
+        env->entities_version++;
+    }
     env->act.status = R_COMPLETED;
     return 0;
 }
@@ -1253,8 +2121,14 @@ static int32_t act_transfer(fsim_env *env, const fsim_action *a) {
     int32_t available;
     fsim_stack *from_slot = NULL;
     int32_t from_cap = 0;
+    fsim_entity *chests[2] = {NULL, NULL};
+    for (int k = 0; k < 2; k++)
+        if (ends[k] != 0 && env->entities[indices[k]].kind == K_CHEST)
+            chests[k] = &env->entities[indices[k]];
     if (ends[0] == 0) {
         available = count_main(env, item);
+    } else if (chests[0]) {
+        available = chest_count(chests[0], item);
     } else {
         from_slot = machine_slot(&env->entities[indices[0]], item, 1, &from_cap);
         available = (from_slot->item == item) ? from_slot->count : 0;
@@ -1265,6 +2139,8 @@ static int32_t act_transfer(fsim_env *env, const fsim_action *a) {
     int32_t to_cap = 0;
     if (ends[1] == 0) {
         if (main_room(env, item) <= 0) return reject(env, E_NO_SPACE);
+    } else if (chests[1]) {
+        if (chest_room(chests[1], item) <= 0) return reject(env, E_NO_SPACE);
     } else {
         to_slot = machine_slot(&env->entities[indices[1]], item, 0, &to_cap);
         int accepts = slot_room(to_slot, item, to_cap) > 0;
@@ -1273,13 +2149,18 @@ static int32_t act_transfer(fsim_env *env, const fsim_action *a) {
         if (!accepts) return reject(env, E_NO_SPACE);
     }
     int32_t removed = ends[0] == 0 ? remove_main(env, item, wanted)
+                    : chests[0]    ? chest_remove(chests[0], item, wanted)
                                    : slot_remove(from_slot, item, wanted);
     if (removed <= 0) return reject(env, E_NO_ITEMS);
     int32_t inserted = ends[1] == 0 ? insert_main(env, item, removed)
+                     : chests[1]    ? chest_insert(chests[1], item, removed)
                                     : slot_insert(to_slot, item, removed, to_cap);
     if (inserted < removed) {
+        /* What did not fit goes back; a chest's may land in other slots than
+         * it left (not measured). */
         int32_t back = removed - inserted;
         if (ends[0] == 0) insert_main(env, item, back);
+        else if (chests[0]) chest_insert(chests[0], item, back);
         else slot_insert(from_slot, item, back, from_cap);
         return reject(env, E_NO_SPACE);
     }
@@ -1491,8 +2372,26 @@ static fsim_stack shown_contents(const fsim_entity *e) {
     switch (e->kind) {
     case K_FURNACE: return e->source;
     case K_PILE: return e->pile;
+    case K_CHEST: {
+        /* The first item and how many of it; a chest of several items is
+         * more than a remembered record holds. */
+        for (int i = 0; i < FSIM_CHEST_SLOTS; i++)
+            if (e->chest[i].count > 0) {
+                fsim_stack first = {e->chest[i].item, chest_count(e, e->chest[i].item)};
+                return first;
+            }
+        return none;
+    }
     default: return none;
     }
+}
+
+/* Everything an observation's `contents` counts: a chest's whole inventory. */
+static int32_t contents_total(const fsim_entity *e) {
+    if (e->kind != K_CHEST) return shown_contents(e).count;
+    int32_t total = 0;
+    for (int i = 0; i < FSIM_CHEST_SLOTS; i++) total += e->chest[i].count;
+    return total;
 }
 
 static void remember(fsim_env *env, int32_t handle, const fsim_entity *e) {
@@ -1691,17 +2590,91 @@ void fsim_reset(fsim_env *env, const fsim_scene *scene) {
         };
         new_entity(env, K_WALL, p, 0, 1);
     }
-    /* Machines the scene places rather than the agent (fsim.h). They arrive
-     * empty, which `new_entity` already does: a drill or a furnace with no
-     * fuel is ST_NO_FUEL. */
-    for (int32_t i = 0; i < scene->machine_count; i++) {
+    /* Entities the scene places rather than the agent (fsim.h), then what
+     * they are given. Empty, `new_entity` makes a drill or a furnace
+     * ST_NO_FUEL. */
+    int32_t placed[FSIM_MAX_ENTITIES];
+    for (int32_t i = 0; i < scene->machine_count && i < FSIM_MAX_ENTITIES; i++) {
         fsim_pos p = {scene->machine_x[i], scene->machine_y[i]};
-        new_entity(env, scene->machine_kind[i], p, scene->machine_dir[i], 0);
+        placed[i] = new_entity(env, scene->machine_kind[i], p, scene->machine_dir[i], 0);
+    }
+    for (int32_t i = 0; i < scene->content_count; i++) {
+        int32_t m = scene->content_machine[i];
+        if (m >= 0 && m < scene->machine_count && m < FSIM_MAX_ENTITIES && placed[m] >= 0)
+            fsim_entity_insert(env, placed[m], scene->content_item[i], scene->content_amount[i]);
     }
     env->char_pos = scene->character;
     for (int32_t i = 0; i < scene->inventory_count; i++)
         insert_main(env, scene->inventory_item[i], scene->inventory_amount[i]);
+    fsim_refresh(env);
     fsim_observe(env);
+}
+
+/* ------------------------------------------------------------------ script */
+
+int32_t fsim_add_entity(fsim_env *env, int32_t kind, int32_t x, int32_t y, int32_t dir16) {
+    if (kind <= K_NONE || kind >= K_COUNT) return -1;
+    fsim_pos p = {x, y};
+    return new_entity(env, kind, p, has_flag(kind, KF_DIRECTED) ? dir16 : 0, 0);
+}
+
+int32_t fsim_entity_insert(fsim_env *env, int32_t index, int32_t item, int32_t count) {
+    if (index < 0 || index >= env->entity_count || item <= IT_NONE || item >= IT_COUNT)
+        return 0;
+    fsim_entity *e = &env->entities[index];
+    if (!e->alive || count <= 0) return 0;
+    int32_t done;
+    if (e->kind == K_CHEST) {
+        done = chest_insert(e, item, count);
+    } else if (has_flag(e->kind, KF_BURNER) && is_fuel(item)) {
+        done = slot_insert(&e->fuel, item, count, STACK_SIZE[item]);
+    } else if (e->kind == K_FURNACE && smelt_product(item) != IT_NONE) {
+        int32_t cap = item == IT_IRON_ORE ? FURNACE_SOURCE_CAP : STACK_SIZE[item];
+        done = slot_insert(&e->source, item, count, cap);
+    } else if (e->kind == K_FURNACE && (item == IT_IRON_PLATE || item == IT_COPPER_PLATE)) {
+        /* The mod names the result slot for a declared product. */
+        done = slot_insert(&e->result, item, count, STACK_SIZE[item]);
+    } else {
+        return 0;
+    }
+    /* Status as the engine reads it before the first tick, where measured: a
+     * drill given fuel is working (FactorioRL's logistics traces), a furnace
+     * given fuel has no ingredients, with ore in it or not (those traces and
+     * the logistics probe's `fout` furnace). */
+    if (e->kind == K_DRILL && e->fuel.count > 0) e->status = ST_WORKING;
+    if (e->kind == K_FURNACE && e->fuel.count > 0) e->status = ST_NO_INGREDIENTS;
+    return done;
+}
+
+static int32_t script_lane(fsim_env *env, int32_t index, int32_t lane) {
+    if (index < 0 || index >= env->entity_count || lane < 0 || lane > 1) return -1;
+    if (!env->entities[index].alive || env->entities[index].kind != K_BELT) return -1;
+    if (env->logistics_version != env->entities_version) rebuild_logistics(env);
+    return index * 2 + lane;
+}
+
+int32_t fsim_belt_insert(fsim_env *env, int32_t index, int32_t lane, int32_t position,
+                         int32_t item) {
+    int32_t ref = script_lane(env, index, lane);
+    if (ref < 0 || item <= IT_NONE || item >= IT_COUNT) return 0;
+    return lane_insert(env, ref, position, item, new_item_id(env), 0);
+}
+
+int32_t fsim_belt_insert_back(fsim_env *env, int32_t index, int32_t lane, int32_t item) {
+    int32_t ref = script_lane(env, index, lane);
+    if (ref < 0 || item <= IT_NONE || item >= IT_COUNT) return 0;
+    return lane_insert(env, ref, lane_length_of(env, ref), item, new_item_id(env), 1);
+}
+
+void fsim_refresh(fsim_env *env) {
+    if (env->logistics_version != env->entities_version) rebuild_logistics(env);
+}
+
+void fsim_advance(fsim_env *env, int32_t ticks) {
+    for (int32_t i = 0; i < ticks; i++) {
+        env->tick += 1;
+        update_world(env);
+    }
 }
 
 /* Many decisions in one call, for throughput: no Python between them. */

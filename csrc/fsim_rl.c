@@ -52,8 +52,10 @@ static int32_t rl_type_index(int32_t kind) { return kind_of(kind)->rl_type; }
 static int32_t rl_status_slot(int32_t status) {
     switch (status) {
     case ST_WORKING: return 1;
+    case ST_NORMAL: return 2;
     case ST_NO_FUEL: return 5;
     case ST_NO_MINABLE: return 6;
+    case ST_WAITING_FOR_SOURCE: return 7;
     case ST_WAITING_FOR_SPACE: return 8;
     default: return 0;           /* no_ingredients is not in the vocabulary */
     }
@@ -178,6 +180,9 @@ static void rl_domains_build(const fsim_rl *rl, rl_domains *d) {
             if (e->result.count > 0) d->source[e->result.item] = 1;
         } else if (e->kind == K_PILE && e->pile.count > 0) {
             d->source[e->pile.item] = 1;
+        } else if (e->kind == K_CHEST) {
+            for (int i = 0; i < FSIM_CHEST_SLOTS; i++)
+                if (e->chest[i].count > 0) d->source[e->chest[i].item] = 1;
         }
     }
 }
@@ -428,7 +433,7 @@ static void rl_encode_into(fsim_rl *rl, rl_fields *obs) {
             status = e->kind == K_PILE ? ST_NONE : e->status;
             working_known = e->kind != K_PILE;
             working = e->status == ST_WORKING;
-            contents = shown_contents(e).count;
+            contents = contents_total(e);
             if (e->kind == K_FURNACE) output = e->result.count;
             if (has_flag(e->kind, KF_BURNER)) fuel = e->fuel.count;
         } else {

@@ -84,6 +84,16 @@ def test_every_kind_has_a_row():
         assert flags & lib.KF_BURNER and flags & lib.KF_MACHINE
     assert lib.fsim_capacity(lib.K_DRILL) == pytest.approx(2500 * 16 / 15)
     assert lib.fsim_capacity(lib.K_FURNACE) == pytest.approx(1500 * 16 / 15)
+    # Belts occupy their tile but the character walks over them; an inserter
+    # burns fuel and takes a transfer of it; a chest is only a container.
+    assert lib.fsim_kind_flags(lib.K_BELT) == lib.KF_COLLIDES | lib.KF_DIRECTED
+    assert lib.fsim_kind_flags(lib.K_CHEST) == (
+        lib.KF_COLLIDES | lib.KF_BLOCKS_WALKING | lib.KF_MACHINE
+    )
+    assert lib.fsim_kind_flags(lib.K_INSERTER) == (
+        lib.KF_COLLIDES | lib.KF_BLOCKS_WALKING | lib.KF_BURNER | lib.KF_MACHINE | lib.KF_DIRECTED
+    )
+    assert lib.fsim_capacity(lib.K_INSERTER) == 2560
 
 
 def _walled(count: int) -> Sim:

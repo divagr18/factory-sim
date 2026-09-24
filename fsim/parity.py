@@ -42,7 +42,25 @@ class Replay:
         self.normaliser.begin({"tick": 0, "absolute_tick": 0})
         self.truth_extra = {}
         self.over = False
+        self.items_named = 0
         return self.record()
+
+    def load_hidden(self, hidden: dict) -> None:
+        """Load a recorded state, keeping belt item names in step with it.
+
+        A recording names belt items 1, 2, ... in the order it first meets
+        them. Loaded items keep their recorded names as their ids here, and the
+        next item the simulator makes must get the next name, so this side's
+        renaming becomes the identity up to the highest name recorded so far.
+        """
+        self.sim.load_hidden(hidden)
+        for record in hidden.get("entities") or []:
+            for lane in record.get("lanes") or []:
+                for item in lane or []:
+                    if len(item) > 2 and item[2] is not None:
+                        self.items_named = max(self.items_named, int(item[2]))
+        self.normaliser.item_ids = {k: k for k in range(1, self.items_named + 1)}
+        self.sim.env.next_item_id = max(self.sim.env.next_item_id, self.items_named)
 
     def step(self, key: str, arguments: dict) -> dict:
         self.sim.step(key, arguments, self.header["decision_ticks"])

@@ -46,7 +46,8 @@ ITEMS = (
 ORE_PLANES = {"iron-ore": 0, "copper-ore": 1, "coal": 2, "stone": 3}
 BLOCKED_PLANE = 5
 #: Column 3's type index, as `rl_type_index` writes it.
-KINDS = {0: "container", 1: "furnace", 3: "mining-drill", 10: "wall", 11: "item-entity"}
+KINDS = {0: "container", 1: "furnace", 3: "mining-drill", 4: "transport-belt", 5: "inserter",
+         10: "wall", 11: "item-entity"}  # fmt: skip
 FACINGS = ("N", "E", "S", "W")
 
 _LOG_CAP = math.log1p(COUNT_CAP)

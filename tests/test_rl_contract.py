@@ -48,8 +48,23 @@ def check(record, env) -> str | None:
     return None
 
 
+#: Traces that reach the engine's chase of moving belt items (not modelled; see
+#: tests/test_parity.py): the decision whose tensors first differ, all earlier
+#: ones matching.
+KNOWN_GAPS = {"logistics_belt_pickup": 7, "logistics_smelting_chain": 16}
+
+
 @pytest.mark.parametrize("name", SCENARIOS)
 def test_contract(name):
+    found = first_difference(name)
+    if name in KNOWN_GAPS:
+        assert found is not None and found[0] == KNOWN_GAPS[name], found
+    else:
+        assert found is None, found
+
+
+def first_difference(name) -> tuple | None:
+    """The first decision whose tensors, mask, goal or transition differ."""
     header, records = read_trace(GOLDEN / f"{name}.jsonl.xz")
     env = RlEnv()
     env.reset(
@@ -59,16 +74,26 @@ def test_contract(name):
         max_steps=header["max_decision_steps"],
         construction_tick_limit=header["construction_tick_limit"],
     )
-    assert check(records[0], env) is None, (0, check(records[0], env))
+    if check(records[0], env) is not None:
+        return 0, check(records[0], env)
     for record in records[1:]:
         t = record["transition"]
         _, reward, terminated, truncated, info = env.step(t["action"]["vector"])
         where = check(record, env)
-        assert where is None, (record["decision"], where)
-        assert abs(reward - t["reward"]) < 1e-12, (record["decision"], reward, t["reward"])
-        assert terminated == t["terminated"], record["decision"]
-        assert truncated == t["truncated"], record["decision"]
-        assert info["success"] == t["success"], record["decision"]
-        for key, value in t["reward_components"].items():
-            assert abs(info["reward_components"][key] - value) < 1e-12, (record["decision"], key)
-        assert info["decode_failure"] == bool(t["action"]["decode_failure"]), record["decision"]
+        if where is None and abs(reward - t["reward"]) >= 1e-12:
+            where = f"reward {reward} != {t['reward']}"
+        if where is None and (terminated, truncated, info["success"]) != (
+            t["terminated"],
+            t["truncated"],
+            t["success"],
+        ):
+            where = "termination"
+        if where is None:
+            for key, value in t["reward_components"].items():
+                if abs(info["reward_components"][key] - value) >= 1e-12:
+                    where = f"reward component {key}"
+        if where is None and info["decode_failure"] != bool(t["action"]["decode_failure"]):
+            where = "decode failure"
+        if where is not None:
+            return record["decision"], where
+    return None
