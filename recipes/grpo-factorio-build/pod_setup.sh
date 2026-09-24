@@ -15,15 +15,17 @@ WHEEL=${1:-}
 export HF_HOME=${HF_HOME:-$ROOT/hf}
 LOG=$ROOT/setup.log
 mkdir -p "$ROOT"
-exec > >(tee -a "$LOG") 2>&1
+# A fresh log per run, so waiters never match an earlier run's errors.
+if [ -f "$LOG" ]; then mv "$LOG" "$LOG.prev"; fi
+exec > >(tee "$LOG") 2>&1
 step() { echo; echo "=== $* ($(date +%T))"; }
 
 step "uv"
-if ! command -v uv >/dev/null; then
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-fi
-# shellcheck disable=SC1091
-source "$HOME/.local/bin/env"
+# Always install the current uv: some images ship an old /usr/bin/uv that cannot
+# parse prime-rl's uv.lock ("invalid type: boolean `false`, expected a timestamp").
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+uv --version
 
 step "prime-rl checkout"
 # Some submodules are declared with git@github.com: URLs; the pod has no GitHub key.
@@ -78,7 +80,7 @@ EOF
 cat > "$ROOT/start_rl.sh" <<EOF
 #!/usr/bin/env bash
 # start_rl.sh <config.toml> [extra rl args...]: detached, survives the ssh session.
-source \$HOME/.local/bin/env
+export PATH="\$HOME/.local/bin:\$PATH"
 cd $ROOT/prime-rl
 export HF_HOME=$HF_HOME FACTORIO_BUILD_MAX_POOLS=\${FACTORIO_BUILD_MAX_POOLS:-7}
 cfg=\$1; shift
@@ -88,7 +90,7 @@ EOF
 cat > "$ROOT/serve.sh" <<EOF
 #!/usr/bin/env bash
 # serve.sh <model> [gpu]: detached vLLM server on :8000.
-source \$HOME/.local/bin/env
+export PATH="\$HOME/.local/bin:\$PATH"
 cd $ROOT/prime-rl
 export HF_HOME=$HF_HOME
 CUDA_VISIBLE_DEVICES=\${2:-0} setsid nohup uv run --no-sync inference --vllm.model "\$1" > $ROOT/serve.log 2>&1 < /dev/null &
