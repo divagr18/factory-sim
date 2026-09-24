@@ -22,6 +22,7 @@
 #define DRILL_AREA 253            /* mining radius 0.99 */
 #define FURNACE_SOURCE_CAP 54     /* measured: 49 ore + an insert of 20 takes 5 */
 #define FUEL_VALUE_COAL 4000000.0
+#define FUEL_VALUE_WOOD 2000000.0
 #define DRILL_USAGE 2500.0
 #define FURNACE_USAGE 1500.0
 #define DRILL_SPEED 0.25
@@ -41,49 +42,101 @@ static double mining_time_of_item(int32_t item) {
     }
 }
 
+/* Energy an item gives when burnt, or 0 for an item that is not fuel. */
+static double fuel_value(int32_t item) {
+    switch (item) {
+    case IT_COAL: return FUEL_VALUE_COAL;
+    case IT_WOOD: return FUEL_VALUE_WOOD;
+    default: return 0.0;
+    }
+}
+
+static int is_fuel(int32_t item) { return fuel_value(item) > 0.0; }
+
+/* ------------------------------------------------------------------ kinds
+ *
+ * What is constant about an entity kind, in one row per K_*. A new kind is a
+ * K_* in fsim.h, a row here, a case in update_world if it runs, and its name
+ * in fsim/__init__.py's KINDS. What its inventories accept is machine_accepts
+ * and machine_slot. */
+
+typedef struct {
+    int32_t flags;          /* KF_* */
+    int32_t box;            /* collision half-size, 1/256 tiles */
+    int32_t size;           /* footprint side in tiles: odd snaps to a tile centre */
+    int32_t item;           /* the item that places it and mining it returns */
+    int32_t name_rank;      /* sort rank of its prototype name, by string order */
+    int32_t status;         /* status when created */
+    double mining_time;     /* seconds for the character to mine it */
+    double usage;           /* burner draw per tick, J */
+    int32_t rl_type;        /* encoders.ENTITY_TYPES index */
+} kind_info;
+
+static const kind_info KIND[K_COUNT] = {
+    [K_NONE] = {0, 0, 0, IT_NONE, 9, ST_NONE, 1.0, 0.0, 11},
+    /* burner-mining-drill */
+    [K_DRILL] = {KF_COLLIDES | KF_BLOCKS_WALKING | KF_BURNER | KF_MACHINE | KF_DIRECTED,
+                 MACHINE_BOX, 2, IT_BURNER_DRILL, 0, ST_NO_FUEL, 0.3, DRILL_USAGE, 3},
+    /* stone-furnace */
+    [K_FURNACE] = {KF_COLLIDES | KF_BLOCKS_WALKING | KF_BURNER | KF_MACHINE,
+                   MACHINE_BOX, 2, IT_STONE_FURNACE, 2, ST_NO_FUEL, 0.2, FURNACE_USAGE, 1},
+    /* stone-wall */
+    [K_WALL] = {KF_COLLIDES | KF_BLOCKS_WALKING,
+                WALL_BOX, 1, IT_STONE_WALL, 3, ST_WORKING, 0.2, 0.0, 10},
+    /* item-on-ground: never placed, and mining it returns its pile */
+    [K_PILE] = {0, PILE_BOX, 1, IT_NONE, 1, ST_NONE, 0.025, 0.0, 11},
+};
+
+static const kind_info *kind_of(int32_t kind) {
+    return &KIND[kind > K_NONE && kind < K_COUNT ? kind : K_NONE];
+}
+
+static int has_flag(int32_t kind, int32_t flag) { return (kind_of(kind)->flags & flag) != 0; }
+
+int32_t fsim_kind_flags(int32_t kind) { return kind_of(kind)->flags; }
+
+double fsim_kind_mining_time(int32_t kind) { return kind_of(kind)->mining_time; }
+
 double fsim_capacity(int32_t kind) {
     /* A burner's buffer holds 16/15 of its per-tick draw. */
-    return kind == K_DRILL ? DRILL_USAGE * 16.0 / 15.0 : FURNACE_USAGE * 16.0 / 15.0;
+    return kind_of(kind)->usage * 16.0 / 15.0;
 }
 
-static double entity_mining_time(int32_t kind) {
-    switch (kind) {
-    case K_DRILL: return 0.3;
-    case K_FURNACE: return 0.2;
-    case K_WALL: return 0.2;
-    case K_PILE: return 0.025;
-    default: return 1.0;
-    }
+static double entity_mining_time(int32_t kind) { return kind_of(kind)->mining_time; }
+
+static int32_t entity_item(int32_t kind) { return kind_of(kind)->item; }
+
+static int32_t box_of(int32_t kind) { return kind_of(kind)->box; }
+
+static int32_t name_rank(int32_t kind) { return kind_of(kind)->name_rank; }
+
+/* The kind an item places, or K_NONE. */
+static int32_t kind_placed_by(int32_t item) {
+    if (item == IT_NONE) return K_NONE;
+    for (int32_t k = K_NONE + 1; k < K_COUNT; k++)
+        if (KIND[k].item == item) return k;
+    return K_NONE;
 }
 
-static int32_t entity_item(int32_t kind) {
-    switch (kind) {
-    case K_DRILL: return IT_BURNER_DRILL;
-    case K_FURNACE: return IT_STONE_FURNACE;
-    case K_WALL: return IT_STONE_WALL;
-    default: return IT_NONE;
-    }
-}
-
-static int32_t box_of(int32_t kind) {
-    switch (kind) {
-    case K_DRILL: case K_FURNACE: return MACHINE_BOX;
-    case K_WALL: return WALL_BOX;
-    case K_PILE: return PILE_BOX;
-    default: return 0;
-    }
-}
-
-/* Sort rank of an entity's prototype name, by string order. */
-static int32_t name_rank(int32_t kind) {
-    switch (kind) {
-    case K_DRILL: return 0;   /* burner-mining-drill */
-    case K_PILE: return 1;    /* item-on-ground */
-    case K_FURNACE: return 2; /* stone-furnace */
-    case K_WALL: return 3;    /* stone-wall */
-    default: return 9;
-    }
-}
+/* The field sizes in fsim.h are literals (cffi); keep them to the limits. */
+#define FIELD_COUNT(field) (sizeof(((fsim_env *)0)->field) / sizeof(((fsim_env *)0)->field[0]))
+_Static_assert(FIELD_COUNT(events) == FSIM_EVENT_LIMIT, "events");
+_Static_assert(FIELD_COUNT(main) == FSIM_MAIN_SLOTS, "main");
+_Static_assert(FIELD_COUNT(entities) == FSIM_MAX_ENTITIES, "entities");
+_Static_assert(FIELD_COUNT(fillers) == 4 * FSIM_MAX_FILLERS, "fillers");
+_Static_assert(FIELD_COUNT(resources) == FSIM_MAX_RESOURCES, "resources");
+_Static_assert(FIELD_COUNT(handles) == FSIM_MAX_HANDLES, "handles");
+_Static_assert(FIELD_COUNT(inflight) == FSIM_MAX_INFLIGHT, "inflight");
+_Static_assert(FIELD_COUNT(superseded) == FSIM_MAX_SUPERSEDED, "superseded");
+_Static_assert(FIELD_COUNT(memory) == FSIM_MAX_MEMORY, "memory");
+_Static_assert(FIELD_COUNT(produced) == IT_COUNT, "produced");
+_Static_assert(FIELD_COUNT(mined_by_action) == IT_COUNT, "mined_by_action");
+_Static_assert(FIELD_COUNT(built) == IT_COUNT, "built");
+_Static_assert(FIELD_COUNT(water) == 2 * FSIM_MAX_WATER, "water");
+_Static_assert(FIELD_COUNT(seen) == FSIM_MAX_SWEEP, "seen");
+_Static_assert(FIELD_COUNT(tiles) == FSIM_MAX_TILES, "tiles");
+_Static_assert(FIELD_COUNT(blocked) == 2 * FSIM_MAX_BLOCKED, "blocked");
+_Static_assert(FIELD_COUNT(remembered) == FSIM_MAX_MEMORY, "remembered");
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -94,6 +147,13 @@ static int64_t floordiv(int64_t a, int64_t b) {
 }
 
 static double tiles(int32_t v) { return (double)v / TILE; }
+
+/* The centre an entity of `kind` snaps to from a requested coordinate: the
+ * tile centre for an odd footprint, the nearest tile corner for an even one. */
+static int32_t snap(int32_t kind, int32_t v) {
+    if (kind_of(kind)->size % 2) return (int32_t)floordiv(v, TILE) * TILE + TILE / 2;
+    return (int32_t)floordiv(v + TILE / 2, TILE) * TILE;
+}
 
 static int32_t count_main(const fsim_env *env, int32_t item) {
     int32_t total = 0;
@@ -210,6 +270,7 @@ static void record_event(fsim_env *env, int32_t step, int32_t is_act, int32_t st
 
 /* ------------------------------------------------------------------ handles */
 
+/* Handle 0 names nothing: minting returns it when the table is full. */
 static int32_t mint_unit(fsim_env *env, int32_t entity_index) {
     const fsim_entity *e = &env->entities[entity_index];
     for (int32_t h = 1; h < env->next_handle; h++) {
@@ -217,6 +278,7 @@ static int32_t mint_unit(fsim_env *env, int32_t entity_index) {
         if (rec->used && rec->kind == H_UNIT && rec->unit == e->unit && rec->destroyed_tick < 0)
             return h;
     }
+    if (env->next_handle >= FSIM_MAX_HANDLES) return 0;
     int32_t h = env->next_handle++;
     fsim_handle *rec = &env->handles[h];
     memset(rec, 0, sizeof(*rec));
@@ -240,6 +302,7 @@ static int32_t mint_tile(fsim_env *env, int32_t tx, int32_t ty, int32_t tile_typ
             rec->destroyed_tick < 0)
             return h;
     }
+    if (env->next_handle >= FSIM_MAX_HANDLES) return 0;
     int32_t h = env->next_handle++;
     fsim_handle *rec = &env->handles[h];
     memset(rec, 0, sizeof(*rec));
@@ -386,7 +449,7 @@ typedef struct {
 } fsim_box;
 
 static int solid_entity(const fsim_entity *e) {
-    return e->alive && e->kind != K_PILE && box_of(e->kind) > 0;
+    return e->alive && has_flag(e->kind, KF_BLOCKS_WALKING);
 }
 
 static fsim_box entity_box(const fsim_entity *e) {
@@ -418,7 +481,7 @@ static void rebuild_fillers(fsim_env *env) {
             } else {
                 continue;
             }
-            if (gap >= GAP_SOLID || env->filler_count >= 64) continue;
+            if (gap >= GAP_SOLID || env->filler_count >= FSIM_MAX_FILLERS) continue;
             int32_t *out = &env->fillers[4 * env->filler_count++];
             out[0] = f.x0; out[1] = f.y0; out[2] = f.x1; out[3] = f.y1;
         }
@@ -578,8 +641,10 @@ static void face(fsim_env *env, fsim_pos target) {
 
 /* ------------------------------------------------------------------ entities */
 
+/* The new entity's index, or -1 when the table is full. */
 static int32_t new_entity(fsim_env *env, int32_t kind, fsim_pos pos, int32_t direction,
                           int32_t neutral) {
+    if (env->entity_count >= FSIM_MAX_ENTITIES) return -1;
     int32_t i = env->entity_count++;
     env->entities_version++;
     fsim_entity *e = &env->entities[i];
@@ -590,8 +655,7 @@ static int32_t new_entity(fsim_env *env, int32_t kind, fsim_pos pos, int32_t dir
     e->unit = ++env->next_unit;
     e->pos = pos;
     e->direction = direction;
-    e->status = (kind == K_DRILL || kind == K_FURNACE) ? ST_NO_FUEL
-               : (kind == K_WALL ? ST_WORKING : ST_NONE);
+    e->status = kind_of(kind)->status;
     return i;
 }
 
@@ -599,7 +663,7 @@ static void destroy_entity(fsim_env *env, int32_t index) {
     fsim_entity *e = &env->entities[index];
     e->alive = 0;
     env->entities_version++;
-    if (e->kind != K_PILE) unit_destroyed(env, e->unit);
+    if (e->kind != K_PILE) unit_destroyed(env, e->unit);   /* piles have tile handles */
     if (env->selected_kind == 1 && env->selected_index == index) env->selected_kind = 0;
 }
 
@@ -618,10 +682,10 @@ static fsim_pos drop_position(const fsim_entity *d) {
 static int32_t machine_at(const fsim_env *env, fsim_pos p, int32_t except) {
     for (int32_t i = 0; i < env->entity_count; i++) {
         const fsim_entity *e = &env->entities[i];
-        if (!e->alive || i == except) continue;
-        if (e->kind != K_FURNACE && e->kind != K_DRILL) continue;
-        if (p.x >= e->pos.x - TILE && p.x < e->pos.x + TILE &&
-            p.y >= e->pos.y - TILE && p.y < e->pos.y + TILE)
+        if (!e->alive || i == except || !has_flag(e->kind, KF_MACHINE)) continue;
+        int32_t half = kind_of(e->kind)->size * TILE / 2;
+        if (p.x >= e->pos.x - half && p.x < e->pos.x + half &&
+            p.y >= e->pos.y - half && p.y < e->pos.y + half)
             return i;
     }
     return -1;
@@ -662,19 +726,17 @@ static int32_t drill_resource(const fsim_env *env, fsim_entity *d) {
     return -1;
 }
 
+/* An output dropped into a machine: fuel into a burner's fuel slot, anything
+ * else into a furnace's source. */
 static int32_t machine_accepts(fsim_entity *m, int32_t item, int32_t count, int do_insert) {
+    if (has_flag(m->kind, KF_BURNER) && is_fuel(item)) {
+        if (do_insert) return slot_insert(&m->fuel, item, count, STACK_SIZE[item]);
+        return slot_room(&m->fuel, item, STACK_SIZE[item]) >= count ? count : 0;
+    }
     if (m->kind == K_FURNACE) {
-        if (item == IT_COAL || item == IT_WOOD) {
-            if (do_insert) return slot_insert(&m->fuel, item, count, STACK_SIZE[item]);
-            return slot_room(&m->fuel, item, STACK_SIZE[item]) >= count ? count : 0;
-        }
         int32_t cap = item == IT_IRON_ORE ? FURNACE_SOURCE_CAP : STACK_SIZE[item];
         if (do_insert) return slot_insert(&m->source, item, count, cap);
         return slot_room(&m->source, item, cap) >= count ? count : 0;
-    }
-    if (m->kind == K_DRILL && (item == IT_COAL || item == IT_WOOD)) {
-        if (do_insert) return slot_insert(&m->fuel, item, count, STACK_SIZE[item]);
-        return slot_room(&m->fuel, item, STACK_SIZE[item]) >= count ? count : 0;
     }
     return 0;
 }
@@ -690,7 +752,7 @@ static void burner_refill(fsim_entity *e) {
             if (e->fuel.count > 0) {
                 e->burning = e->fuel.item;
                 slot_remove(&e->fuel, e->fuel.item, 1);
-                e->remaining = FUEL_VALUE_COAL;
+                e->remaining = fuel_value(e->burning);
             } else {
                 break;
             }
@@ -736,6 +798,10 @@ static void update_drill(fsim_env *env, int32_t index) {
                 return;
             }
             int32_t p = new_entity(env, K_PILE, drop, 0, 1);
+            if (p < 0) {
+                d->status = ST_WAITING_FOR_SPACE;
+                return;
+            }
             env->entities[p].pile.item = d->held;
             env->entities[p].pile.count = 1;
             d = &env->entities[index];
@@ -782,10 +848,18 @@ static void update_drill(fsim_env *env, int32_t index) {
     }
 }
 
+/* What a furnace makes from `item`, or IT_NONE. */
+static int32_t smelt_product(int32_t item) {
+    switch (item) {
+    case IT_IRON_ORE: return IT_IRON_PLATE;
+    case IT_COPPER_ORE: return IT_COPPER_PLATE;
+    default: return IT_NONE;
+    }
+}
+
 static int furnace_can_start(const fsim_entity *f) {
     if (f->source.count < 1) return 0;
-    int32_t product = f->source.item == IT_IRON_ORE ? IT_IRON_PLATE
-                    : f->source.item == IT_COPPER_ORE ? IT_COPPER_PLATE : IT_NONE;
+    int32_t product = smelt_product(f->source.item);
     if (product == IT_NONE) return 0;
     return slot_room(&f->result, product, STACK_SIZE[product]) >= 1;
 }
@@ -804,6 +878,7 @@ static void update_furnace(fsim_env *env, int32_t index) {
             f->status = f->energy > 0 ? ST_WORKING : ST_NO_FUEL;
             return;
         }
+        f->ingredient = f->source.item;
         slot_remove(&f->source, f->source.item, 1);
         f->crafting = 1;
     }
@@ -812,8 +887,9 @@ static void update_furnace(fsim_env *env, int32_t index) {
         f->seconds += fraction / 60.0;
         f->progress = f->seconds / SMELT_SECONDS;
         if (f->progress >= 1.0) {
-            slot_insert(&f->result, IT_IRON_PLATE, 1, STACK_SIZE[IT_IRON_PLATE]);
-            env->produced[IT_IRON_PLATE] += 1;
+            int32_t product = smelt_product(f->ingredient);
+            slot_insert(&f->result, product, 1, STACK_SIZE[product]);
+            env->produced[product] += 1;
             env->plates_crafted += 1;
             if (env->plates_crafted == STEAM_POWER_PLATES && !env->steam_power_at)
                 env->steam_power_at = env->tick + STEAM_POWER_LAG;
@@ -821,6 +897,7 @@ static void update_furnace(fsim_env *env, int32_t index) {
             f->progress -= 1.0;
             f->seconds = f->progress * SMELT_SECONDS;
             if (furnace_can_start(f)) {
+                f->ingredient = f->source.item;
                 slot_remove(&f->source, f->source.item, 1);
             } else {
                 f->crafting = 0;
@@ -842,9 +919,13 @@ static void pick_up(fsim_env *env, int32_t index) {
     fsim_entity *e = &env->entities[index];
     if (e->fuel.count > 0) insert_main(env, e->fuel.item, e->fuel.count);
     if (e->kind == K_FURNACE) {
+        /* The ingredient of a craft in progress comes back with the source. */
         int32_t source = e->source.count;
-        int32_t source_item = e->source.count ? e->source.item : IT_IRON_ORE;
-        if (e->crafting) source += 1;
+        int32_t source_item = e->source.count ? e->source.item : e->ingredient;
+        if (e->crafting) {
+            if (source > 0 && e->source.item != e->ingredient) insert_main(env, e->ingredient, 1);
+            else source += 1;
+        }
         if (source > 0) insert_main(env, source_item, source);
         if (e->result.count > 0) insert_main(env, e->result.item, e->result.count);
     }
@@ -909,8 +990,11 @@ static void update_world(fsim_env *env) {
     for (int32_t i = env->entity_count - 1; i >= 0; i--) {
         fsim_entity *e = &env->entities[i];
         if (!e->alive) continue;
-        if (e->kind == K_FURNACE) update_furnace(env, i);
-        else if (e->kind == K_DRILL) update_drill(env, i);
+        switch (e->kind) {
+        case K_FURNACE: update_furnace(env, i); break;
+        case K_DRILL: update_drill(env, i); break;
+        default: break;
+        }
     }
 }
 
@@ -1057,7 +1141,7 @@ static int placeable(const fsim_env *env, int32_t kind, fsim_pos centre) {
     int32_t r = box_of(kind);
     for (int32_t i = 0; i < env->entity_count; i++) {
         const fsim_entity *e = &env->entities[i];
-        if (!e->alive || e->kind == K_PILE) continue;
+        if (!e->alive || !has_flag(e->kind, KF_COLLIDES)) continue;
         int32_t reach = box_of(e->kind) + r;
         if (abs(e->pos.x - centre.x) < reach && abs(e->pos.y - centre.y) < reach) return 0;
     }
@@ -1080,21 +1164,15 @@ static int placeable(const fsim_env *env, int32_t kind, fsim_pos centre) {
 
 static int32_t act_place(fsim_env *env, const fsim_action *a) {
     if (count_main(env, a->item) < 1) return reject(env, E_NO_ITEMS);
-    int32_t kind = a->item == IT_BURNER_DRILL ? K_DRILL : a->item == IT_STONE_FURNACE ? K_FURNACE
-                 : a->item == IT_STONE_WALL ? K_WALL : K_NONE;
+    int32_t kind = kind_placed_by(a->item);
     if (kind == K_NONE) return reject(env, E_INVALID_TARGET);
     if (centre_distance(env->char_pos, a->position) > BUILD_DISTANCE)
         return reject(env, E_OUT_OF_REACH);
-    fsim_pos centre;
-    if (kind == K_WALL) {
-        centre.x = (int32_t)floordiv(a->position.x, TILE) * TILE + TILE / 2;
-        centre.y = (int32_t)floordiv(a->position.y, TILE) * TILE + TILE / 2;
-    } else {
-        centre.x = (int32_t)floordiv(a->position.x + TILE / 2, TILE) * TILE;
-        centre.y = (int32_t)floordiv(a->position.y + TILE / 2, TILE) * TILE;
-    }
+    fsim_pos centre = {snap(kind, a->position.x), snap(kind, a->position.y)};
     if (!placeable(env, kind, centre)) return reject(env, E_COLLISION);
-    int32_t direction = kind == K_DRILL ? a->direction * 4 : 0;
+    /* Not the engine's limit but the simulator's (fsim.h). */
+    if (env->entity_count >= FSIM_MAX_ENTITIES) return reject(env, E_ENGINE);
+    int32_t direction = has_flag(kind, KF_DIRECTED) ? a->direction * 4 : 0;
     int32_t index = new_entity(env, kind, centre, direction, 0);
     remove_main(env, a->item, 1);
     env->built[a->item] += 1;
@@ -1109,7 +1187,8 @@ static int32_t act_rotate(fsim_env *env, const fsim_action *a) {
     int32_t code = fsim_resolve(env, a->handle, &kind, &index);
     if (code) return reject(env, code);
     if (!can_reach(env, kind, index)) return reject(env, E_OUT_OF_REACH);
-    if (kind != 1 || env->entities[index].kind != K_DRILL) return reject(env, E_INVALID_TARGET);
+    if (kind != 1 || !has_flag(env->entities[index].kind, KF_DIRECTED))
+        return reject(env, E_INVALID_TARGET);
     fsim_entity *d = &env->entities[index];
     d->direction = (d->direction + (a->reverse ? 12 : 4)) % 16;
     env->act.status = R_COMPLETED;
@@ -1122,8 +1201,10 @@ static fsim_stack *machine_slot(fsim_entity *m, int32_t item, int removing, int3
     fsim_stack *order[3];
     int32_t caps[3];
     int n = 0;
-    order[n] = &m->fuel;
-    caps[n++] = STACK_SIZE[item];
+    if (has_flag(m->kind, KF_BURNER)) {
+        order[n] = &m->fuel;
+        caps[n++] = STACK_SIZE[item];
+    }
     if (m->kind == K_FURNACE) {
         order[n] = &m->source;
         caps[n++] = item == IT_IRON_ORE ? FURNACE_SOURCE_CAP : STACK_SIZE[item];
@@ -1136,7 +1217,7 @@ static fsim_stack *machine_slot(fsim_entity *m, int32_t item, int removing, int3
         if (removing) {
             accepts = s->count > 0 && s->item == item;
         } else if (s == &m->fuel) {
-            accepts = (item == IT_COAL || item == IT_WOOD) && slot_room(s, item, caps[i]) > 0;
+            accepts = is_fuel(item) && slot_room(s, item, caps[i]) > 0;
         } else if (s == &m->source) {
             accepts = (item == IT_IRON_ORE || item == IT_COPPER_ORE || item == IT_STONE) &&
                       slot_room(s, item, caps[i]) > 0;
@@ -1165,8 +1246,8 @@ static int32_t act_transfer(fsim_env *env, const fsim_action *a) {
     for (int k = 0; k < 2; k++) {
         if (ends[k] == 0) continue;
         if (kinds[k] != 1) return reject(env, E_PRECONDITION);
-        int32_t kind = env->entities[indices[k]].kind;
-        if (kind != K_DRILL && kind != K_FURNACE) return reject(env, E_PRECONDITION);
+        if (!has_flag(env->entities[indices[k]].kind, KF_MACHINE))
+            return reject(env, E_PRECONDITION);
     }
     int32_t item = a->item;
     int32_t available;
@@ -1187,7 +1268,7 @@ static int32_t act_transfer(fsim_env *env, const fsim_action *a) {
     } else {
         to_slot = machine_slot(&env->entities[indices[1]], item, 0, &to_cap);
         int accepts = slot_room(to_slot, item, to_cap) > 0;
-        if (to_slot == &env->entities[indices[1]].fuel && !(item == IT_COAL || item == IT_WOOD))
+        if (to_slot == &env->entities[indices[1]].fuel && !is_fuel(item))
             accepts = 0;
         if (!accepts) return reject(env, E_NO_SPACE);
     }
@@ -1404,26 +1485,38 @@ static int remembered_before(const fsim_memory *a, const fsim_memory *b) {
     return handle_string_cmp(a->handle, b->handle) < 0;
 }
 
+/* The one stack an observation shows as an entity's contents. */
+static fsim_stack shown_contents(const fsim_entity *e) {
+    fsim_stack none = {IT_NONE, 0};
+    switch (e->kind) {
+    case K_FURNACE: return e->source;
+    case K_PILE: return e->pile;
+    default: return none;
+    }
+}
+
 static void remember(fsim_env *env, int32_t handle, const fsim_entity *e) {
+    /* Slots from memory_top up are unused, so the scan stops there. */
     int32_t free_slot = -1;
-    for (int32_t i = 0; i < FSIM_MAX_MEMORY; i++) {
+    for (int32_t i = 0; i < env->memory_top; i++) {
         if (env->memory[i].used && env->memory[i].handle == handle) {
             free_slot = i;
             break;
         }
         if (!env->memory[i].used && free_slot < 0) free_slot = i;
     }
-    if (free_slot < 0) return;
+    if (free_slot < 0) {
+        if (env->memory_top >= FSIM_MAX_MEMORY) return;
+        free_slot = env->memory_top++;
+    }
     fsim_memory *m = &env->memory[free_slot];
     m->used = 1;
     m->handle = handle;
     m->kind = e->kind;
     m->pos = e->pos;
-    m->has_dir = e->kind == K_DRILL;
+    m->has_dir = has_flag(e->kind, KF_DIRECTED);
     m->direction = e->direction;
-    if (e->kind == K_FURNACE) m->contents = e->source;
-    else if (e->kind == K_PILE) m->contents = e->pile;
-    else m->contents.item = m->contents.count = 0;
+    m->contents = shown_contents(e);
     m->last_seen = env->tick;
 }
 
@@ -1465,7 +1558,7 @@ void fsim_observe(fsim_env *env) {
     for (int32_t k = 0; k < n; k++)
         remember(env, env->seen[k].handle, &env->entities[env->seen[k].entity]);
     env->remembered_count = 0;
-    for (int32_t i = 0; i < FSIM_MAX_MEMORY; i++) {
+    for (int32_t i = 0; i < env->memory_top; i++) {
         fsim_memory *m = &env->memory[i];
         if (!m->used) continue;
         int seen = 0;

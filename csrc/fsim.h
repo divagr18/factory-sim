@@ -17,18 +17,26 @@
 #include <stdint.h>
 
 /* CFFI-BEGIN */
-#define FSIM_MAX_ENTITIES 128
-#define FSIM_MAX_RESOURCES 512
+/* Capacities. cffi cannot size an array with a #define, so the struct fields
+ * below repeat these as literals; change both together. FSIM_EVENT_LIMIT,
+ * FSIM_MAX_SWEEP and FSIM_MAX_TILES are the engine's own limits (the mod's
+ * EVENT_LIMIT, `entity_cap` and `resource_cap`) and part of what parity
+ * compares; FSIM_MAX_MEMORY is the mod's MEMORY_LIMIT. The others are the
+ * simulator's own room: entity slots are never reused within an episode, so
+ * FSIM_MAX_ENTITIES counts every entity created, ground piles included. */
+#define FSIM_MAX_ENTITIES 512
+#define FSIM_MAX_RESOURCES 2048
 #define FSIM_MAX_WATER 8192
 #define FSIM_MAIN_SLOTS 80
-#define FSIM_MAX_HANDLES 2048
+#define FSIM_MAX_HANDLES 8192
 #define FSIM_MAX_INFLIGHT 16
 #define FSIM_EVENT_LIMIT 256
 #define FSIM_MAX_SUPERSEDED 4
 #define FSIM_MAX_SWEEP 48
 #define FSIM_MAX_TILES 512
-#define FSIM_MAX_MEMORY 256
+#define FSIM_MAX_MEMORY 2048
 #define FSIM_MAX_BLOCKED 4225
+#define FSIM_MAX_FILLERS 1024
 
 /* Items. Order is fixed: it is the simulator's own numbering, not the
  * encoder's. Names live in fsim/items.py. */
@@ -56,6 +64,15 @@
 #define K_FURNACE 2
 #define K_WALL 3
 #define K_PILE 4
+#define K_COUNT 5
+
+/* What a kind is, as flags (fsim_kind_flags). Everything else constant about
+ * a kind is its row in fsim.c's KIND table. */
+#define KF_COLLIDES 1         /* occupies its footprint: placement collides with it */
+#define KF_BLOCKS_WALKING 2   /* the character collides with it */
+#define KF_BURNER 4           /* a fuel slot and an energy buffer */
+#define KF_MACHINE 8          /* has inventories: transfers and a drill's output reach it */
+#define KF_DIRECTED 16        /* its direction matters: rotation, memory, encoder */
 
 /* Engine status names, by the codes the game reports. */
 #define ST_NONE 0
@@ -138,6 +155,7 @@ typedef struct {
     fsim_stack source;
     fsim_stack result;
     int32_t crafting;     /* an ingredient has been consumed for the current craft */
+    int32_t ingredient;   /* ...and which item it was */
     int32_t products_finished;
     /* progress: seconds accumulated towards the current craft or ore */
     double seconds;
@@ -267,7 +285,7 @@ typedef struct {
     int32_t selected_index;
     fsim_stack main[80];
 
-    fsim_entity entities[128];
+    fsim_entity entities[512];
     int32_t entity_count;
     int32_t next_unit;
     /* Gap fillers: the space between two aligned obstacles too close for the
@@ -276,11 +294,11 @@ typedef struct {
     int32_t entities_version;
     int32_t fillers_version;
     int32_t filler_count;
-    int32_t fillers[256];       /* 64 boxes, 4 values each */
-    fsim_resource resources[512];
+    int32_t fillers[4096];      /* FSIM_MAX_FILLERS boxes, 4 values each */
+    fsim_resource resources[2048];
     int32_t resource_count;
 
-    fsim_handle handles[2048];
+    fsim_handle handles[8192];
     int32_t next_handle;
 
     fsim_inflight inflight[16];
@@ -290,7 +308,8 @@ typedef struct {
     int32_t superseded[4];
     int32_t superseded_count;
 
-    fsim_memory memory[256];
+    fsim_memory memory[2048];
+    int32_t memory_top;         /* slots at and above this are unused */
 
     /* truth */
     int32_t produced[16];
@@ -314,7 +333,7 @@ typedef struct {
     int32_t blocked_count;
     int32_t blocked[8450];
     int32_t remembered_count;
-    int32_t remembered[256];    /* memory indices, in published order */
+    int32_t remembered[2048];   /* memory indices, in published order */
     fsim_pos origin;
 
     /* the step in progress */
@@ -364,6 +383,9 @@ void fsim_after_load(fsim_env *env);
 void fsim_walk_ticks(fsim_env *env, int32_t dir16, int32_t ticks, int32_t *xy);
 int32_t fsim_resolve(fsim_env *env, int32_t handle, int32_t *kind, int32_t *index);
 double fsim_capacity(int32_t kind);
+/* KF_* flags of an entity kind, and the seconds the character takes to mine one. */
+int32_t fsim_kind_flags(int32_t kind);
+double fsim_kind_mining_time(int32_t kind);
 /* ---- RL layer (fsim_rl.c): the tensors, masks, goal and reward of
  * FactorioRL's parameterized-v1 / local-v2 contract. */
 #define RL_GRID_PLANES 6

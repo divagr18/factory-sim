@@ -40,18 +40,16 @@ ITEM_NAMES = {
 }
 ITEM_IDS = {name: item for item, name in ITEM_NAMES.items()}
 
-KIND_NAME = {
-    lib.K_DRILL: "burner-mining-drill",
-    lib.K_FURNACE: "stone-furnace",
-    lib.K_WALL: "stone-wall",
-    lib.K_PILE: "item-on-ground",
+#: Entity kinds: prototype name and type, as the engine reports them. The rest
+#: of what a kind is lives in fsim.c's KIND table; `lib.fsim_kind_flags` reads it.
+KINDS = {
+    lib.K_DRILL: ("burner-mining-drill", "mining-drill"),
+    lib.K_FURNACE: ("stone-furnace", "furnace"),
+    lib.K_WALL: ("stone-wall", "wall"),
+    lib.K_PILE: ("item-on-ground", "item-entity"),
 }
-KIND_TYPE = {
-    lib.K_DRILL: "mining-drill",
-    lib.K_FURNACE: "furnace",
-    lib.K_WALL: "wall",
-    lib.K_PILE: "item-entity",
-}
+KIND_NAME = {kind: name for kind, (name, _) in KINDS.items()}
+KIND_TYPE = {kind: type_ for kind, (_, type_) in KINDS.items()}
 STATUS_NAME = {
     lib.ST_WORKING: "working",
     lib.ST_NO_INGREDIENTS: "no_ingredients",
@@ -332,7 +330,8 @@ class Sim:
             "type": KIND_TYPE[e.kind],
             "p": [tiles(e.pos.x), tiles(e.pos.y)],
         }
-        if e.kind == lib.K_DRILL:
+        flags = lib.fsim_kind_flags(e.kind)
+        if flags & lib.KF_DIRECTED:
             record["d"] = e.direction
         if e.kind == lib.K_PILE:
             record["contents"] = {ITEM_NAMES[e.pile.item]: e.pile.count}
@@ -342,7 +341,7 @@ class Sim:
             record["status"] = e.status
             record["st"] = STATUS_NAME[e.status]
             record["working"] = e.status == lib.ST_WORKING
-        if e.kind in (lib.K_DRILL, lib.K_FURNACE):
+        if flags & lib.KF_BURNER:
             record["burns"] = True
             if e.fuel.count > 0:
                 record["fuel"] = {ITEM_NAMES[e.fuel.item]: e.fuel.count}
@@ -676,8 +675,7 @@ class Sim:
             progress = float(c["mining_progress"])
             duration = 1.0
             if env.mining_target_entity >= 0:
-                kind = env.entities[env.mining_target_entity].kind
-                duration = {lib.K_DRILL: 0.3, lib.K_FURNACE: 0.2, lib.K_WALL: 0.2}.get(kind, 0.025)
+                duration = lib.fsim_kind_mining_time(env.entities[env.mining_target_entity].kind)
             env.mining_progress = progress
             env.mining_seconds = progress * duration
 

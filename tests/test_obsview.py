@@ -57,7 +57,7 @@ def true_rows(env):
     handles = ffi.new("int32_t[32]")
     count = lib.fsim_rl_targets(rl, handles, 32)
     seen = {e.seen[k].handle: e.entities[e.seen[k].entity] for k in range(e.seen_count)}
-    memory = {e.memory[i].handle: e.memory[i] for i in range(256) if e.memory[i].used}
+    memory = {e.memory[i].handle: e.memory[i] for i in range(e.memory_top) if e.memory[i].used}
     rows = []
     for k in range(count):
         h = handles[k]

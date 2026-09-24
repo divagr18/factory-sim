@@ -45,14 +45,8 @@ static double rl_log_count(double count, double cap) {
     return rl_clip(log1p(count > 0.0 ? count : 0.0) / log1p(cap), 0.0, 1.0);
 }
 
-static int32_t rl_type_index(int32_t kind) {
-    switch (kind) {
-    case K_FURNACE: return 1;   /* furnace */
-    case K_DRILL: return 3;     /* mining-drill */
-    case K_WALL: return 10;     /* wall */
-    default: return 11;         /* other: item-entity */
-    }
-}
+/* encoders.ENTITY_TYPES index: the kind table's `rl_type`. */
+static int32_t rl_type_index(int32_t kind) { return kind_of(kind)->rl_type; }
 
 /* ENTITY_STATUS index + 1, or 0 for a name not in the list. */
 static int32_t rl_status_slot(int32_t status) {
@@ -148,7 +142,7 @@ static void rl_domains_build(const fsim_rl *rl, rl_domains *d) {
     occupied_at[RL_PLACEMENT_RADIUS * SIDE + RL_PLACEMENT_RADIUS] = 1; /* own tile */
     for (int32_t k = 0; k < env->seen_count; k++) {
         const fsim_entity *e = &env->entities[env->seen[k].entity];
-        if (e->kind == K_PILE) continue;
+        if (!has_flag(e->kind, KF_COLLIDES)) continue;
         int64_t dx = floordiv(e->pos.x, TILE) - here_x + RL_PLACEMENT_RADIUS;
         int64_t dy = floordiv(e->pos.y, TILE) - here_y + RL_PLACEMENT_RADIUS;
         if (dx >= 0 && dx < SIDE && dy >= 0 && dy < SIDE) occupied_at[dx * SIDE + dy] = 1;
@@ -430,17 +424,13 @@ static void rl_encode_into(fsim_rl *rl, rl_fields *obs) {
             kind = e->kind;
             px = tiles(e->pos.x);
             py = tiles(e->pos.y);
-            direction = e->kind == K_DRILL ? e->direction : 0;
+            direction = has_flag(e->kind, KF_DIRECTED) ? e->direction : 0;
             status = e->kind == K_PILE ? ST_NONE : e->status;
             working_known = e->kind != K_PILE;
             working = e->status == ST_WORKING;
-            if (e->kind == K_FURNACE) {
-                contents = e->source.count;
-                output = e->result.count;
-            } else if (e->kind == K_PILE) {
-                contents = e->pile.count;
-            }
-            if (e->kind == K_DRILL || e->kind == K_FURNACE) fuel = e->fuel.count;
+            contents = shown_contents(e).count;
+            if (e->kind == K_FURNACE) output = e->result.count;
+            if (has_flag(e->kind, KF_BURNER)) fuel = e->fuel.count;
         } else {
             const fsim_memory *m = &env->memory[rows[i].index];
             kind = m->kind;
