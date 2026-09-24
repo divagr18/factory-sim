@@ -1195,13 +1195,16 @@ static void update_ring(fsim_env *env, const int32_t *refs, int32_t size) {
     free(offsets);
 }
 
-/* Chains run in the order rebuild_logistics found. Not settled by the
- * evidence: when both lanes of a feed reach a target on the same tick for the
- * first time, the engine moves one of the two items 8 further than this does
- * (feed lane 1 in the probe's sideload rig, t=128; feed lane 2 in FactorioRL's
- * logistics_sideload_merge trace, t=127) -- apparently whichever lane the
- * engine updates first, which looks like the order the lanes first got
- * items. Every later transfer in both recordings matches. */
+/* Chains run in the order rebuild_logistics found. Not modelled: when both
+ * lanes of a feed reach an empty target on the same tick, the engine moves
+ * the item inserted first 8 further (feed lane 1 in the probe's sideload
+ * rig, t=128; feed lane 2 in FactorioRL's logistics_sideload_merge trace,
+ * t=127). FactorioRL docs/sim-logistics.md, "Third probe": the engine moves
+ * belt-line segments last-activated first, the second insertion into a
+ * target that has not moved this tick moves it first, and a young belt is
+ * a segment of its own until its chain merges, 1 to 600 ticks after it was
+ * built, by a per-tile delay not yet reproducible. Every later transfer in
+ * both recordings matches. */
 static void update_belts(fsim_env *env) {
     for (int32_t c = 0; c < env->chain_count; c++) {
         int32_t size = env->chain_size[c];
@@ -1984,18 +1987,83 @@ static void arm_taint(fsim_entity *s) { s->lift = -2; }
  *   belt wakes it into a move paid from what it kept. With items on the line
  *   it waits awake, refilled every tick.
  *
- * Not measured, and taken as the straight case: a turn as the pickup belt
- * (items are placed on the turn's lane lines, see belt_item_offset). The
- * young-belt wake delay (rule 6: for about the first 300 ticks after belts
- * are built the engine wakes late, by an amount it does not let us predict)
- * is ignored, as decided on 2026-09-24.
+ * A turn as the pickup belt: the same rules, with the item where the engine
+ * puts it on the turn's arc (belt_item_offset; exact from the north and south
+ * of a turn fed from the west, 1/256 off in hand x on two ticks from the east,
+ * FactorioRL `tpick_*`). The young-belt wake delay (rule 6: for about the
+ * first 300 ticks after belts are built the engine wakes late, by an amount
+ * it does not let us predict) is ignored, as decided on 2026-09-24.
  */
 
+/* Where an item sits on a turn, measured (FactorioRL tools/probe_logistics3.py,
+ * `turn_points`: LuaTransportLine.get_line_item_position at every position of
+ * both lanes of all eight turns). The points lie on quarter circles about the
+ * inner corner, radius 188 and 67, but on the 1/256 grid the engine keeps, so
+ * they are tabled rather than computed. Offsets from the belt's centre, 1/256
+ * tile, for a right turn facing south (fed from the west): x is the left of
+ * travel (east), y the direction of travel (south). Index: the position on
+ * the lane, 0 at the exit. A left turn is the mirror image, its lanes swapped;
+ * every facing is a rotation of these, exactly. */
+static const int16_t TURN_OUTER[296][2] = {
+    {60, 128}, {60, 127}, {60, 126}, {60, 125}, {60, 124}, {60, 123}, {60, 122}, {60, 121},
+    {59, 120}, {59, 119}, {59, 118}, {59, 117}, {59, 116}, {59, 115}, {59, 114}, {59, 113},
+    {59, 112}, {59, 111}, {59, 110}, {59, 109}, {59, 108}, {58, 108}, {58, 107}, {58, 106},
+    {58, 105}, {58, 104}, {58, 103}, {58, 102}, {58, 101}, {57, 100}, {57, 99}, {57, 98},
+    {57, 97}, {57, 96}, {57, 95}, {56, 94}, {56, 93}, {56, 92}, {56, 91}, {56, 90},
+    {55, 89}, {55, 88}, {55, 87}, {55, 86}, {55, 85}, {54, 84}, {54, 83}, {54, 82},
+    {54, 81}, {53, 80}, {53, 79}, {53, 78}, {52, 77}, {52, 76}, {52, 75}, {52, 74},
+    {51, 73}, {51, 72}, {51, 71}, {50, 70}, {50, 69}, {50, 68}, {49, 68}, {49, 67},
+    {49, 66}, {49, 65}, {48, 64}, {48, 63}, {47, 62}, {47, 61}, {47, 60}, {46, 59},
+    {46, 58}, {46, 57}, {45, 56}, {45, 55}, {44, 54}, {44, 53}, {44, 53}, {43, 52},
+    {43, 51}, {42, 50}, {42, 49}, {42, 48}, {41, 47}, {41, 46}, {40, 45}, {40, 44},
+    {39, 44}, {39, 43}, {38, 42}, {38, 41}, {38, 40}, {37, 39}, {37, 38}, {36, 37},
+    {36, 36}, {35, 36}, {35, 35}, {34, 34}, {34, 33}, {33, 32}, {33, 31}, {32, 30},
+    {32, 30}, {31, 29}, {30, 28}, {30, 27}, {29, 26}, {29, 25}, {28, 24}, {28, 24},
+    {27, 23}, {27, 22}, {26, 21}, {25, 20}, {25, 20}, {24, 19}, {24, 18}, {23, 17},
+    {23, 16}, {22, 15}, {21, 15}, {21, 14}, {20, 13}, {19, 12}, {19, 12}, {18, 11},
+    {18, 10}, {17, 9}, {16, 8}, {16, 8}, {15, 7}, {14, 6}, {14, 5}, {13, 5},
+    {12, 4}, {12, 3}, {11, 2}, {10, 2}, {10, 1}, {9, 0}, {8, -1}, {8, -1},
+    {7, -2}, {6, -3}, {6, -3}, {5, -4}, {4, -5}, {3, -6}, {3, -6}, {2, -7},
+    {1, -8}, {1, -8}, {0, -9}, {-1, -10}, {-2, -10}, {-2, -11}, {-3, -12}, {-4, -12},
+    {-5, -13}, {-5, -14}, {-6, -14}, {-7, -15}, {-8, -16}, {-8, -16}, {-9, -17}, {-10, -18},
+    {-11, -18}, {-12, -19}, {-12, -19}, {-13, -20}, {-14, -21}, {-15, -21}, {-15, -22}, {-16, -23},
+    {-17, -23}, {-18, -24}, {-19, -24}, {-20, -25}, {-20, -25}, {-21, -26}, {-22, -27}, {-23, -27},
+    {-24, -28}, {-24, -28}, {-25, -29}, {-26, -29}, {-27, -30}, {-28, -30}, {-29, -31}, {-30, -32},
+    {-30, -32}, {-31, -33}, {-32, -33}, {-33, -34}, {-34, -34}, {-35, -35}, {-36, -35}, {-36, -36},
+    {-37, -36}, {-38, -37}, {-39, -37}, {-40, -38}, {-41, -38}, {-42, -38}, {-43, -39}, {-44, -39},
+    {-44, -40}, {-45, -40}, {-46, -41}, {-47, -41}, {-48, -42}, {-49, -42}, {-50, -42}, {-51, -43},
+    {-52, -43}, {-53, -44}, {-53, -44}, {-54, -44}, {-55, -45}, {-56, -45}, {-57, -46}, {-58, -46},
+    {-59, -46}, {-60, -47}, {-61, -47}, {-62, -47}, {-63, -48}, {-64, -48}, {-65, -49}, {-66, -49},
+    {-67, -49}, {-68, -49}, {-68, -50}, {-69, -50}, {-70, -50}, {-71, -51}, {-72, -51}, {-73, -51},
+    {-74, -52}, {-75, -52}, {-76, -52}, {-77, -52}, {-78, -53}, {-79, -53}, {-80, -53}, {-81, -54},
+    {-82, -54}, {-83, -54}, {-84, -54}, {-85, -55}, {-86, -55}, {-87, -55}, {-88, -55}, {-89, -55},
+    {-90, -56}, {-91, -56}, {-92, -56}, {-93, -56}, {-94, -56}, {-95, -57}, {-96, -57}, {-97, -57},
+    {-98, -57}, {-99, -57}, {-100, -57}, {-101, -58}, {-102, -58}, {-103, -58}, {-104, -58}, {-105, -58},
+    {-106, -58}, {-107, -58}, {-108, -58}, {-108, -59}, {-109, -59}, {-110, -59}, {-111, -59}, {-112, -59},
+    {-113, -59}, {-114, -59}, {-115, -59}, {-116, -59}, {-117, -59}, {-118, -59}, {-119, -59}, {-120, -59},
+    {-121, -60}, {-122, -60}, {-123, -60}, {-124, -60}, {-125, -60}, {-126, -60}, {-127, -60}, {-127, -60},
+};
+static const int16_t TURN_INNER[107][2] = {
+    {-61, 128}, {-61, 127}, {-61, 126}, {-61, 125}, {-61, 124}, {-61, 123}, {-61, 122}, {-61, 121},
+    {-61, 120}, {-61, 119}, {-61, 118}, {-62, 117}, {-62, 116}, {-62, 116}, {-62, 115}, {-62, 114},
+    {-63, 113}, {-63, 112}, {-63, 111}, {-63, 110}, {-64, 109}, {-64, 108}, {-64, 107}, {-65, 106},
+    {-65, 105}, {-65, 104}, {-66, 103}, {-66, 102}, {-66, 101}, {-67, 100}, {-67, 99}, {-68, 98},
+    {-68, 98}, {-69, 97}, {-69, 96}, {-70, 95}, {-70, 94}, {-71, 93}, {-71, 92}, {-72, 91},
+    {-72, 91}, {-73, 90}, {-73, 89}, {-74, 88}, {-75, 87}, {-75, 87}, {-76, 86}, {-76, 85},
+    {-77, 84}, {-78, 83}, {-78, 83}, {-79, 82}, {-80, 81}, {-81, 81}, {-81, 80}, {-82, 79},
+    {-83, 78}, {-83, 78}, {-84, 77}, {-85, 76}, {-86, 76}, {-87, 75}, {-87, 75}, {-88, 74},
+    {-89, 73}, {-90, 73}, {-91, 72}, {-91, 72}, {-92, 71}, {-93, 71}, {-94, 70}, {-95, 70},
+    {-96, 69}, {-97, 69}, {-98, 68}, {-98, 68}, {-99, 67}, {-100, 67}, {-101, 66}, {-102, 66},
+    {-103, 66}, {-104, 65}, {-105, 65}, {-106, 65}, {-107, 64}, {-108, 64}, {-109, 64}, {-110, 63},
+    {-111, 63}, {-112, 63}, {-113, 63}, {-114, 62}, {-115, 62}, {-116, 62}, {-116, 62}, {-117, 62},
+    {-118, 61}, {-119, 61}, {-120, 61}, {-121, 61}, {-122, 61}, {-123, 61}, {-124, 61}, {-125, 61},
+    {-126, 61}, {-127, 61}, {-127, 61},
+};
+
 /* Where item `pos` of lane `lane` on belt `b` is, as an offset from `s`,
- * 1/256 tile: on the lane's line, 60 either side of the centre, at its
- * distance from the downstream edge. A turn's lanes are quarter circles
- * about its inner corner, radius 188 and 67, and the item sits its share of
- * the lane's length round from the exit. */
+ * 1/256 tile: on a straight belt on the lane's line, 60 either side of the
+ * centre, at its distance from the downstream edge; on a turn the tabled
+ * point. */
 static void belt_item_offset(const fsim_entity *b, int32_t lane, int32_t pos, const fsim_entity *s,
                              double *vx, double *vy) {
     int32_t ux, uy;
@@ -2008,17 +2076,14 @@ static void belt_item_offset(const fsim_entity *b, int32_t lane, int32_t pos, co
         *vy = cy + uy * along + ly * side;
         return;
     }
-    /* The inner corner lies ahead and to the side the turn is fed from. */
-    int32_t side = b->shape == BELT_RIGHT ? 1 : -1;   /* right: fed from (-uy, ux) */
-    double rx = -uy * side, ry = ux * side;             /* towards the inner corner, sideways */
-    double kx = cx + (ux + rx) * (TILE / 2), ky = cy + (uy + ry) * (TILE / 2);
-    int inner = (b->shape == BELT_RIGHT) == (lane == 1);
-    double r = inner ? 67.0 : 188.0;
-    double phi = (double)pos / b->lane_length[lane] * (3.14159265358979323846 / 2);
-    /* At the exit the item is r out from the corner against the sideways
-     * direction; round towards the entry it swings back against travel. */
-    *vx = kx - rx * r * cos(phi) - ux * r * sin(phi);
-    *vy = ky - ry * r * cos(phi) - uy * r * sin(phi);
+    int right = b->shape == BELT_RIGHT;
+    int inner = right == (lane == 1);
+    int32_t n = inner ? 107 : 296;
+    int32_t at = pos < 0 ? 0 : pos >= n ? n - 1 : pos;
+    const int16_t *pt = inner ? TURN_INNER[at] : TURN_OUTER[at];
+    double side = right ? pt[0] : -pt[0], fwd = pt[1];
+    *vx = cx + lx * side + ux * fwd;
+    *vy = cy + ly * side + uy * fwd;
 }
 
 typedef struct {

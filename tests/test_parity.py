@@ -41,12 +41,18 @@ LOGISTICS = {name for name, entry in INDEX.items() if entry.get("requires") == "
 KNOWN_GAPS = {
     # The inserter at the end of the ore line comes back to rest at t=776 with
     # an ore five belts upstream, and the engine lets it fall asleep (keeping
-    # 1,910 J) where the measured rule keeps it awake, refilled; it wakes when
-    # the ore crosses onto the belt before the turn (t=803). The same rest at
-    # t=536 stayed awake. What decides it is not found (inserter_chase).
+    # 1,910 J) where the simulator keeps it awake, refilled; it wakes when the
+    # ore crosses onto the belt before the turn (t=803). The engine's inserter
+    # watches its belt-line segment, and the drill split the ore lane's
+    # segment after belt 4 at t=734 (its first output, t=242, plus that
+    # lane's merge delay on the last belt, 492): FactorioRL
+    # docs/sim-logistics.md, "Third probe". Not modelled: segments.
     "logistics_smelting_chain": (26, ".remaining_burning_fuel", 776, "belt-line sleep"),
     # Both feed lanes reach the main belt on the same tick for the first time
-    # and the engine moves one of the two items 8/256 further (update_belts).
+    # and the engine moves one of the two items 8/256 further: lines update
+    # in activation order, per belt while the belts are young, and the second
+    # item into an empty target moves it (update_belts; FactorioRL
+    # docs/sim-logistics.md, "Third probe"). Not modelled: segments.
     "logistics_sideload_merge": (5, ".entities[8].lanes", 127, "first sideload arrival"),
 }  # fmt: skip
 

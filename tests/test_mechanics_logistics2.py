@@ -40,11 +40,14 @@ NOT_COMPARED = {
     "side_turn_two": "simultaneous sideload arrival",
     # A script takes the front item off the drill's belt; no action can.
     "dstat_take_belt": "belt item removed by script",
-    # Pickups from items stopped on a turn: the right item is chosen (lane 1,
-    # furthest upstream), but where the arm aims for an item on a turn's
-    # quarter circle is not pinned to the 1/256 tile: hand x and energy differ
-    # from the first move (belt_item_offset).
-    **{f"tpick_{t}_{s}": "item positions on a turn" for t in "rl" for s in "nes"},
+    # Pickups from items stopped on a turn by an inserter on the side opposite
+    # the feeding belt: the arm aims at the tabled item point (belt_item_offset)
+    # and energy agrees every tick, but on two ticks per rig, as the hand
+    # reaches an item, its x is drawn 1/256 off (-346 where the model has -345,
+    # -237 where it has -238): how the engine rounds the arm at such a target
+    # is not reproduced. The pickups from the other two sides are exact.
+    "tpick_r_e": "hand x at a turn pickup, 1/256",
+    "tpick_l_e": "hand x at a turn pickup, 1/256",
     # An item put onto the pickup belt itself, a belt running along the arm
     # into the inserter, while the inserter sleeps: the engine's first move
     # (paid from the 810 J it kept) differs from the model's.
