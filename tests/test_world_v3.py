@@ -1,10 +1,10 @@
 """The v3 builder-program API (`WorldV3`) and the task-aware prompt and evaluator.
 
-`belt_smelting`'s scenes are not ported yet, so the World is exercised on
-construct_smelting_line scenes reset into the v3 action space, with belts,
-inserters and a chest added to the inventory. What is pinned here is what the
-program can do and see; the tensors themselves are pinned by the v3 contract
-test against FactorioRL's encoder.
+The World is exercised on construct_smelting_line scenes reset into the v3
+action space, with belts, inserters and a chest added to the inventory
+(belt_smelting's own scenes and builder are `test_belt_smelting.py`'s). What
+is pinned here is what the program can do and see; the tensors themselves are
+pinned by the v3 contract test against FactorioRL's encoder.
 """
 
 from __future__ import annotations
@@ -147,13 +147,13 @@ def test_unknown_task_is_refused():
 # ------------------------------------------------------------------ evaluator
 
 
-def test_belt_smelting_is_gated_until_its_scenes_exist():
+def test_belt_smelting_has_scene_sets():
     setup = evaluate.task_setup("belt_smelting")
     assert setup.decision_budget == 2500
-    if evaluate.scenes_ported("belt_smelting"):
-        pytest.skip("belt_smelting scenes are ported")
-    with pytest.raises(NotImplementedError, match="not ported"):
-        evaluate.scene_sets(train_n=1, val_n=1, holdout_n=1, task="belt_smelting")
+    assert evaluate.scenes_ported("belt_smelting")
+    sets = evaluate.scene_sets(train_n=4, val_n=2, holdout_n=2, task="belt_smelting")
+    assert {f for f, _, _ in sets["train"] + sets["val"]} <= set(setup.families_train)
+    assert {f for f, _, _ in sets["holdout"]} <= set(setup.families_holdout)
 
 
 def test_evaluator_payload_names_only_a_non_default_task():
@@ -176,7 +176,7 @@ def test_evaluator_payload_names_only_a_non_default_task():
     assert pool.payloads[-1]["decision_budget"] == 2500
 
 
-def test_the_factorio_build_env_knows_belt_smelting_but_gates_it():
+def test_the_factorio_build_env_offers_belt_smelting():
     import sys
     from pathlib import Path
 
@@ -191,12 +191,8 @@ def test_the_factorio_build_env_knows_belt_smelting_but_gates_it():
     finally:
         sys.path.remove(path)
     assert "belt_smelting" in core.KNOWN_TASKS
-    if evaluate.scenes_ported("belt_smelting"):
-        assert "belt_smelting" in core.SUPPORTED_TASKS
-        return
-    assert core.SUPPORTED_TASKS == ("construct_smelting_line",)
-    with pytest.raises(ValueError, match="not ported"):
-        core.rows("belt_smelting", "train", 8, 1)
+    assert core.SUPPORTED_TASKS == ("construct_smelting_line", "belt_smelting")
+    assert core.rows("belt_smelting", "train", 8, 1)
     text = core.system_prompt(True, "belt_smelting")
     assert "world.belt_lanes" in text and mutate.GAME_NOTES_BELT_SMELTING in text
     assert mutate.GAME_NOTES_BELT_SMELTING not in core.system_prompt(False, "belt_smelting")

@@ -1099,6 +1099,40 @@ static int32_t rl_machine_produced(const fsim_env *env, int32_t item) {
 #define VERIFY_TICKS 3600
 #define PROGRESS_WEIGHT 0.5
 #define PROGRESS_CAP 0.45
+/* belt_smelting 1.1.0: VerificationSpec("iron-plate", 150, 36000,
+ * source="iron-ore", container="output") -- the output chest's increase in
+ * iron plates over a ten-minute window, capped by the iron ore machines mined
+ * inside it. */
+#define BELT_TARGET 150
+#define BELT_VERIFY_TICKS 36000
+
+/* The two tasks scored by a verification window, and each one's target. */
+static int rl_has_window(const fsim_rl *rl) {
+    return rl->task.task == TASK_CONSTRUCT_SMELTING_LINE || rl->task.task == TASK_BELT_SMELTING;
+}
+
+static double rl_verify_target(const fsim_rl *rl) {
+    return rl->task.task == TASK_BELT_SMELTING ? (double)BELT_TARGET : (double)VERIFY_TARGET;
+}
+
+/* The task's own reward components, before the shaped terms: build_line and
+ * plate_line pay three, the verified tasks one. */
+static int32_t rl_own_components(const fsim_rl *rl) {
+    return rl->task.task == TASK_BUILD_LINE || rl->task.task == TASK_PLATE_LINE ? 3 : 1;
+}
+
+int32_t fsim_rl_delivered(const fsim_rl *rl) {
+    const fsim_env *env = rl->env;
+    int32_t at = rl->task.output_entity;
+    if (rl->task.task != TASK_BELT_SMELTING || at < 0 || at >= env->entity_count) return 0;
+    const fsim_entity *e = &env->entities[at];
+    /* `truth.containers` lists a marked entity only while it is valid. */
+    if (!e->alive || e->kind != K_CHEST) return 0;
+    int32_t n = 0;
+    for (int32_t i = 0; i < FSIM_CHEST_SLOTS; i++)
+        if (e->chest[i].item == IT_IRON_PLATE) n += e->chest[i].count;
+    return n;
+}
 
 static void rl_window_record(fsim_rl *rl) {
     int64_t tick = rl->env->tick;
@@ -1154,7 +1188,7 @@ static int rl_succeeded(const fsim_rl *rl) {
         return rl->env->built[IT_BURNER_DRILL] >= 1 && rl->env->built[IT_STONE_FURNACE] >= 1 &&
                rl_sustained(rl);
     }
-    return rl->verified && rl->verified_output >= VERIFY_TARGET;
+    return rl->verified && rl->verified_output >= rl_verify_target(rl);
 }
 
 static void rl_goal(fsim_rl *rl, float *goal) {
@@ -1176,7 +1210,8 @@ static void rl_goal(fsim_rl *rl, float *goal) {
         goal[3] = rl_sustained(rl) ? 1.0f : 0.0f;
         /* goal[4]: the landmark "produced >= 1", read with empty truth: 0. */
     } else {
-        goal[1] = rl->verified && rl->verified_output >= VERIFY_TARGET ? 1.0f : 0.0f;
+        /* The one success predicate: the verified output reached its target. */
+        goal[1] = rl->verified && rl->verified_output >= rl_verify_target(rl) ? 1.0f : 0.0f;
     }
     if (rl->task.has_patch) {
         double px = tiles(env->char_pos.x), py = tiles(env->char_pos.y);
@@ -1294,24 +1329,43 @@ static double rl_shaping(fsim_rl *rl, int32_t mode, int terminated, double *part
     return parts[0] + parts[1];
 }
 
+/* What the verification counts: the output chest's iron plates for
+ * belt_smelting (`VerificationSpec.container`), machine-made plates
+ * otherwise. */
+static double rl_counted(const fsim_rl *rl) {
+    if (rl->task.task == TASK_BELT_SMELTING) return (double)fsim_rl_delivered(rl);
+    return (double)rl_machine_produced(rl->env, IT_IRON_PLATE);
+}
+
 static void rl_verify(fsim_rl *rl) {
     fsim_env *env = rl->env;
-    double before = (double)rl_machine_produced(env, IT_IRON_PLATE);
+    double before = rl_counted(rl);
     double source_before = (double)rl_machine_produced(env, IT_IRON_ORE);
     fsim_action wait;
     memset(&wait, 0, sizeof(wait));
     wait.verb = V_WAIT;
-    int32_t chunks = VERIFY_TICKS / rl->task.decision_ticks;
+    int belt = rl->task.task == TASK_BELT_SMELTING;
+    int32_t ticks = belt ? BELT_VERIFY_TICKS : VERIFY_TICKS;
+    int32_t chunks = ticks / rl->task.decision_ticks;
     for (int32_t i = 0; i < chunks; i++) {
         fsim_step(env, &wait, rl->task.decision_ticks);
         rl_window_record(rl);
     }
-    double output = (double)rl_machine_produced(env, IT_IRON_PLATE) - before;
+    /* `FactorioEnv.advance` runs a last short chunk when the decision length
+     * does not divide the window. */
+    int32_t rest = ticks - chunks * rl->task.decision_ticks;
+    if (belt && rest > 0) {
+        fsim_step(env, &wait, rest);
+        rl_window_record(rl);
+    }
+    double output = rl_counted(rl) - before;
     if (output < 0.0) output = 0.0;
     double sourced = (double)rl_machine_produced(env, IT_IRON_ORE) - source_before;
     if (sourced < 0.0) sourced = 0.0;
     rl->verified = 1;
     rl->verified_output = output < sourced ? output : sourced;
+    rl->verified_uncapped = output;
+    rl->verified_source = sourced;
 }
 
 /* `finish` (v3): FactorioRL's `FactorioEnv.finish`. No world step; the
@@ -1324,10 +1378,10 @@ static double rl_finish(fsim_rl *rl) {
     rl->steps++;
     double reward;
     int succeeded;
-    if (rl->task.task == TASK_CONSTRUCT_SMELTING_LINE && !rl->verified) {
+    if (rl_has_window(rl) && !rl->verified) {
         memset(rl->components, 0, sizeof(rl->components));
         rl_verify(rl);
-        double score = rl->verified_output / VERIFY_TARGET;
+        double score = rl->verified_output / rl_verify_target(rl);
         rl->components[0] = score < 1.0 ? score : 1.0;
         reward = rl->components[0];
         succeeded = rl_succeeded(rl);
@@ -1339,7 +1393,7 @@ static double rl_finish(fsim_rl *rl) {
     if (shaping) {
         double parts[2];
         double shaped = rl_shaping(rl, shaping, 1, parts);
-        int32_t at = rl->task.task == TASK_CONSTRUCT_SMELTING_LINE ? 1 : 3;
+        int32_t at = rl_own_components(rl);
         if (shaping == SHAPING_BOTH) {
             rl->components[at] = parts[0];
             rl->components[at + 1] = parts[1];
@@ -1385,7 +1439,7 @@ double fsim_rl_step(fsim_rl *rl, const int32_t *vector) {
          * both. */
         /* After the task's own components: build_line fills three, the other
          * task fills one. */
-        int32_t at = rl->task.task == TASK_CONSTRUCT_SMELTING_LINE ? 1 : 3;
+        int32_t at = rl_own_components(rl);
         if (shaping == SHAPING_BOTH) {
             rl->components[at] = parts[0];
             rl->components[at + 1] = parts[1];
@@ -1396,9 +1450,9 @@ double fsim_rl_step(fsim_rl *rl, const int32_t *vector) {
     }
     int truncated = !terminated && (rl->steps >= rl->task.max_steps ||
                                     rl->env->tick >= rl->task.construction_tick_limit);
-    if (truncated && rl->task.task == TASK_CONSTRUCT_SMELTING_LINE && !rl->verified) {
+    if (truncated && rl_has_window(rl) && !rl->verified) {
         rl_verify(rl);
-        double score = rl->verified_output / VERIFY_TARGET;
+        double score = rl->verified_output / rl_verify_target(rl);
         reward += score < 1.0 ? score : 1.0;
         if (shaping) {
             double parts[2];

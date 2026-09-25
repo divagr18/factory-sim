@@ -53,20 +53,22 @@ tile, never the tile the character stands on, and never an occupied or blocked t
 - Both machines need fuel (coal) to run.
 - A drill only mines if its footprint is on ore."""
 
-#: `belt_smelting` (FactorioRL `tasks/families/belt_smelting.py` 1.0.0). The
-#: numbers restate that module's constants: starting inventory, the 60-plate
-#: target, the 36,000-tick window, the 2,500-decision budget, site spacing.
+#: `belt_smelting` (FactorioRL `tasks/families/belt_smelting.py` 1.1.0). The
+#: numbers restate that module's constants: starting inventory, the 150-plate
+#: target, the 36,000-tick window, the 2,500-decision budget, site spacing, and
+#: the energy count its docstring gives for the starting coal.
 TASK_BELT_SMELTING = """\
 Task: belt_smelting.
 The scene has an iron ore patch, a coal patch and a wooden chest, each more than 20 tiles \
 from the other two, so no single standing tile reaches two of them. `world.marker("iron")`, \
 `world.marker("coal")` and `world.marker("output")` give their centres. The character starts \
-holding 4 burner mining drills, 4 stone furnaces, 40 transport belts, 8 burner inserters and \
+holding 4 burner mining drills, 4 stone furnaces, 40 transport belts, 10 burner inserters and \
 20 coal. Build a line that mines iron ore, smelts it and delivers the plates into the output \
-chest: at least 60 iron plates must arrive in that chest during a 36,000-tick (ten-minute) \
+chest: at least 150 iron plates must arrive in that chest during a 36,000-tick (ten-minute) \
 verification window that starts after the build phase, with no actions allowed during it. \
-Plates smelted from hand-mined ore do not count. Coal is short: 20 is enough only if it is \
-not wasted before the window. Some scenes have walls."""
+Plates smelted from hand-mined ore do not count. Coal is short: 20 coal runs a line for about \
+79 plates at most, so the line needs coal from the coal patch, mined by hand or by a drill. \
+Some scenes have walls."""
 
 #: Mechanics for `belt_smelting`, measured on the engine (FactorioRL
 #: `docs/sim-logistics.md`). Setting `GAME_NOTES` to "" leaves every task's out.

@@ -111,7 +111,7 @@ SCENES_SCRIPT = """
 import json, random, sys
 from factoriorl.tasks import get as get_task
 out = {}
-for task_id in ("construct_smelting_line", "build_line", "plate_line"):
+for task_id in ("construct_smelting_line", "build_line", "plate_line", "belt_smelting"):
     task = get_task(task_id)
     for family in task.spec.layout_families:
         for seed in range(int(sys.argv[1])):

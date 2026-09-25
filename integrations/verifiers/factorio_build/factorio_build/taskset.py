@@ -106,7 +106,7 @@ class FactorioBuildTask(vf.Task[FactorioBuildData, vf.State, FactorioBuildTaskCo
 
 class FactorioBuildConfig(vf.TasksetConfig):
     sim_task: str = "construct_smelting_line"
-    """factory-sim task, one of `core.SUPPORTED_TASKS` (belt_smelting: once its scenes land)."""
+    """factory-sim task, one of `core.SUPPORTED_TASKS`: construct_smelting_line or belt_smelting."""
     split: Literal["train", "val", "holdout"] = "train"
     """Scene split. `holdout` is the frozen FactorioRL holdout: evaluation only."""
     n_scenes: int = Field(16, ge=1, le=core.MAX_SCENES)

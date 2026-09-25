@@ -58,7 +58,7 @@ class TaskSetup:
 
 TASKS: dict[str, TaskSetup] = {
     TASK: TaskSetup(TASK, FAMILIES_TRAIN, FAMILIES_HOLDOUT, 600),
-    # FactorioRL `tasks/families/belt_smelting.py` 1.0.0.
+    # FactorioRL `tasks/families/belt_smelting.py` 1.1.0.
     "belt_smelting": TaskSetup(
         "belt_smelting", ("open", "walled", "split_patch"), ("obstructed", "far_chest"), 2500
     ),

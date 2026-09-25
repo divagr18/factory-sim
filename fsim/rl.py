@@ -30,6 +30,7 @@ TASKS = {
     "construct_smelting_line": lib.TASK_CONSTRUCT_SMELTING_LINE,
     "build_line": lib.TASK_BUILD_LINE,
     "plate_line": lib.TASK_PLATE_LINE,
+    "belt_smelting": lib.TASK_BELT_SMELTING,
 }
 #: The marker each task's potential measures approach to. plate_line's "line"
 #: is not a public marker -- see `has_target` in csrc/fsim.h for why the
@@ -38,6 +39,21 @@ POTENTIAL_MARKER = {
     "construct_smelting_line": "patch",
     "build_line": "patch",
     "plate_line": "line",
+    "belt_smelting": "iron",
+}
+#: The public marker goal[9..11] points at: FactorioRL's `TaskSpec.focus_marker`,
+#: the first `extra_public_markers` entry, else the objective's own marker.
+FOCUS_MARKER = {"belt_smelting": "iron"}
+#: A task's own budget where it is not construct_smelting_line's 600 decisions
+#: and 18,000 construction ticks: belt_smelting 1.1.0 allows 2,500 decisions of
+#: 30 ticks, and its construction tick limit is `max_game_ticks` (111,000) less
+#: the 36,000-tick window. Its catalog is parameterized-v3.
+TASK_DEFAULTS = {
+    "belt_smelting": {
+        "max_steps": 2500,
+        "construction_tick_limit": 75000,
+        "action_space": "v3",
+    },
 }
 #: `shaping` values: none, potential-based (`line_potential`), or a capped
 #: high-water bonus on the same potential (`line_progress`).
@@ -62,6 +78,7 @@ COMPONENTS = {
     "construct_smelting_line": ("verified_output",),
     "build_line": ("constructed", "plates_produced", "step_cost"),
     "plate_line": ("commissioned", "plates_produced", "step_cost"),
+    "belt_smelting": ("verified_output",),
 }
 
 
@@ -70,15 +87,23 @@ def component_names(task: str, mode: int) -> tuple[str, ...]:
     return COMPONENTS[task] + (SHAPED_COMPONENTS[mode] if mode else ())
 
 
-def task_struct(task: str, blueprint: dict, *, decision_ticks=30, max_steps=600,
+def task_struct(task: str, blueprint: dict, *, decision_ticks=30, max_steps=None,
                 construction_tick_limit=None, shaping=False, gamma=0.999,
-                action_space="v1", entity_cap=None):  # fmt: skip
+                action_space=None, entity_cap=None):  # fmt: skip
+    """The C task for one episode. `max_steps`, `construction_tick_limit` and
+    `action_space` left at None take the task's own (`TASK_DEFAULTS`), else
+    600 decisions, 18,000 ticks and v1."""
+    defaults = TASK_DEFAULTS.get(task, {})
+    if max_steps is None:
+        max_steps = defaults.get("max_steps", 600)
+    if construction_tick_limit is None:
+        construction_tick_limit = defaults.get("construction_tick_limit", 18000)
+    if action_space is None:
+        action_space = defaults.get("action_space", "v1")
     t = ffi.new("fsim_task *")
     t.task = TASKS[task]
     t.decision_ticks = decision_ticks
     t.max_steps = max_steps
-    if construction_tick_limit is None:
-        construction_tick_limit = 18000
     t.construction_tick_limit = construction_tick_limit
     # One potential describes all three: the construction tasks build the line
     # it scores, and plate_line is handed that line already built, so its
@@ -101,10 +126,13 @@ def task_struct(task: str, blueprint: dict, *, decision_ticks=30, max_steps=600,
         t.marker_present[k] = int(point is not None)
         if point is not None:
             t.marker_x[k], t.marker_y[k] = float(point[0]), float(point[1])
-    patch = markers.get("patch")
-    if patch is not None and "patch" in public:
+    focus = FOCUS_MARKER.get(task, "patch")
+    patch = markers.get(focus)
+    if patch is not None and focus in public:
         t.has_patch = 1
         t.patch_x, t.patch_y = float(patch[0]), float(patch[1])
+    # The chest the verification counts (`VerificationSpec.container`).
+    t.output_entity = aliases.get("output", -1) if task == "belt_smelting" else -1
     # The potential reads the scene's truth, so its marker need not be public.
     target = markers.get(POTENTIAL_MARKER[task])
     if target is not None:

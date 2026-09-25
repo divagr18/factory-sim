@@ -41,6 +41,13 @@ FAMILIES = {
         "commissioning_far": "val",
         "commissioning_walled": "test",
     },
+    "belt_smelting": {
+        "open": "train",
+        "walled": "train",
+        "split_patch": "train",
+        "obstructed": "test",
+        "far_chest": "test",
+    },
 }
 
 #: plate_line's machines are pinned, not drawn: the scene is a commissioning
@@ -278,10 +285,263 @@ def plate_line(family: str, rng: random.Random) -> dict:
     }
 
 
+# ------------------------------------------------------------ belt_smelting
+#
+# FactorioRL `tasks/families/belt_smelting.py` 1.1.0: an iron patch, a coal
+# patch and a marked output chest, each at least 21 tiles (edge to edge) from
+# the other two, with walls in some families. The draw order is that module's
+# docstring's: only `rng.randint`, fixed-count loops and rejection loops that
+# redraw the same values in the same order, and every acceptance test is
+# integer arithmetic on inclusive tile rectangles (x0, y0, x1, y1).
+
+BELT_INVENTORY = {
+    "burner-mining-drill": 4,
+    "stone-furnace": 4,
+    "transport-belt": 40,
+    "burner-inserter": 10,
+    "coal": 20,
+}
+BELT_UNLOCK = ["burner-mining-drill", "stone-furnace", "transport-belt", "burner-inserter"]
+BELT_MARKERS = ["iron", "coal", "output"]
+BELT_SCENE_HALF = 60
+BELT_MIN_GAP_SQ = 21 * 21
+BELT_MIN_CENTRE_SQ4 = (2 * 20) ** 2
+BELT_MAX_CENTRE_SQ4 = (2 * 40) ** 2
+BELT_CHEST_MANHATTAN = {
+    "open": (21, 34),
+    "walled": (21, 30),
+    "split_patch": (21, 34),
+    "obstructed": (21, 30),
+    "far_chest": (35, 38),
+}
+BELT_CLEARANCE = 6
+BELT_CHEST_CLEARANCE = 4
+BELT_CORRIDOR_MARGIN = 3
+
+
+def _gaps(a, b) -> tuple[int, int]:
+    return (
+        max(0, b[0] - a[2] - 1, a[0] - b[2] - 1),
+        max(0, b[1] - a[3] - 1, a[1] - b[3] - 1),
+    )
+
+
+def _centre_dist_sq4(a, b) -> int:
+    dx = (b[0] + b[2]) - (a[0] + a[2])
+    dy = (b[1] + b[3]) - (a[1] + a[3])
+    return dx * dx + dy * dy
+
+
+def _centre_tile(r) -> tuple[int, int]:
+    return (r[0] + (r[2] - r[0]) // 2, r[1] + (r[3] - r[1]) // 2)
+
+
+def _in_scene(r) -> bool:
+    h = BELT_SCENE_HALF
+    return -h <= r[0] and r[2] < h and -h <= r[1] and r[3] < h
+
+
+def _pair_ok(a, b) -> bool:
+    gx, gy = _gaps(a, b)
+    return (
+        gx * gx + gy * gy >= BELT_MIN_GAP_SQ
+        and BELT_MIN_CENTRE_SQ4 <= _centre_dist_sq4(a, b) <= BELT_MAX_CENTRE_SQ4
+    )
+
+
+def _clipped(rect, clip: int) -> list[tuple[int, int]]:
+    """A rectangle's tiles, x-major, minus corner triangles of `clip` tiles."""
+    x0, y0, x1, y1 = rect
+    return [
+        (x, y)
+        for x in range(x0, x1 + 1)
+        for y in range(y0, y1 + 1)
+        if min(x - x0, x1 - x) + min(y - y0, y1 - y) >= clip
+    ]
+
+
+def _wall_ok(tile, iron, coal, chest) -> bool:
+    t = (tile[0], tile[1], tile[0], tile[1])
+    return (
+        _in_scene(t)
+        and max(_gaps(t, iron)) >= BELT_CLEARANCE
+        and max(_gaps(t, coal)) >= BELT_CLEARANCE
+        and max(_gaps(t, chest)) >= BELT_CHEST_CLEARANCE
+    )
+
+
+def _belt_iron_patch(family: str, rng: random.Random):
+    if family == "split_patch":
+        axis = rng.randint(0, 1)
+        long = rng.randint(10, 12)
+        short = rng.randint(4, 6)
+        cut = rng.randint(4, long - 6)
+        w, h = (long, short) if axis == 0 else (short, long)
+    elif family == "obstructed":
+        w = rng.randint(6, 8)
+        h = rng.randint(6, 8)
+        clip = rng.randint(1, 2)
+    else:
+        w = rng.randint(4, 7)
+        h = rng.randint(4, 7)
+    x0 = rng.randint(-8, 8) - w // 2
+    y0 = rng.randint(-8, 8) - h // 2
+    rect = (x0, y0, x0 + w - 1, y0 + h - 1)
+    if family == "split_patch":
+        tiles = [
+            (x, y)
+            for x in range(rect[0], rect[2] + 1)
+            for y in range(rect[1], rect[3] + 1)
+            if ((x - x0) if axis == 0 else (y - y0)) not in (cut, cut + 1)
+        ]
+        return tiles, rect
+    return _clipped(rect, clip if family == "obstructed" else 0), rect
+
+
+def belt_smelting_scene(family: str, rng: random.Random) -> dict:
+    """The generator's decisions (FactorioRL `belt_smelting.scene`), as tiles."""
+    iron, iron_rect = _belt_iron_patch(family, rng)
+    coal_w = rng.randint(4, 6)
+    coal_h = rng.randint(4, 6)
+    ix, iy = _centre_tile(iron_rect)
+    low, high = BELT_CHEST_MANHATTAN[family]
+    while True:
+        cx = ix + rng.randint(-40, 40)
+        cy = iy + rng.randint(-40, 40)
+        chest_rect = (cx, cy, cx, cy)
+        if (
+            _in_scene(chest_rect)
+            and _pair_ok(iron_rect, chest_rect)
+            and low <= sum(_gaps(iron_rect, chest_rect)) <= high
+        ):
+            break
+    while True:
+        qx = ix + rng.randint(-40, 40)
+        qy = iy + rng.randint(-40, 40)
+        coal_rect = (qx, qy, qx + coal_w - 1, qy + coal_h - 1)
+        if (
+            _in_scene(coal_rect)
+            and _pair_ok(iron_rect, coal_rect)
+            and _pair_ok(chest_rect, coal_rect)
+        ):
+            break
+    coal = _clipped(coal_rect, 1 if family == "obstructed" else 0)
+
+    walls: list[tuple[int, int]] = []
+    taken: set[tuple[int, int]] = set()
+    segments = {"walled": (1, 2), "obstructed": (2, 3)}.get(family)
+    if segments:
+        rects = (iron_rect, coal_rect, chest_rect)
+        pairs = ((0, 2), (0, 1), (1, 2))  # iron-chest, iron-coal, coal-chest
+        for _ in range(rng.randint(*segments)):
+            pair = rng.randint(0, 2)
+            t = rng.randint(35, 65)
+            length = rng.randint(4, 8) if family == "obstructed" else rng.randint(3, 6)
+            offset = rng.randint(-3, 3)
+            a = _centre_tile(rects[pairs[pair][0]])
+            b = _centre_tile(rects[pairs[pair][1]])
+            px = a[0] + (b[0] - a[0]) * t // 100
+            py = a[1] + (b[1] - a[1]) * t // 100
+            # Across the line between the two sites.
+            across_x = abs(b[0] - a[0]) < abs(b[1] - a[1])
+            segment = [
+                (px + offset - length // 2 + k, py)
+                if across_x
+                else (px, py + offset - length // 2 + k)
+                for k in range(length)
+            ]
+            if not all(_wall_ok(tile, iron_rect, coal_rect, chest_rect) for tile in segment):
+                continue
+            for tile in segment:
+                if tile not in taken:
+                    taken.add(tile)
+                    walls.append(tile)
+
+    bx0 = min(iron_rect[0], coal_rect[0], chest_rect[0])
+    by0 = min(iron_rect[1], coal_rect[1], chest_rect[1])
+    bx1 = max(iron_rect[2], coal_rect[2], chest_rect[2])
+    by1 = max(iron_rect[3], coal_rect[3], chest_rect[3])
+    clutter = {"obstructed": (6, 10), "far_chest": (18, 26)}.get(family)
+    if clutter:
+        m = BELT_CORRIDOR_MARGIN
+        corridor = (
+            min(iron_rect[0], chest_rect[0]) - m,
+            min(iron_rect[1], chest_rect[1]) - m,
+            max(iron_rect[2], chest_rect[2]) + m,
+            max(iron_rect[3], chest_rect[3]) + m,
+        )
+        for _ in range(rng.randint(*clutter)):
+            tile = (rng.randint(bx0, bx1), rng.randint(by0, by1))
+            if tile in taken or not _wall_ok(tile, iron_rect, coal_rect, chest_rect):
+                continue
+            if family == "far_chest" and max(_gaps((*tile, *tile), corridor)) == 0:
+                continue
+            taken.add(tile)
+            walls.append(tile)
+
+    while True:
+        start = (rng.randint(bx0, bx1), rng.randint(by0, by1))
+        if start not in taken and start != (chest_rect[0], chest_rect[1]):
+            break
+    return {
+        "iron": iron,
+        "iron_rect": iron_rect,
+        "coal": coal,
+        "coal_rect": coal_rect,
+        "chest": (chest_rect[0], chest_rect[1]),
+        "walls": walls,
+        "start": start,
+    }
+
+
+def _patch_centre(tiles) -> list[float]:
+    return [
+        sum(x for x, _ in tiles) / len(tiles) + 0.5,
+        sum(y for _, y in tiles) / len(tiles) + 0.5,
+    ]
+
+
+def belt_smelting(family: str, rng: random.Random) -> dict:
+    """FactorioRL `belt_smelting.generate`, as `Blueprint.to_dict` writes it."""
+    s = belt_smelting_scene(family, rng)
+    chest = [s["chest"][0] + 0.5, s["chest"][1] + 0.5]
+    entities = [
+        {
+            "name": "wooden-chest",
+            "position": list(chest),
+            "direction": "north",
+            "force": "player",
+            "marker": "output",
+        },
+        *(_wall(x + 0.5, y + 0.5) for x, y in s["walls"]),
+    ]
+    resources = [
+        *(_resource(x + 0.5, y + 0.5) for x, y in s["iron"]),
+        *(dict(_resource(x + 0.5, y + 0.5), name="coal") for x, y in s["coal"]),
+    ]
+    return {
+        "public_markers": list(BELT_MARKERS),
+        "entities": entities,
+        "resources": resources,
+        "character": {
+            "position": [s["start"][0] + 0.5, s["start"][1] + 0.5],
+            "inventory": dict(BELT_INVENTORY),
+        },
+        "markers": {
+            "iron": _patch_centre(s["iron"]),
+            "coal": _patch_centre(s["coal"]),
+            "output": list(chest),
+        },
+        "unlock_recipes": list(BELT_UNLOCK),
+        "radius": 64,
+    }
+
+
 GENERATORS = {
     "construct_smelting_line": construct_smelting_line,
     "build_line": build_line,
     "plate_line": plate_line,
+    "belt_smelting": belt_smelting,
 }
 
 

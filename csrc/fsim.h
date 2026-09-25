@@ -778,6 +778,12 @@ typedef struct {
     double potential;           /* SHAPING_POTENTIAL: phi of the current state */
     double progress_high;       /* SHAPING_PROGRESS: highest phi so far */
     double progress_paid;       /* ...and what it has paid */
+    /* The verification's two terms, as FactorioRL's `run_verification`
+     * records them: the counted increase before the source cap
+     * (`uncapped_output`) and the machine-mined source inside the window
+     * (`machine_source`). `verified_output` is the smaller. */
+    double verified_uncapped;
+    double verified_source;
 } fsim_rl;
 
 fsim_rl *fsim_rl_new(void);
@@ -795,6 +801,9 @@ int32_t fsim_rl_run(fsim_rl *rl, const int32_t *vectors, int32_t count, fsim_obs
                     uint8_t *mask);
 /* The line potential phi(s) in [0, 1], from the published observation. */
 double fsim_rl_potential(const fsim_rl *rl);
+/* belt_smelting: the iron plates in the output chest (`task.output_entity`)
+ * now, as `truth["containers"]["output"]` reads them: 0 once it is gone. */
+int32_t fsim_rl_delivered(const fsim_rl *rl);
 /* Environments [first, last) of a batch: step each with its row of `actions`
  * (6 per env), then write its observation, mask and transition. A caller runs
  * disjoint ranges on separate threads. */

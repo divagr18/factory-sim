@@ -38,9 +38,8 @@ from fsim import scenes
 
 #: Tasks with a prompt (`evolve.mutate.TASK_TEXT`), a `World` and an entry in
 #: `evolve.evaluate.TASKS`. Only those whose scenes `fsim.scenes` can draw are
-#: exposed: `belt_smelting` has its prompt, its v3 `World` and its setup, and
-#: joins `SUPPORTED_TASKS` by itself once its generator is ported
-#: (`evaluate.scenes_ported`).
+#: exposed (`evaluate.scenes_ported`): `construct_smelting_line` and
+#: `belt_smelting`, whose generator is ported draw for draw.
 KNOWN_TASKS = tuple(t for t in evaluate.TASKS if t in mutate.TASKS)
 SUPPORTED_TASKS = tuple(t for t in KNOWN_TASKS if evaluate.scenes_ported(t))
 SPLITS = ("train", "val", "holdout")
@@ -110,7 +109,7 @@ def system_prompt(game_notes: bool = True, task: str = evaluate.TASK) -> str:
 #: What a scene's score means, per task, for the user message.
 SCORED_ON = {
     evaluate.TASK: "the fraction of scenes where the smelting line verifies",
-    "belt_smelting": "the fraction of scenes where at least 60 iron plates reach the output "
+    "belt_smelting": "the fraction of scenes where at least 150 iron plates reach the output "
     "chest during the verification window",
 }
 #: What differs between one task's scenes, for the user message.

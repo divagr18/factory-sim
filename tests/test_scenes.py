@@ -7,7 +7,7 @@ import random
 
 import pytest
 
-from fsim import scenes
+from fsim import lib, scenes
 from fsim.parity import GOLDEN
 from fsim.rl import RlEnv
 
@@ -51,6 +51,14 @@ def test_every_generated_scene_installs(task):
                 continue
             _, scene = scenes.sample(task, split, seed)
             obs = env.reset(task, scene)
+            assert env.rl.env.resource_count == len(scene["resources"])
+            if task == "belt_smelting":
+                # Its three sites are 20 to 40 tiles apart, so the iron patch
+                # can be outside the 32-tile sensor at the start; the chest the
+                # verification counts is installed wherever the character is.
+                chest = env.rl.env.entities[env.rl.task.output_entity]
+                assert chest.alive and chest.kind == lib.K_CHEST
+                continue
             assert obs["grid"][0].sum() > 0  # the ore patch is visible
 
 
