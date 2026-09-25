@@ -121,14 +121,28 @@ SCENES_DIFFER = {
 }
 
 
-def user_message(task: str, split: str, subset_id: str, refs: list[SceneRef]) -> str:
+#: The last line of the user message, by prompt version. v1 (the default, and what
+#: every published result used) caps the plan at five lines; v2 asks the model to
+#: reason in prose first, as it does unprompted, so training on replies that
+#: reason does not teach it to ignore its prompt.
+OUTPUT_FORMATS = {
+    "v1": mutate.OUTPUT_FORMAT,
+    "v2": "Output format: first think the problem through step by step in plain prose, then "
+    "exactly one ```python fenced block containing the complete program. Nothing after the "
+    "block.",
+}
+
+
+def user_message(
+    task: str, split: str, subset_id: str, refs: list[SceneRef], prompt_version: str = "v1"
+) -> str:
     seeds = f"{refs[0].seed}..{refs[-1].seed}" if split != "holdout" else "held-out stream"
     return (
         f"Write a builder program for {task}.\n"
         f"It will be run once on each of the {len(refs)} scenes of scene subset "
         f"{subset_id} (the {split} set, seeds {seeds}). The program never sees the seed; "
         f"scenes differ in {SCENES_DIFFER[task]}. Each scene is scored on its own, and your "
-        f"score is {SCORED_ON[task]}.\n\n" + mutate.OUTPUT_FORMAT
+        f"score is {SCORED_ON[task]}.\n\n" + OUTPUT_FORMATS[prompt_version]
     )
 
 
@@ -139,6 +153,7 @@ def rows(
     num_examples: int = 64,
     seed: int = 0,
     game_notes: bool = True,
+    prompt_version: str = "v1",
 ) -> list[dict]:
     """One dict per dataset row: prompts plus the scene subset it is scored on.
 
@@ -149,6 +164,8 @@ def rows(
         raise ValueError(f"n_scenes must be in 1..{MAX_SCENES}")
     if num_examples < 1:
         raise ValueError("num_examples must be >= 1")
+    if prompt_version not in OUTPUT_FORMATS:
+        raise ValueError(f"prompt_version must be one of {sorted(OUTPUT_FORMATS)}")
     _check_task(task)
     system = system_prompt(game_notes, task)
     out = []
@@ -163,7 +180,7 @@ def rows(
                 "subset_id": subset_id,
                 "scenes": [(r.family, r.seed, r.sample_split) for r in refs],
                 "system_prompt": system,
-                "prompt": user_message(task, split, subset_id, refs),
+                "prompt": user_message(task, split, subset_id, refs, prompt_version),
             }
         )
     return out

@@ -26,6 +26,7 @@ def load_environment(
     n_scenes: int = 16,
     split: str = "train",
     game_notes: bool = True,
+    prompt_version: str = "v1",
     num_examples: int = 64,
     seed: int = 0,
     workers: int = 4,
@@ -41,7 +42,7 @@ def load_environment(
     by name; never train on it."""
     from datasets import Dataset
 
-    rows = core.rows(task, split, n_scenes, num_examples, seed, game_notes)
+    rows = core.rows(task, split, n_scenes, num_examples, seed, game_notes, prompt_version)
     system = rows[0]["system_prompt"]
     dataset = Dataset.from_list(
         [

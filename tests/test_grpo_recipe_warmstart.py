@@ -175,7 +175,7 @@ def rz_args(tmp_path: Path, data: Path, server: FakeServer, *extra) -> list[str]
 
 
 def test_resolve_rebuilds_the_env_row():
-    rows = core.rows(TASK, "train", 4, 3, 0, True)
+    rows = core.rows(TASK, "train", 4, 3, 0, True, rz.PROMPT_VERSION)  # asked with v2
     ex = rz.resolve(example_rows((2,))[0], 7)
     assert ex.subset_id == rows[2]["subset_id"] == f"{TASK}/train/8-11"
     assert ex.scenes == [list(s) for s in rows[2]["scenes"]]
@@ -383,9 +383,10 @@ def test_rationalize_end_to_end(tmp_path, serve):
     for row, ex in zip(sft, examples, strict=True):
         assert row["messages"][:2] == ex.messages  # the prompt without the hint
         assert len(row["messages"]) == 3 and row["messages"][2]["role"] == "assistant"
-    assert sft[0]["messages"][2]["content"] == CANNED["construct_smelting_line/train/0-3"][1]
-    assert sft[1]["messages"][2]["content"] == CANNED["construct_smelting_line/train/8-11"][5]
-    assert [r["meta"]["same_as_hint"] for r in sft] == ["exact", "different"]
+    # Among the best-scoring passes, the one whose reasoning is closest to their median length.
+    assert sft[0]["messages"][2]["content"] == CANNED["construct_smelting_line/train/0-3"][0]
+    assert sft[1]["messages"][2]["content"] == CANNED["construct_smelting_line/train/8-11"][4]
+    assert [r["meta"]["same_as_hint"] for r in sft] == ["exact", "normalized"]
     assert [r["meta"]["success"] for r in sft] == [1.0, 0.75]
     # What sft_lora.py reads: thinking off, the reply as the target.
     loaded = sft_data.load_examples(str(out / "sft.jsonl"))
@@ -394,8 +395,8 @@ def test_rationalize_end_to_end(tmp_path, serve):
     assert stats["kept_examples"] == 2 and stats["kept_samples"] == 2
     assert stats["samples"] == 12 and stats["reject_reasons"]["passed"] == 4
     assert stats["reject_reasons"]["sandbox"] == 2
-    assert stats["kept_vs_hint"]["exact"] == 1 and stats["kept_vs_hint"]["different"] == 1
-    assert stats["kept_vs_hint"]["share_identical"] == 0.5
+    assert stats["kept_vs_hint"]["exact"] == 1 and stats["kept_vs_hint"]["normalized"] == 1
+    assert stats["kept_vs_hint"]["share_identical"] == 1.0  # exact + normalized
     assert stats["hint"]["template"] == rz.HINT_TEMPLATE
     assert stats["reply_tokens"]["all"] == {"n": 0}  # tokenizer off
     assert stats["reasoning_words"]["kept"]["n"] == 2
@@ -459,7 +460,7 @@ def test_rationalize_fallback_mode_and_request_errors(tmp_path, serve):
         for r in gc.read_jsonl(str(tmp_path / "out" / "sft.jsonl"))
     }
     assert set(sft) == {"0-3", "8-11"}
-    assert sft["0-3"]["meta"]["hinted"] is True and sft["0-3"]["meta"]["k"] == 2
+    assert sft["0-3"]["meta"]["hinted"] is True and sft["0-3"]["meta"]["k"] == 3
     assert sft["8-11"]["meta"]["hinted"] is False and sft["8-11"]["meta"]["round"] == 2
     assert stats["reject_reasons"]["request_error"] == 4
     assert stats["unhinted"] == {"samples": 6, "kept": 1}

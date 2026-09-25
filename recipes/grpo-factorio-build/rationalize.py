@@ -27,7 +27,7 @@ Keep rule, per sample:
   words of prose before the program.
 
 Of the samples that pass, the best `--keep-per-example` are kept: higher
-success first, then the shortest reasoning.
+success first, then the reasoning closest to the median length.
 
 Files in --out-dir:
 - `run.json`: the generation settings, including the hint text. A resume
@@ -75,6 +75,8 @@ from evolve import evaluate, sandbox  # noqa: E402
 from evolve.llm import _BUILD, _CODE_TAGS, _FENCE, extract_code  # noqa: E402
 
 HINT_VERSION = "hint-v1"
+#: The env prompt the examples are asked and trained with (`core.OUTPUT_FORMATS`).
+PROMPT_VERSION = "v2"
 #: The one extra user message. `{program}` is the reference program as the env's
 #: parser extracts it, which ends in a newline.
 HINT_TEMPLATE = (
@@ -155,6 +157,9 @@ def resolve(row: dict, index: int) -> Example:
     code = extract_code(completion)
     if code is None:
         raise ValueError(f"row {index}: the target holds no program")
+    # The example is checked against the prompt it was made with (v1); it is asked,
+    # and trained, with the prompt version this run uses.
+    env = core.rows(task, split, end - start + 1, 1, start, notes, PROMPT_VERSION)[0]
     messages = ([{"role": "system", "content": env["system_prompt"]}] if system else []) + [
         {"role": "user", "content": env["prompt"]}
     ]
@@ -254,10 +259,17 @@ def reject_reasons(sample: dict, reference_success: float, rules: KeepRules) -> 
 
 
 def select(record: dict, rules: KeepRules) -> list[dict]:
-    """The kept samples: passing ones, higher success first, then shorter reasoning."""
+    """The kept samples: passing ones, higher success first, then the reasoning
+    closest to the median length among them (typical, so selection does not
+    push reply length down)."""
     ref = record["reference"]["metrics"]["success"]
     ok = [s for s in record["samples"] if not reject_reasons(s, ref, rules)]
-    ok.sort(key=lambda s: (-s["metrics"]["success"], s["facts"]["reasoning_chars"], s["k"]))
+    lengths = sorted(s["facts"]["reasoning_chars"] for s in ok)
+    median = lengths[len(lengths) // 2] if lengths else 0
+    def typical(s):
+        return (-s["metrics"]["success"], abs(s["facts"]["reasoning_chars"] - median), s["k"])
+
+    ok.sort(key=typical)
     return ok[: rules.keep_per_example]
 
 
@@ -605,6 +617,8 @@ def main(argv=None) -> dict:
         "hint_mode": args.hint_mode,
         "hint_version": HINT_VERSION,
         "hint_template": HINT_TEMPLATE,
+        "prompt_version": PROMPT_VERSION,
+        "select": "median-length",
         "n": args.n,
         "temperature": args.temperature,
         "top_p": args.top_p,

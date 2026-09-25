@@ -117,6 +117,8 @@ class FactorioBuildConfig(vf.TasksetConfig):
     """First scene index; row k covers indices seed + k*n_scenes onward."""
     game_notes: bool = True
     """Include `evolve.mutate.GAME_NOTES` (mechanics the API reference leaves out)."""
+    prompt_version: Literal["v1", "v2"] = "v1"
+    """`core.OUTPUT_FORMATS`: v1 caps the plan at five lines, v2 asks for prose reasoning."""
     task: FactorioBuildTaskConfig = FactorioBuildTaskConfig()
 
 
@@ -150,6 +152,7 @@ class FactorioBuildTaskset(vf.Taskset[FactorioBuildTask, FactorioBuildConfig]):
                     cfg.num_examples,
                     cfg.seed,
                     cfg.game_notes,
+                    cfg.prompt_version,
                 )
             )
         ]
