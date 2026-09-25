@@ -103,11 +103,12 @@ def first_difference(name) -> tuple | None:
 
 # ------------------------------------------------------------------ v3
 
-#: FactorioRL's v3 encoding of the same recorded observations: per scenario, the
-#: v3 tensor hashes and mask at each decision (`tools/v3_contract.py` there).
-#: The traces were recorded under local-v2, which carries no belt lanes, hands or
-#: pickup and drop points; FactorioRL fills those from each record's engine
-#: state the way the local-v3 sensor reports them.
+#: FactorioRL's v3 encoding of the same recorded runs: per scenario, the v3
+#: tensor hashes and mask at each decision (`tools/v3_contract_golden.py`
+#: there). The traces were recorded under local-v2, which carries no belt lanes,
+#: hands or pickup and drop points; FactorioRL replays each on the engine under
+#: the local-v3 sensor (everything else the replay records is the trace's) and
+#: encodes the sensor's own observations.
 V3_GOLDEN = GOLDEN / "v3_contract.json.xz"
 V3 = json.loads(lzma.decompress(V3_GOLDEN.read_bytes())) if V3_GOLDEN.is_file() else None
 
