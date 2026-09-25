@@ -34,6 +34,13 @@ Truncation is not bootstrapped: construct_smelting_line never truncates (the
 budget running out starts verification, a true terminal), and build_line's
 600-decision truncation is treated as terminal, a known and small bias.
 
+`--action-space v3` is parameterized-v3 over local-v3 (belt_smelting's catalog):
+the rollout also carries each environment's per-operation masks, and the
+arguments are drawn, scored and KL-anchored under the chosen operation's own
+row (`fsim/policy.py`). `--init` starts the policy from a checkpoint -- the
+behaviour-cloned prior, as VPT fine-tunes its BC model rather than a fresh
+one -- and `--prior` anchors it there.
+
     python train.py --run sparse-s1 --seed 1 --steps 20000000
     python train.py --run progress-s1 --seed 1 --steps 20000000 --shaping progress
 """
@@ -55,6 +62,7 @@ from torch import nn
 
 from fsim import ffi, lib
 from fsim.policy import EXTRACTOR_VERSION, Policy, export, masked_kl
+from fsim.rl import TASK_DEFAULTS
 from fsim.ued import Curriculum, LevelBuffer, load_buffer, save_buffer
 from fsim.vec import VecEnv, obs_layout, unpack_grid
 
@@ -92,6 +100,25 @@ def backplay_window(progress: float) -> tuple[int, int]:
 #: The same ladder, climbed on evidence rather than on the clock.
 BACKPLAY_LADDER = tuple(window for _at, window in BACKPLAY_SCHEDULE)
 
+#: A ladder in fractions of the demonstration's length (`--demo-ladder
+#: fraction`, belt_smelting's default). construct_smelting_line's build is
+#: about twenty decisions, so a window twenty back is the whole build; a
+#: belt_smelting build is hundreds of decisions, and the same ladder would step
+#: from a twenty-decision cut straight to the scene's own start. The last rung
+#: is the whole build: every episode starts at the scene.
+FRACTION_LADDER = (
+    (0.0, 0.02),
+    (0.01, 0.05),
+    (0.03, 0.1),
+    (0.06, 0.18),
+    (0.12, 0.3),
+    (0.2, 0.45),
+    (0.35, 0.65),
+    (0.5, 0.85),
+    (0.7, 1.0),
+    (1.0, 1.0),
+)
+
 
 class GatedBackplay:
     """Backplay's window, widened only once the policy can finish the last one.
@@ -107,17 +134,29 @@ class GatedBackplay:
     and move outwards from the ones already solved.
     """
 
-    def __init__(self, threshold: float = 0.5, minimum: int = 64, settle: int = 8) -> None:
+    def __init__(
+        self,
+        threshold: float = 0.5,
+        minimum: int = 64,
+        settle: int = 8,
+        ladder: tuple = BACKPLAY_LADDER,
+        binned: bool = False,
+    ) -> None:
         self.threshold = threshold
         self.minimum = minimum  # episodes at the deepest cut before it may move
         self.settle = settle  # updates to wait after moving, so the buffer refills
+        self.ladder = ladder
+        #: Judge the deepest quarter of the cuts seen rather than the single
+        #: deepest one. A fractional window spans dozens of distinct cuts, so
+        #: no one of them would ever collect `minimum` episodes.
+        self.binned = binned
         self.index = 0
         self.waited = settle
         self.advanced_at: list[int] = []
 
     @property
     def window(self) -> tuple[int, int]:
-        return BACKPLAY_LADDER[self.index]
+        return self.ladder[self.index]
 
     def update(self, demo: list[dict], steps: int) -> tuple[int, int]:
         """Read the recent demonstration episodes; widen if they are solved.
@@ -129,7 +168,7 @@ class GatedBackplay:
         climbed from the first rung to the last in 400k steps having never
         learned to make a single decision for itself.
         """
-        if self.index + 1 >= len(BACKPLAY_LADDER):
+        if self.index + 1 >= len(self.ladder):
             return self.window
         if self.waited < self.settle:  # the buffer still holds the old window
             self.waited += 1
@@ -141,9 +180,15 @@ class GatedBackplay:
                 cuts.setdefault(start, []).append(episode["success"])
         if not cuts:
             return self.window
-        deepest = max(cuts, key=lambda name: int(name[4:]))
-        if len(cuts[deepest]) >= self.minimum:
-            if float(np.mean(cuts[deepest])) >= self.threshold:
+        if self.binned:
+            backs = {name: int(name[4:]) for name in cuts}
+            top, bottom = max(backs.values()), min(backs.values())
+            cutoff = top - 0.25 * (top - bottom)
+            judged = [ok for name, oks in cuts.items() if backs[name] >= cutoff for ok in oks]
+        else:
+            judged = cuts[max(cuts, key=lambda name: int(name[4:]))]
+        if len(judged) >= self.minimum:
+            if float(np.mean(judged)) >= self.threshold:
                 self.index += 1
                 self.waited = 0
                 self.advanced_at.append(steps)
@@ -245,10 +290,10 @@ def parse(argv=None) -> argparse.Namespace:
     p.add_argument(
         "--max-steps",
         type=int,
-        default=600,
-        help="decisions per episode. The two construction tasks allow 600; "
-        "plate_line allows 400, and a task trained on the wrong budget is a "
-        "different task",
+        default=None,
+        help="decisions per episode; defaults to the task's own (fsim.rl.TASK_DEFAULTS). "
+        "The two construction tasks allow 600, plate_line 400 and belt_smelting "
+        "2500, and a task trained on the wrong budget is a different task",
     )
     p.add_argument(
         "--tick-limit",
@@ -282,6 +327,24 @@ def parse(argv=None) -> argparse.Namespace:
         default=None,
         help="a behaviour-cloned checkpoint to anchor to (tools/behaviour_clone.py). "
         "A run that uses one is not a from-scratch run.",
+    )
+    p.add_argument(
+        "--init",
+        type=Path,
+        default=None,
+        help="start the policy from this checkpoint (a behaviour-cloned prior, "
+        "tools/behaviour_clone.py). VPT fine-tunes the BC model itself and "
+        "anchors it to a frozen copy with --prior; without --init the policy "
+        "starts fresh and only the KL term knows the prior",
+    )
+    p.add_argument(
+        "--critic-warmup",
+        type=int,
+        default=0,
+        help="updates at the start that train the value head alone. A policy "
+        "started from a prior has a value head that has never seen a return, "
+        "and PPO steps taken on its advantages move the policy away from the "
+        "prior for no reason",
     )
     p.add_argument("--kl-coef", type=float, default=0.2, help="VPT's rho")
     p.add_argument("--kl-decay", type=float, default=0.9995, help="rho's decay per update")
@@ -375,6 +438,29 @@ def parse(argv=None) -> argparse.Namespace:
         help="success at the current window needed to widen it, with --demo-schedule gated",
     )
     p.add_argument(
+        "--demo-pool",
+        type=Path,
+        default=None,
+        help="belt_smelting: recorded builds to cut demonstration starts from "
+        "(tools/behaviour_clone.py writes them next to the prior). Without one "
+        "the builder runs live, in Python, on every demonstration start",
+    )
+    p.add_argument(
+        "--demo-ladder",
+        choices=("decisions", "fraction"),
+        default=None,
+        help="the gated ladder's windows: decisions back from the end of the "
+        "build, or fractions of its length. Defaults to fraction for "
+        "belt_smelting, whose build is hundreds of decisions, else decisions",
+    )
+    p.add_argument(
+        "--gate-minimum",
+        type=int,
+        default=None,
+        help="episodes at the deepest cut before the gate may move; defaults to "
+        "64, or 32 with --demo-ladder fraction",
+    )
+    p.add_argument(
         "--demo-starts",
         type=float,
         default=0.0,
@@ -395,7 +481,19 @@ def parse(argv=None) -> argparse.Namespace:
         "`epsilon` mode; a deterministic policy in a deterministic task cycles",
     )
     p.add_argument("--eval-episodes", type=int, default=256)
+    p.add_argument(
+        "--final-episodes",
+        type=int,
+        default=512,
+        help="episodes per split and mode in the final report",
+    )
     p.add_argument("--eval-every", type=int, default=2_000_000)
+    p.add_argument(
+        "--eval-at-start",
+        action="store_true",
+        help="evaluate before the first update, as update 0 of metrics.jsonl: "
+        "what a run started with --init starts from",
+    )
     p.add_argument("--out", type=Path, default=ROOT / "runs")
     p.add_argument("--no-graph", action="store_true", help="rollout inference without CUDA graphs")
     p.add_argument(
@@ -416,11 +514,22 @@ def parse(argv=None) -> argparse.Namespace:
     p.add_argument("--no-final", action="store_true", help="skip the final evaluation and export")
     p.add_argument(
         "--action-space",
-        choices=("v1", "v2"),
-        default="v1",
-        help="v1: FactorioRL's parameterized-v1; v2: the simulator prototype",
+        choices=("v1", "v2", "v3"),
+        default=None,
+        help="v1: FactorioRL's parameterized-v1; v2: the simulator prototype; "
+        "v3: parameterized-v3 with per-operation masks. Defaults to the "
+        "task's own catalog (v3 for belt_smelting), else v1",
     )
     args = p.parse_args(argv)
+    defaults = TASK_DEFAULTS.get(args.task, {})
+    if args.max_steps is None:
+        args.max_steps = defaults.get("max_steps", 600)
+    if args.action_space is None:
+        args.action_space = defaults.get("action_space", "v1")
+    if args.demo_ladder is None:
+        args.demo_ladder = "fraction" if args.task == "belt_smelting" else "decisions"
+    if args.gate_minimum is None:
+        args.gate_minimum = 32 if args.demo_ladder == "fraction" else 64
     # A return needs a whole episode, so grpo cannot opt out of the rollout
     # shape. Applied here rather than in main, so anything reading the parsed
     # arguments sees a coherent pair.
@@ -454,22 +563,35 @@ class Rollout:
 
     def __init__(self, policy: Policy, n: int, device, graph: bool = True) -> None:
         self.policy, self.n, self.device = policy, n, device
-        self.size = ffi.sizeof("fsim_obs8")
+        #: v3: the packed v3 observation, its 376-entry mask, and the
+        #: per-operation masks the arguments are drawn under.
+        self.v3 = policy.action_space == "v3"
+        self.size = ffi.sizeof("fsim_obs38" if self.v3 else "fsim_obs8")
+        self.mask_size = lib.RL3_MASK_SIZE if self.v3 else lib.RL_MASK_SIZE
         pin = device.type == "cuda"
         self.host = torch.empty(n * self.size, dtype=torch.uint8, pin_memory=pin)
-        self.host_mask = torch.empty(n * 201, dtype=torch.uint8, pin_memory=pin)
+        self.host_mask = torch.empty(n * self.mask_size, dtype=torch.uint8, pin_memory=pin)
         self.block = torch.zeros(n * self.size, dtype=torch.uint8, device=device)
-        self.mask = torch.zeros((n, 201), dtype=torch.bool, device=device)
-        self.layout = obs_layout(compact=True)
+        self.mask = torch.zeros((n, self.mask_size), dtype=torch.bool, device=device)
+        self.host_opmask = None
+        self.op_masks = None
+        if self.v3:
+            shape = (n, lib.RL3_OPERATIONS, lib.RL3_ARG_WIDTH)
+            self.host_opmask = torch.empty(math.prod(shape), dtype=torch.uint8, pin_memory=pin)
+            self.op_masks = torch.zeros(shape, dtype=torch.bool, device=device)
+        self.layout = obs_layout(compact=True, v3=self.v3)
         self.graph = None
         self.out = None
         self.use_graph = graph and device.type == "cuda"
 
     def memories(self) -> dict:
-        return {
+        out = {
             "obs_memory": (self.host.data_ptr(), self.host),
             "mask_memory": (self.host_mask.data_ptr(), self.host_mask),
         }
+        if self.v3:
+            out["opmask_memory"] = (self.host_opmask.data_ptr(), self.host_opmask)
+        return out
 
     def decode(self, block: torch.Tensor, n: int) -> dict:
         """Field tensors over a flat block of `n` compact observations."""
@@ -485,7 +607,7 @@ class Rollout:
         obs = unpacked(self.decode(self.block, self.n))
         with torch.no_grad():
             f = features(self.policy, obs)
-            actions, logp = self.policy.act(f, self.mask)
+            actions, logp = self.policy.act(f, self.mask, op_masks=self.op_masks)
             value = self.policy.value(f)
         return obs, actions, logp, value
 
@@ -494,7 +616,9 @@ class Rollout:
 
         The returned tensors are overwritten by the next call."""
         self.block.copy_(self.host, non_blocking=True)
-        self.mask.copy_(self.host_mask.view(self.n, 201), non_blocking=True)
+        self.mask.copy_(self.host_mask.view(self.n, self.mask_size), non_blocking=True)
+        if self.v3:
+            self.op_masks.copy_(self.host_opmask.view(self.op_masks.shape), non_blocking=True)
         if not self.use_graph:
             return self._infer()
         if self.graph is None:
@@ -638,7 +762,7 @@ def features(policy: Policy, obs: dict) -> torch.Tensor:
     return f.float()
 
 
-def ppo_minibatch(args, policy, flat, idx, masks, actions, old_logp, adv, ret, val):
+def ppo_minibatch(args, policy, flat, idx, masks, actions, old_logp, adv, ret, val, opm=None):
     """One plain-PPO minibatch loss, written as one function so it can be compiled.
 
     The same arithmetic as the eager loop in `main`, for the configurations
@@ -647,7 +771,7 @@ def ppo_minibatch(args, policy, flat, idx, masks, actions, old_logp, adv, ret, v
     rows, so the standard deviation is never taken over one element.
     """
     f = features(policy, {k: v[idx] for k, v in flat.items()})
-    logp, entropy = policy.evaluate(f, masks[idx], actions[idx])
+    logp, entropy = policy.evaluate(f, masks[idx], actions[idx], None if opm is None else opm[idx])
     ratio_log = logp - old_logp[idx]
     ratio = ratio_log.exp()
     a = adv[idx]
@@ -728,7 +852,8 @@ class EvalRollout(Rollout):
                 part = unpacked({k: v[lo : lo + self.CHUNK] for k, v in obs.items()})
                 f = features(self.policy, part)
                 mask = self.mask[lo : lo + self.CHUNK]
-                out.append(self.policy.act(f, mask, self.greedy, self.epsilon)[0])
+                opm = None if self.op_masks is None else self.op_masks[lo : lo + self.CHUNK]
+                out.append(self.policy.act(f, mask, self.greedy, self.epsilon, opm)[0])
         return torch.cat(out)
 
 
@@ -803,7 +928,8 @@ def _slow_eval_records(policy, device, args, split, episodes, greedy, epsilon=0.
     while len(done) < episodes:
         t = to_device(obs, device)
         mask = torch.from_numpy(masks).to(device).bool()
-        actions, _ = policy.act(features(policy, t), mask, greedy, epsilon)
+        opm = None if env.op_masks is None else torch.from_numpy(env.op_masks).to(device).bool()
+        actions, _ = policy.act(features(policy, t), mask, greedy, epsilon, opm)
         obs, masks, _, term, trunc, finished = env.step(actions.cpu().numpy())
         ended = np.flatnonzero(term | trunc)
         for i, record in zip(ended, finished, strict=True):
@@ -870,6 +996,8 @@ def main(argv=None) -> int:
         policy.extractor.input_dtype = torch.bfloat16
         policy = policy.to(memory_format=torch.channels_last)
     policy.autoregressive = args.autoregressive
+    if args.init:
+        policy.load_state_dict(torch.load(args.init, map_location=device, weights_only=True))
     prior = None
     if args.prior:
         prior = Policy(action_space=args.action_space).to(device)
@@ -917,6 +1045,8 @@ def main(argv=None) -> int:
     )  # fmt: skip
     env.demo_layouts = not args.fixed_demo_layout
     env.demo_variants = args.demo_variants
+    if args.demo_pool:
+        env.demo_pool = json.loads(args.demo_pool.read_text(encoding="utf-8"))
 
     N, T = args.envs, args.horizon
     batch = N * T
@@ -929,17 +1059,26 @@ def main(argv=None) -> int:
                 "group's returns are its episodes' returns, and an episode cut at "
                 f"the horizon has none. Got --horizon {T}."
             )
+    v3 = args.action_space == "v3"
+    rows, width = (lib.RL3_MAX_ENTITIES, lib.RL3_ENTITY_FEATURES) if v3 else (32, 16)
     buf = {
         # The byte grid, unpacked once in the rollout graph: the update reads it
         # every epoch, and unpacking per minibatch cost more than it saved.
         "grid": torch.zeros((T, N, 6, 65, 65), dtype=torch.uint8, device=device),
-        "entities": torch.zeros((T, N, 32, 16), device=device),
-        "entity_mask": torch.zeros((T, N, 32), dtype=torch.int8, device=device),
-        "self": torch.zeros((T, N, 12), device=device),
-        "inventory": torch.zeros((T, N, 14), device=device),
-        "goal": torch.zeros((T, N, 12), device=device),
+        "entities": torch.zeros((T, N, rows, width), device=device),
+        "entity_mask": torch.zeros((T, N, rows), dtype=torch.int8, device=device),
+        "self": torch.zeros((T, N, lib.RL3_SELF_FEATURES if v3 else 12), device=device),
+        "inventory": torch.zeros((T, N, lib.RL3_ITEMS if v3 else 14), device=device),
+        "goal": torch.zeros((T, N, lib.RL3_GOAL_FEATURES if v3 else 12), device=device),
     }
-    masks_buf = torch.zeros((T, N, 201), dtype=torch.bool, device=device)
+    masks_buf = torch.zeros((T, N, rollout.mask_size), dtype=torch.bool, device=device)
+    #: v3: the per-operation masks each decision was drawn under, which the
+    #: update must score it under again for the ratio to be a ratio.
+    opmasks_buf = (
+        torch.zeros((T, N, lib.RL3_OPERATIONS, lib.RL3_ARG_WIDTH), dtype=torch.bool, device=device)
+        if v3
+        else None
+    )
     actions_buf = torch.zeros((T, N, 6), dtype=torch.long, device=device)
     logp_buf = torch.zeros((T, N), device=device)
     rew_buf = torch.zeros((T, N), device=device)
@@ -958,7 +1097,13 @@ def main(argv=None) -> int:
     step_np = host_step.numpy()
     next_done = torch.zeros(N, device=device)
     episodes: list[dict] = []
-    gate = GatedBackplay(threshold=args.gate)
+    fraction = args.demo_ladder == "fraction"
+    gate = GatedBackplay(
+        threshold=args.gate,
+        minimum=args.gate_minimum,
+        ladder=FRACTION_LADDER if fraction else BACKPLAY_LADDER,
+        binned=fraction,
+    )
     steps = 0
     decisions = 0
     unfinished = 0.0
@@ -971,6 +1116,22 @@ def main(argv=None) -> int:
         if device.type == "cuda":
             torch.cuda.synchronize()
         return time.perf_counter()
+
+    if args.eval_at_start:
+        # What the run starts from: with --init, the behaviour-cloned prior.
+        policy.eval()
+        result = evaluate(policy, device, args, "train", args.eval_episodes, greedy=False)
+        log.write(json.dumps({"update": 0, "steps": 0, "eval": result}) + "\n")
+        log.flush()
+        shown = {"steps": 0, "eval_success": result["success"]}
+        shown["eval_verified"] = round(result["verified_output_mean"], 2)
+        print(json.dumps(shown), flush=True)
+        # The start is a candidate for the final report's checkpoint too, so
+        # a run that only degrades its prior reports the prior, and says so
+        # (best.pt's step is in metrics.jsonl).
+        best = result["success"]
+        torch.save(policy.state_dict(), out / "best.pt")
+        start = time.perf_counter()
 
     for update in range(1, updates + 1):
         began = clock()
@@ -999,6 +1160,8 @@ def main(argv=None) -> int:
             for k in KEYS:
                 buf[k][t].copy_(obs[k])
             masks_buf[t].copy_(rollout.mask)
+            if opmasks_buf is not None:
+                opmasks_buf[t].copy_(rollout.op_masks)
             done_buf[t].copy_(next_done)
             live_buf[t].copy_(live)
             actions_buf[t].copy_(action)
@@ -1074,6 +1237,9 @@ def main(argv=None) -> int:
 
         flat = {k: v.reshape(batch, *v.shape[2:]) for k, v in buf.items()}
         b_masks = masks_buf.reshape(batch, -1)
+        b_opmasks = (
+            None if opmasks_buf is None else opmasks_buf.reshape(batch, *opmasks_buf.shape[2:])
+        )
         b_actions = actions_buf.reshape(batch, -1)
         b_logp, b_adv = logp_buf.reshape(-1), adv.reshape(-1)
         b_ret, b_val = returns.reshape(-1), val_buf.reshape(-1)
@@ -1115,8 +1281,9 @@ def main(argv=None) -> int:
                     continue
                 if minibatch is not None:
                     loss, pg, v_loss, ent, ratio_log, ratio = minibatch(
-                        policy, flat, idx, b_masks, b_actions, b_logp, b_adv, b_ret, b_val
-                    )
+                        policy, flat, idx, b_masks, b_actions, b_logp, b_adv, b_ret, b_val,
+                        b_opmasks,
+                    )  # fmt: skip
                     optimizer.zero_grad(set_to_none=True)
                     loss.backward()
                     nn.utils.clip_grad_norm_(policy.parameters(), args.max_grad_norm)
@@ -1130,7 +1297,8 @@ def main(argv=None) -> int:
                         stats["prior_kl"].append(torch.zeros((), device=device))
                     continue
                 f = features(policy, {k: v[idx] for k, v in flat.items()})
-                logp, entropy = policy.evaluate(f, b_masks[idx], b_actions[idx])
+                opm = None if b_opmasks is None else b_opmasks[idx]
+                logp, entropy = policy.evaluate(f, b_masks[idx], b_actions[idx], opm)
                 ratio_log = logp - b_logp[idx]
                 ratio = ratio_log.exp()
                 a = b_adv[idx]
@@ -1159,13 +1327,18 @@ def main(argv=None) -> int:
                         * torch.max((value - b_ret[idx]) ** 2, (v_clipped - b_ret[idx]) ** 2).mean()
                     )
                     loss = pg - args.ent * ent + args.vf * v_loss
+                    if update <= args.critic_warmup:
+                        # The value head alone: see --critic-warmup.
+                        loss = args.vf * v_loss
                 prior_kl = torch.zeros((), device=device)
                 if prior is not None:
                     op = b_actions[idx][:, 0]
-                    op_logits, op_mask, arg_logits, pad = policy.head_logits(f, b_masks[idx], op)
+                    op_logits, op_mask, arg_logits, pad = policy.head_logits(
+                        f, b_masks[idx], op, opm
+                    )
                     with torch.no_grad():
                         pf = features(prior, {k: v[idx] for k, v in flat.items()})
-                        p_op, _, p_arg, _ = prior.head_logits(pf, b_masks[idx], op)
+                        p_op, _, p_arg, _ = prior.head_logits(pf, b_masks[idx], op, opm)
                     # The joint KL of a factored head is KL(op) plus the KL of
                     # the arguments under each op, weighted by the prior. The
                     # second term is taken at the op the rollout actually chose,
@@ -1174,7 +1347,8 @@ def main(argv=None) -> int:
                         masked_kl(p_op, op_logits, op_mask)
                         + masked_kl(p_arg, arg_logits, pad).sum(-1)
                     ).mean()
-                    loss = loss + rho * prior_kl
+                    if update > args.critic_warmup:
+                        loss = loss + rho * prior_kl
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 nn.utils.clip_grad_norm_(policy.parameters(), args.max_grad_norm)
@@ -1220,8 +1394,14 @@ def main(argv=None) -> int:
             "group_spread": round(spread, 5),
             "ued": curriculum.stats() if curriculum is not None else None,
             "sps": round(steps / elapsed),
+            # Decisions a second in this update's rollout alone, without the
+            # update and the evaluations the running figure includes.
+            "rollout_sps": round(batch / max(rolled - began, 1e-9)),
             "lr": optimizer.param_groups[0]["lr"],
             "episodes": len(episodes),
+            # This rollout's reward, shaping included: what the critic sees.
+            "reward_mean": float(rew_buf.mean()),
+            "finite": all(math.isfinite(v) for v in loss_means),
             **dict(zip(stats, loss_means, strict=True)),
         }
         if recent:
@@ -1258,9 +1438,13 @@ def main(argv=None) -> int:
             # it dies with the process.
             save_buffer(curriculum.buffer, out / "levels.json")
         if update % 10 == 0 or "eval" in row:
-            brief = {k: row[k] for k in ("steps", "sps", "ent", "kl") if k in row}
+            shown = ("steps", "sps", "rollout_sps", "ent", "kl", "finite")
+            brief = {k: row[k] for k in shown if k in row}
             brief.update({k: round(row[k], 4) for k in ("train_success", "train_verified",
-                          "peak_potential", "line_built") if k in row})  # fmt: skip
+                          "train_return", "peak_potential", "line_built", "reward_mean",
+                          "prior_kl") if k in row})  # fmt: skip
+            if args.demo_schedule == "gated":
+                brief["rung"] = gate.index
             if "demo_success" in row:
                 brief["demo"] = {k: round(v, 3) for k, v in row["demo_success"].items()}
             if "eval" in row:
@@ -1278,7 +1462,9 @@ def main(argv=None) -> int:
     policy.eval()
     modes = (("sampled", False, 0.0), ("epsilon", True, args.eval_epsilon), ("greedy", True, 0.0))
     final = {
-        f"{split}_{name}": evaluate(policy, device, args, split, 512, greedy, epsilon)
+        f"{split}_{name}": evaluate(
+            policy, device, args, split, args.final_episodes, greedy, epsilon
+        )
         for split in ("train", "test")
         for name, greedy, epsilon in modes
     }

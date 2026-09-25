@@ -12,6 +12,11 @@ that keeps them copies them (the trainer copies straight to the GPU).
 Autoreset follows the same-step convention: when an episode ends, the returned
 observation and mask already belong to the next episode, and `step` reports the
 finished episode in its `episodes` list.
+
+`action_space="v3"` steps through `fsim_rl_step_range3`: the observations are
+`fsim_obs3` (or packed, `fsim_obs38`), `masks` is the 376-entry v3 mask, and
+`op_masks` holds each environment's per-operation masks, `(n, 25, 351)` --
+what `RlEnv.observe3()` and `RlEnv.op_masks()` return, bit for bit.
 """
 
 from __future__ import annotations
@@ -26,6 +31,10 @@ from fsim.rl import task_struct
 
 #: Episode seeds for evaluation start here; training seeds stay below it.
 EVAL_SEED_BASE = 1 << 40
+#: v3's `finish`: a demonstration is cut before it, never at it.
+OP_FINISH = 24
+#: Decisions belt_smelting's builder may take before its build is judged stuck.
+BELT_DEMO_LIMIT = 2400
 
 
 OBS_KEYS = ("grid", "entities", "entity_mask", "self", "inventory", "goal")
@@ -35,20 +44,27 @@ GRID = 65
 FLAG_PLANES = (0, 1, 2, 3, 5)  # the grid planes packed as bits, in bit order
 
 
-def _obs_dtype(compact: bool = False) -> np.dtype:
-    struct = "fsim_obs8" if compact else "fsim_obs"
+def _struct(compact: bool, v3: bool) -> str:
+    if v3:
+        return "fsim_obs38" if compact else "fsim_obs3"
+    return "fsim_obs8" if compact else "fsim_obs"
+
+
+def _obs_dtype(compact: bool = False, v3: bool = False) -> np.dtype:
+    struct = _struct(compact, v3)
     grid = (
         {"flags": ("u1", (lib.RL_FLAG_BYTES,)), "amount": ("u1", (GRID, GRID))}
         if compact
         else {"grid": ("<f4", (6, GRID, GRID))}
     )
+    rows, width = (lib.RL3_MAX_ENTITIES, lib.RL3_ENTITY_FEATURES) if v3 else (32, 16)
     fields = {
         **grid,
-        "entities": ("<f4", (32, 16)),
-        "entity_mask": ("i1", (32,)),
-        "self_": ("<f4", (12,)),
-        "inventory": ("<f4", (14,)),
-        "goal": ("<f4", (12,)),
+        "entities": ("<f4", (rows, width)),
+        "entity_mask": ("i1", (rows,)),
+        "self_": ("<f4", (lib.RL3_SELF_FEATURES if v3 else 12,)),
+        "inventory": ("<f4", (lib.RL3_ITEMS if v3 else 14,)),
+        "goal": ("<f4", (lib.RL3_GOAL_FEATURES if v3 else 12,)),
     }
     return np.dtype(
         {
@@ -60,10 +76,13 @@ def _obs_dtype(compact: bool = False) -> np.dtype:
     )
 
 
-def obs_layout(compact: bool = False) -> dict[str, tuple[int, str, tuple[int, ...]]]:
-    """key -> (byte offset in `fsim_obs`/`fsim_obs8`, numpy dtype, shape): for
-    slicing a copied block of observations without going through numpy."""
-    dtype = _obs_dtype(compact)
+def obs_layout(
+    compact: bool = False, v3: bool = False
+) -> dict[str, tuple[int, str, tuple[int, ...]]]:
+    """key -> (byte offset in `fsim_obs`/`fsim_obs8`, or the v3 structs, numpy
+    dtype, shape): for slicing a copied block of observations without going
+    through numpy."""
+    dtype = _obs_dtype(compact, v3)
     out = {}
     for key in PACKED_KEYS if compact else OBS_KEYS:
         name = "self_" if key == "self" else key
@@ -120,6 +139,7 @@ class VecEnv:
         autoreset: bool = True,
         level_source=None,
         demo_obstructed: bool = False,
+        opmask_memory=None,
     ) -> None:
         """`obs_memory`, if given, is `(address, owner)`: `n * sizeof(fsim_obs)`
         bytes the observations are written into instead of a fresh block -- a
@@ -130,7 +150,9 @@ class VecEnv:
         scripted build (`fsim.expert`), at a stage drawn uniformly; the rest
         begin at the scene's own start.
 
-        `mask_memory` is the same for the `n * 201` mask bytes.
+        `mask_memory` is the same for the `n * 201` mask bytes (`n * 376`
+        under v3), and `opmask_memory` for v3's `n * 25 * 351` per-operation
+        mask bytes.
 
         `group` makes consecutive environments share a scene: `i` and `j` draw
         the same seed when `i // group == j // group`, so a group is `group`
@@ -212,10 +234,17 @@ class VecEnv:
         #: translation of a demonstration can reach -- the one axis along which
         #: the builder can be more varied rather than merely re-posed.
         self.demo_variants: int = 1
-        if action_space not in ("v1", "v2"):
-            # The batched buffers are the v1 layout; v3 runs through RlEnv only.
-            raise ValueError(f"the vectorised env speaks v1 and v2, not {action_space!r}")
+        #: belt_smelting: recorded builds (`fsim.demos.collect(records=...)`,
+        #: `tools/behaviour_clone.py --pool`) to cut demonstration starts from,
+        #: as `{"seed", "split", "family", "vectors"}`. The builder re-plans in
+        #: Python after every decision; a recorded build replays in C, and the
+        #: simulator's determinism makes the replay the build. None runs the
+        #: builder live on the slot's own scene.
+        self.demo_pool: list[dict] | None = None
+        if action_space not in ("v1", "v2", "v3"):
+            raise ValueError(f"the vectorised env speaks v1, v2 and v3, not {action_space!r}")
         self.action_space = action_space
+        self.v3 = action_space == "v3"
         #: Where a resetting environment gets its scene. None draws from the
         #: task's own families, which is every run that is not a UED run.
         self.level_source = level_source
@@ -241,31 +270,54 @@ class VecEnv:
             lib.fsim_set_water(self.rls[i].env, self._water, water.water_count)
 
         self.compact = compact
-        struct = "fsim_obs8" if compact else "fsim_obs"
+        struct = _struct(compact, self.v3)
         if obs_memory is None:
             self._obs_c = ffi.new(f"{struct}[]", n)
             self._obs_owner = None
         else:
             address, self._obs_owner = obs_memory
             self._obs_c = ffi.cast(f"{struct} *", address)
-        self._encode = lib.fsim_rl_encode8 if compact else lib.fsim_rl_encode
+        if self.v3:
+            self._encode = lib.fsim_rl_encode38 if compact else lib.fsim_rl_encode3
+        else:
+            self._encode = lib.fsim_rl_encode8 if compact else lib.fsim_rl_encode
+        #: Bytes of one environment's flat mask, and of its per-operation masks.
+        self.mask_size = lib.RL3_MASK_SIZE if self.v3 else lib.RL_MASK_SIZE
+        self.opmask_size = lib.RL3_OPERATIONS * lib.RL3_ARG_WIDTH if self.v3 else 0
         if mask_memory is None:
-            self._masks_c = ffi.new("uint8_t[]", n * lib.RL_MASK_SIZE)
+            self._masks_c = ffi.new("uint8_t[]", n * self.mask_size)
             self._mask_owner = None
         else:
             address, self._mask_owner = mask_memory
             self._masks_c = ffi.cast("uint8_t *", address)
+        self._opmask_owner = None
+        if not self.v3:
+            self._opmasks_c = ffi.NULL
+        elif opmask_memory is None:
+            self._opmasks_c = ffi.new("uint8_t[]", n * self.opmask_size)
+        else:
+            address, self._opmask_owner = opmask_memory
+            self._opmasks_c = ffi.cast("uint8_t *", address)
         self._actions_c = ffi.new("int32_t[]", n * 6)
         self._rewards_c = ffi.new("double[]", n)
         self._flags_c = ffi.new("uint8_t[]", n * 4)
         self._verified_c = ffi.new("double[]", n)
 
         self.obs_nbytes = n * ffi.sizeof(struct)
-        block = np.frombuffer(ffi.buffer(self._obs_c, self.obs_nbytes), _obs_dtype(compact))
+        block = np.frombuffer(
+            ffi.buffer(self._obs_c, self.obs_nbytes), _obs_dtype(compact, self.v3)
+        )
         keys = PACKED_KEYS if compact else OBS_KEYS
         self.obs = {key: block["self_" if key == "self" else key] for key in keys}
-        mask_bytes = n * lib.RL_MASK_SIZE
+        mask_bytes = n * self.mask_size
         self.masks = np.frombuffer(ffi.buffer(self._masks_c, mask_bytes), np.uint8).reshape(n, -1)
+        #: v3 only: `(n, RL3_OPERATIONS, RL3_ARG_WIDTH)`, row o operation o's
+        #: legal argument values (`RlEnv.op_masks()`).
+        self.op_masks = None
+        if self.v3:
+            self.op_masks = np.frombuffer(
+                ffi.buffer(self._opmasks_c, n * self.opmask_size), np.uint8
+            ).reshape(n, lib.RL3_OPERATIONS, lib.RL3_ARG_WIDTH)
         self.actions = np.frombuffer(ffi.buffer(self._actions_c), np.int32).reshape(n, 6)
         self.rewards = np.frombuffer(ffi.buffer(self._rewards_c), np.float64)
         self.flags = np.frombuffer(ffi.buffer(self._flags_c), np.uint8).reshape(n, 4)
@@ -347,6 +399,14 @@ class VecEnv:
         # scene with nothing in the way; an obstructed one starts from scratch.
         obstructed = bool(scene["entities"])
         eligible = self.demo_obstructed or not obstructed
+        if self.task == "belt_smelting":
+            # Its own builder, which plans round walls: every scene has one.
+            eligible = False
+            if self.demo_starts and draw.random() < self.demo_starts:
+                if self.demo_pool:
+                    start, taken, family = self._pooled_demo(i, rl, budget, draw)
+                else:
+                    start, taken = self._belt_demo(rl, task, c_scene, scene, draw)
         if self.demo_starts and eligible and draw.random() < self.demo_starts:
             patch = scene["markers"]["patch"]
             # No buildable arrangement at all: nothing to demonstrate.
@@ -373,13 +433,99 @@ class VecEnv:
                         start, taken = "scene", 0
                     else:
                         start = "scene" if back >= length else f"back{back}"
-        self._encode(self.rls[i], ffi.addressof(self._obs_c, i))
-        lib.fsim_rl_mask(self.rls[i], ffi.addressof(self._masks_c, i * lib.RL_MASK_SIZE))
+        self._observe_one(i)
         self.families[i] = family
         self.starts[i] = start
         self.returns[i] = 0.0
         self.lengths[i] = taken
         self.peak_potential[i] = lib.fsim_rl_potential(self.rls[i])
+
+    def _cut(self, length: int, draw) -> int:
+        """How many decisions back from the end of a `length`-decision build
+        a demonstration start begins: `demo_window`, in decisions or (floats)
+        fractions of the build, else uniform over the whole build."""
+        if self.demo_window is None:
+            return draw.randint(0, length)
+        lo, hi = self.demo_window
+        if isinstance(lo, float) or isinstance(hi, float):
+            lo, hi = round(lo * length), round(hi * length)
+        return draw.randint(min(lo, length), min(hi, length))
+
+    def _pooled_demo(self, i: int, rl, budget: int, draw) -> tuple[str, int, str]:
+        """A demonstration start from `demo_pool` -> (start, decisions, family).
+
+        The slot runs the recorded build's own scene, not the one its seed
+        drew: a recorded build only replays on the scene it was recorded on."""
+        entry = self.demo_pool[draw.randrange(len(self.demo_pool))]
+        family, scene = scenes.sample(self.task, entry["split"], entry["seed"])
+        c_scene, keep = scene_struct(scene)
+        task = task_struct(
+            self.task, scene, max_steps=budget, shaping=self.shaping, gamma=self.gamma,
+            action_space=self.action_space, construction_tick_limit=self.tick_limit,
+        )  # fmt: skip
+        self._keep[i] = (c_scene, keep, task)
+        self._scene_of[i] = (family, scene)
+        lib.fsim_rl_reset(rl, task, c_scene)
+        vectors = [v for v in entry["vectors"] if int(v[0]) != OP_FINISH]
+        length = len(vectors)
+        back = self._cut(length, draw)
+        step = self._demo_step(rl)
+        for vector in vectors[: length - back]:
+            if step(vector):
+                lib.fsim_rl_reset(rl, task, c_scene)
+                return "scene", 0, family
+        return ("scene" if back >= length else f"back{back}"), length - back, family
+
+    def _belt_demo(self, rl, task, c_scene, scene, draw) -> tuple[str, int]:
+        """A belt_smelting demonstration start -> (start name, decisions taken).
+
+        The builder (`fsim/belt_expert.py`) re-plans after every step, so the
+        length of its build is only known once it has run: it runs to the
+        decision before its `finish`, and the environment is reset and
+        replayed through the first `length - back` of its decisions. The
+        simulator is deterministic, so the replay reaches the state the build
+        did, and the Python builder runs once. `demo_window` is `(lo, hi)`
+        decisions back from the end, or fractions of the build's length when
+        given as floats (belt_smelting's ladder, `train.py`)."""
+        from fsim import belt_expert
+
+        builder = belt_expert.BeltBuilder(rl, scene, rng=draw if self.demo_layouts else None)
+        step = self._demo_step(rl)
+        vectors: list[tuple[int, ...]] = []
+        finished = False
+        while len(vectors) < BELT_DEMO_LIMIT:
+            vector = builder.next_vector()
+            if vector is None or int(vector[0]) == OP_FINISH:
+                finished = vector is not None
+                break
+            vectors.append(tuple(int(v) for v in vector))
+            if step(vector):
+                break
+        lib.fsim_rl_reset(rl, task, c_scene)
+        if not finished:
+            return "scene", 0  # no finished build to cut
+        length = len(vectors)
+        back = self._cut(length, draw)
+        wanted = length - back
+        for vector in vectors[:wanted]:
+            if step(vector):
+                # The build ended the episode on the way: not a start to use.
+                lib.fsim_rl_reset(rl, task, c_scene)
+                return "scene", 0
+        return ("scene" if back >= length else f"back{back}"), wanted
+
+    def _observe_one(self, i: int) -> None:
+        """Environment `i`'s observation and masks, as a step writes them."""
+        rl = self.rls[i]
+        self._encode(rl, ffi.addressof(self._obs_c, i))
+        if self.v3:
+            lib.fsim_rl_masks3(
+                rl,
+                ffi.addressof(self._masks_c, i * self.mask_size),
+                ffi.addressof(self._opmasks_c, i * self.opmask_size),
+            )
+        else:
+            lib.fsim_rl_mask(rl, ffi.addressof(self._masks_c, i * self.mask_size))
 
     def _demo_step(self, rl):
         vector = self._step_vector
@@ -399,6 +545,14 @@ class VecEnv:
         return self.obs, self.masks
 
     def _run(self, bounds) -> None:
+        if self.v3:
+            full, packed = (ffi.NULL, self._obs_c) if self.compact else (self._obs_c, ffi.NULL)
+            lib.fsim_rl_step_range3(
+                self.rls, bounds[0], bounds[1], self._actions_c, full, packed, self._masks_c,
+                self._opmasks_c, self._rewards_c, self._flags_c, self._verified_c,
+                self._potentials_c,
+            )  # fmt: skip
+            return
         if self.compact:
             lib.fsim_rl_step_range8(
                 self.rls, bounds[0], bounds[1], self._actions_c, self._obs_c, self._masks_c,

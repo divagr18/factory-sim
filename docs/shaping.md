@@ -446,3 +446,82 @@ The capability is kept as `--demo-obstructed` and defaults off. The mechanism
 is sound; what is wrong is the expert behind it. A builder with genuinely
 different arrangements to show would likely reverse this, and that -- not more
 demonstrations of one arrangement -- is where the next gain is.
+
+## belt_smelting's potential
+
+`belt_smelting` pays `min(1, plates / 150)` for iron plates delivered into the
+output chest over a 36,000-tick window after construction, and nothing
+before it. The line it asks for is longer than `construct_smelting_line`'s:
+drills on the iron patch, furnaces they feed, inserters taking plates out onto
+a belt, 21 to 38 tiles of belt to the chest, an inserter into the chest, and
+coal from a patch at least 21 tiles from both. The budget is 2,500 decisions,
+so a uniform policy is further from any reward than it was on the shorter
+task, where it never saw one in 5.4M decisions.
+
+`fsim_rl_potential` dispatches to `rl_belt_potential` for this task, with the
+same shaping modes and the same potential-based form, gamma * phi(s') -
+phi(s) with phi(terminal) = 0, so it cannot change which policy is optimal
+(Ng, Harada & Russell 1999). The terms, in [0, 1]:
+
+| term | weight |
+|---|---|
+| approach: max(0, 1 - distance to the iron patch's centre / 64), held at 1 once a drill stands on iron ore | 0.05 |
+| drills with iron ore under their footprint | 0.10 |
+| ...with fuel in their fuel slot | 0.05 |
+| fed furnaces: the footprint holds an iron drill's drop point, or the drop point of an inserter that picks from a belt | 0.10 |
+| ...with fuel | 0.05 |
+| ...holding ore or plates, or mid-craft | 0.05 |
+| output inserters: the pickup point is in a fed furnace | 0.10 |
+| ...whose drop point is on a belt | 0.05 |
+| belt progress toward the chest (below) | 0.15 |
+| an inserter whose drop point is in the chest | 0.04 |
+| ...whose pickup point is on a belt reached from an output inserter | 0.06 |
+| inserters fuelled: (fuelled output inserters, at most 2, + a fuelled chest inserter) / 3 | 0.05 |
+| iron plates in the chest, min(1, n / 20) | 0.10 |
+| coal mined so far, by hand or by drill, min(1, n / 40) | 0.05 |
+
+Counted stages score min(n, 2) / 2: the reference cell is two drill-furnace
+pairs, and two drills mine 0.5 ore/s, about 300 plates over the window against
+the target of 150.
+
+**Belt progress.** From each belt an output inserter drops onto, the belts its
+items can reach are followed through the simulator's own lane links
+(`lane_next` for the belt a lane runs into, `lane_side` for one it sideloads
+into). With d0 that start belt's Manhattan tile distance to the chest and d the
+least over the belts reached, the term is (d0 - d) / (d0 - 2), clipped to
+[0, 1]: 2 is belt, inserter, chest in a line. The best start counts. A belt
+laid anywhere else, or pointing the wrong way, reaches nothing and pays
+nothing.
+
+**What it reads.** The simulator's truth, not the published observation. The
+line spans more than one sweep sees, and a potential read from the sweep would
+drop whenever the character walked to the chest or the coal patch and rise
+again on the way back -- a loop that pays nothing in total but adds noise to
+every advantage along it. The construction tasks' potential reads the sweep so
+that FactorioRL's `line_potential` computes the same number from the same
+payload; this one has no FactorioRL counterpart to agree with, and
+privileged information in phi is sound where it would be a leak in the
+observation (`csrc/fsim.h`, `has_target`).
+
+**What it does not assume.** Every geometric test is one the simulator
+already makes and FactorioRL measured on the engine: a drill's footprint and
+drop point (`drill_resource`, `drop_position`), an inserter's pickup and drop
+points (`inserter_point`, as the inserter update reads them), a machine's
+footprint (`machine_at`) and the belt lane links (`rebuild_logistics`,
+brought up to date first, as the v3 encoder does). Nothing in it models a
+rate or a timing.
+
+Three choices worth knowing about:
+
+- "Fuelled" is fuel in the fuel slot, not a buffer still burning. A new
+  burner inserter arrives burning a quarter of a wood and nothing else, and a
+  burner whose slot is empty is about to stop, so neither is fuelled.
+- The coal term counts coal *mined*, not coal held. Held coal falls as the line
+  burns it, and a potential on it would charge the policy for running the
+  line. 150 plates need about 38 coal against the 20 the agent starts with
+  (FactorioRL `belt_smelting` 1.1.0), and the reference builder hand-mines 40.
+- Plates in the chest before the window do not count towards the reward --
+  the verifier counts the chest's increase over the window -- but they are the
+  one measurement that the whole line works, which is why they carry weight
+  here. Hand-carrying plates there would also raise it; it cannot change the
+  optimal policy, and at most 0.10 of it is available that way.

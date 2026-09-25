@@ -634,6 +634,8 @@ int32_t fsim_mining_in_reach(const fsim_env *env);
 /* Commissioning rather than construction: the line is already down and both
  * machines are empty, and the agent has to reach each one and fuel it. */
 #define TASK_PLATE_LINE 3
+/* Belt-fed smelting to a distant output chest (FactorioRL belt_smelting). */
+#define TASK_BELT_SMELTING 4
 
 #define ACTION_SPACE_V1 0
 #define ACTION_SPACE_V2 2
@@ -679,6 +681,18 @@ typedef struct {
     float inventory[14];
     float goal[12];
 } fsim_obs8;
+
+/* The v3 observation, packed as fsim_obs8 packs v1's: the grid's flag planes
+ * as bits and its amount plane as bytes, the rest as fsim_obs3. */
+typedef struct {
+    uint8_t flags[2641];
+    uint8_t amount[4225];
+    float entities[3072];       /* 96 x 32 */
+    int8_t entity_mask[96];
+    float self_[13];
+    float inventory[18];
+    float goal[30];
+} fsim_obs38;
 
 typedef struct {
     int32_t task;
@@ -733,6 +747,8 @@ typedef struct {
     double marker_y[6];
     int32_t marker_present[6];
     int32_t marker_entity[6];   /* entity index, or -1 */
+    /* belt_smelting: the output chest's entity index, or -1. */
+    int32_t output_entity;
 } fsim_task;
 
 typedef struct {
@@ -802,6 +818,21 @@ int32_t fsim_rl_targets(fsim_rl *rl, int32_t *handles, int32_t cap);
 void fsim_rl_step_range8(fsim_rl **rls, int32_t first, int32_t last, const int32_t *actions,
                          fsim_obs8 *obs, uint8_t *masks, double *rewards, uint8_t *flags,
                          double *verified, double *potentials);
+/* v3 packed (fsim_obs3 with its grid as fsim_obs8 packs it). */
+void fsim_rl_encode38(fsim_rl *rl, fsim_obs38 *obs);
+/* The v3 masks both ways from one pass over the state: the flat mask
+ * (fsim_rl_mask3, RL3_MASK_SIZE bytes) and the per-operation rows
+ * (fsim_rl_opmask3, RL3_OPERATIONS * RL3_ARG_WIDTH bytes). */
+void fsim_rl_masks3(fsim_rl *rl, uint8_t *mask, uint8_t *opmasks);
+/* As fsim_rl_step_range, for v3 environments: each environment's v3
+ * observation -- into `obs` (float grid) when it is not NULL, else into
+ * `obs8` (packed) -- its flat mask (RL3_MASK_SIZE a row), its per-operation
+ * masks (RL3_OPERATIONS * RL3_ARG_WIDTH a row), its transition and its
+ * potential after the step. */
+void fsim_rl_step_range3(fsim_rl **rls, int32_t first, int32_t last, const int32_t *actions,
+                         fsim_obs3 *obs, fsim_obs38 *obs8, uint8_t *masks, uint8_t *opmasks,
+                         double *rewards, uint8_t *flags, double *verified,
+                         double *potentials);
 /* CFFI-END */
 
 #endif

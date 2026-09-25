@@ -1200,7 +1200,11 @@ static void rl_goal(fsim_rl *rl, float *goal) {
  *
  * A potential of the state, so any loop through states pays nothing (Ng,
  * Harada & Russell 1999) and it is zeroed on termination (Grzes 2017). */
+static double rl_belt_potential(const fsim_rl *rl);
+
 double fsim_rl_potential(const fsim_rl *rl) {
+    /* belt_smelting builds another line, so it has its own potential. */
+    if (rl->task.task == TASK_BELT_SMELTING) return rl_belt_potential(rl);
     const fsim_env *env = rl->env;
     double phi = 0.0;
     /* The potential's own marker, which may be private (fsim.h). */
@@ -1497,4 +1501,254 @@ int32_t fsim_rl_targets(fsim_rl *rl, int32_t *handles, int32_t cap) {
     int32_t n = d.target_count < cap ? d.target_count : cap;
     for (int32_t k = 0; k < n; k++) handles[k] = d.targets[k];
     return n;
+}
+
+/* ------------------------------------------------------------------ belt potential
+ *
+ * belt_smelting's line potential, phi(s) in [0, 1]: how much of a line from
+ * the iron patch to the output chest stands, and how much of it can run. It
+ * reads the simulator's truth rather than the published observation: the line
+ * spans more than a sweep sees, and a potential that dropped whenever the
+ * character walked away from a finished stage would pay the walk back. Truth
+ * in phi is sound where it would be a leak in the observation (fsim.h,
+ * `has_target`): potential-based shaping cannot change which policy is
+ * optimal (Ng, Harada & Russell 1999).
+ *
+ * Every geometric test is the simulator's own: a drill's drop point
+ * (drop_position), an inserter's pickup and drop points (inserter_point, as
+ * the inserter update reads them), a machine's footprint (machine_at), and
+ * which belt a belt's items run or sideload into (lane_next, lane_side,
+ * brought up to date first, as fsim_rl_encode3 does). Stage counts are capped
+ * at two, the reference cell's two drill-furnace pairs.
+ *
+ *   0.05  approach        max(0, 1 - |character - iron centre| / 64), held at
+ *                         1 once a drill stands on iron ore
+ *   0.10  iron drills     drills with iron ore under their footprint
+ *   0.05  ...fuelled      of those, the ones with fuel in their fuel slot
+ *   0.10  fed furnaces    furnaces holding an iron drill's drop point, or the
+ *                         drop point of an inserter that picks from a belt
+ *   0.05  ...fuelled
+ *   0.05  ...smelting     holding ore or plates, or mid-craft
+ *   0.10  output inserters  inserters whose pickup point is in a fed furnace
+ *   0.05  ...onto a belt    of those, the ones whose drop point is on a belt
+ *   0.15  belt progress     over the belts those drop onto, following where
+ *                           each belt's items go: (d0 - d) / (d0 - 2) in
+ *                           [0, 1], d0 the start belt's Manhattan tile
+ *                           distance to the chest and d the least over the
+ *                           belts reached (2: belt, inserter, chest)
+ *   0.04  chest inserter    an inserter whose drop point is in the chest
+ *   0.06  ...connected      and whose pickup point is on a belt reached above
+ *   0.05  inserters fuelled (fuelled output inserters, at most 2, and a
+ *                           fuelled chest inserter) / 3
+ *   0.10  delivered         iron plates in the chest, min(1, n / 20)
+ *   0.05  coal              coal mined so far, by hand or drill, min(1, n / 40)
+ *
+ * Counted stages are min(n, 2) / 2. "Fuelled" is fuel in the fuel slot, not a
+ * buffer still burning: a new inserter arrives burning a quarter of a wood and
+ * nothing else, and a burner whose slot is empty is about to stop. The coal
+ * term counts coal mined, not coal held, so running the line (which burns it)
+ * never lowers phi. */
+
+#define BELT_CAP 2
+#define BELT_REACH 2
+#define BELT_COAL 40.0
+#define BELT_DELIVERED 20.0
+
+static int rl_belt_fuelled(const fsim_entity *e) { return e->fuel.count > 0; }
+
+/* Iron ore under a drill's footprint (the tiles drill_resource reads). */
+static int rl_belt_on_iron(const fsim_env *env, const fsim_entity *d) {
+    int32_t cx = (int32_t)floordiv(d->pos.x, TILE), cy = (int32_t)floordiv(d->pos.y, TILE);
+    for (int k = 0; k < 4; k++) {
+        int32_t r = find_resource_at(env, cx + DRILL_TILES[k][0], cy + DRILL_TILES[k][1]);
+        if (r >= 0 && env->resources[r].item == IT_IRON_ORE && env->resources[r].amount > 0)
+            return 1;
+    }
+    return 0;
+}
+
+static double rl_belt_share(int32_t n) {
+    return (double)(n < BELT_CAP ? n : BELT_CAP) / (double)BELT_CAP;
+}
+
+static int64_t rl_belt_manhattan(const fsim_entity *a, const fsim_entity *b) {
+    int64_t dx = floordiv(a->pos.x, TILE) - floordiv(b->pos.x, TILE);
+    int64_t dy = floordiv(a->pos.y, TILE) - floordiv(b->pos.y, TILE);
+    return (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
+}
+
+static double rl_belt_potential(const fsim_rl *rl) {
+    fsim_env *env = rl->env;
+    fsim_refresh(env);   /* the lane links, brought up to date as fsim_rl_encode3 does */
+    const int32_t n = env->entity_count;
+    uint8_t fed[FSIM_MAX_ENTITIES];
+    uint8_t reached[FSIM_MAX_ENTITIES];
+    uint8_t seen[FSIM_MAX_ENTITIES];
+    int32_t walk[FSIM_MAX_ENTITIES];
+    memset(fed, 0, sizeof(fed));
+    memset(reached, 0, sizeof(reached));
+
+    int32_t chest = rl->task.output_entity;
+    const fsim_entity *c = NULL;
+    if (chest >= 0 && chest < n && env->entities[chest].alive &&
+        env->entities[chest].kind == K_CHEST)
+        c = &env->entities[chest];
+
+    int32_t drills = 0, drills_fuelled = 0;
+    for (int32_t i = 0; i < n; i++) {
+        const fsim_entity *d = &env->entities[i];
+        if (!d->alive || d->neutral || d->kind != K_DRILL || !rl_belt_on_iron(env, d)) continue;
+        drills++;
+        drills_fuelled += rl_belt_fuelled(d);
+        int32_t m = machine_at(env, drop_position(d), i);
+        if (m >= 0 && env->entities[m].kind == K_FURNACE) fed[m] = 1;
+    }
+    for (int32_t i = 0; i < n; i++) {
+        const fsim_entity *s = &env->entities[i];
+        if (!s->alive || s->neutral || s->kind != K_INSERTER) continue;
+        int32_t from = point_target(env, inserter_point(s, INSERTER_PICKUP), i);
+        int32_t to = machine_at(env, inserter_point(s, -INSERTER_DROP), i);
+        if (from >= 0 && env->entities[from].kind == K_BELT && to >= 0 &&
+            env->entities[to].kind == K_FURNACE)
+            fed[to] = 1;
+    }
+    int32_t furnaces = 0, furnaces_fuelled = 0, smelting = 0;
+    for (int32_t i = 0; i < n; i++) {
+        const fsim_entity *f = &env->entities[i];
+        if (!fed[i] || !f->alive || f->neutral) continue;
+        furnaces++;
+        furnaces_fuelled += rl_belt_fuelled(f);
+        smelting += f->source.count > 0 || f->result.count > 0 || f->crafting;
+    }
+
+    int32_t outputs = 0, onto_belt = 0, outputs_fuelled = 0;
+    double progress = 0.0;
+    for (int32_t i = 0; i < n; i++) {
+        const fsim_entity *s = &env->entities[i];
+        if (!s->alive || s->neutral || s->kind != K_INSERTER) continue;
+        int32_t from = machine_at(env, inserter_point(s, INSERTER_PICKUP), i);
+        if (from < 0 || !fed[from]) continue;
+        outputs++;
+        outputs_fuelled += rl_belt_fuelled(s);
+        int32_t start = belt_at(env, inserter_point(s, -INSERTER_DROP));
+        if (start < 0) continue;
+        onto_belt++;
+        /* Every belt this one's items can reach, and the closest of them to
+         * the chest. `reached` is the union over every output inserter. */
+        int64_t d0 = c ? rl_belt_manhattan(&env->entities[start], c) : 0;
+        int64_t best = d0;
+        memset(seen, 0, sizeof(seen));
+        int32_t head = 0, tail = 0;
+        seen[start] = reached[start] = 1;
+        walk[tail++] = start;
+        while (head < tail) {
+            const fsim_entity *b = &env->entities[walk[head++]];
+            if (c) {
+                int64_t d = rl_belt_manhattan(b, c);
+                if (d < best) best = d;
+            }
+            for (int lane = 0; lane < 2; lane++) {
+                const int32_t links[2] = {b->lane_next[lane], b->lane_side[lane]};
+                for (int k = 0; k < 2; k++) {
+                    if (links[k] < 0) continue;
+                    int32_t e = links[k] / 2;
+                    if (e >= n || seen[e] || !env->entities[e].alive ||
+                        env->entities[e].kind != K_BELT)
+                        continue;
+                    seen[e] = reached[e] = 1;
+                    walk[tail++] = e;
+                }
+            }
+        }
+        if (c) {
+            double p = d0 > BELT_REACH ? (double)(d0 - best) / (double)(d0 - BELT_REACH) : 1.0;
+            p = rl_clip(p, 0.0, 1.0);
+            if (p > progress) progress = p;
+        }
+    }
+
+    int chest_inserter = 0, connected = 0, chest_fuelled = 0;
+    int32_t delivered = 0;
+    if (c) {
+        for (int32_t i = 0; i < n; i++) {
+            const fsim_entity *s = &env->entities[i];
+            if (!s->alive || s->neutral || s->kind != K_INSERTER) continue;
+            if (machine_at(env, inserter_point(s, -INSERTER_DROP), i) != chest) continue;
+            int32_t from = belt_at(env, inserter_point(s, INSERTER_PICKUP));
+            int link = from >= 0 && reached[from];
+            /* The best one there is: connected first, then fuelled. */
+            int score = 2 * link + rl_belt_fuelled(s);
+            if (!chest_inserter || score > 2 * connected + chest_fuelled) {
+                connected = link;
+                chest_fuelled = rl_belt_fuelled(s);
+            }
+            chest_inserter = 1;
+        }
+        delivered = chest_count(c, IT_IRON_PLATE);
+    }
+
+    double approach = 0.0;
+    if (drills > 0) {
+        approach = 1.0;
+    } else if (rl->task.has_target) {
+        double dx = tiles(env->char_pos.x) - rl->task.target_x;
+        double dy = tiles(env->char_pos.y) - rl->task.target_y;
+        approach = 1.0 - sqrt(dx * dx + dy * dy) / 64.0;
+        if (approach < 0.0) approach = 0.0;
+    }
+    int32_t fuelled_outputs = outputs_fuelled < BELT_CAP ? outputs_fuelled : BELT_CAP;
+    double phi = 0.05 * approach;
+    phi += 0.10 * rl_belt_share(drills) + 0.05 * rl_belt_share(drills_fuelled);
+    phi += 0.10 * rl_belt_share(furnaces) + 0.05 * rl_belt_share(furnaces_fuelled);
+    phi += 0.05 * rl_belt_share(smelting);
+    phi += 0.10 * rl_belt_share(outputs) + 0.05 * rl_belt_share(onto_belt);
+    phi += 0.15 * progress;
+    phi += 0.04 * chest_inserter + 0.06 * connected;
+    phi += 0.05 * (double)(fuelled_outputs + chest_fuelled) / 3.0;
+    phi += 0.10 * rl_clip((double)delivered / BELT_DELIVERED, 0.0, 1.0);
+    phi += 0.05 * rl_clip((double)env->produced[IT_COAL] / BELT_COAL, 0.0, 1.0);
+    return phi;
+}
+
+/* ------------------------------------------------------------------ v3 batch */
+
+void fsim_rl_encode38(fsim_rl *rl, fsim_obs38 *out) {
+    fsim_refresh(rl->env);   /* as fsim_rl_encode3 */
+    memset(out, 0, sizeof(*out));
+    rl_fields fields = {NULL, out->flags, out->amount, out->entities, out->entity_mask,
+                        out->self_, out->inventory, out->goal, 1};
+    rl_encode_into(rl, &fields);
+}
+
+void fsim_rl_masks3(fsim_rl *rl, uint8_t *mask, uint8_t *opmasks) {
+    rl3_facts f;
+    rl3_facts_build(rl, &f);
+    memset(mask, 0, RL3_MASK_SIZE);
+    for (int32_t op = 0; op < RL3_OPERATIONS; op++) {
+        uint8_t *row = opmasks + op * RL3_ARG_WIDTH;
+        int legal = rl3_op_row(rl, &f, op, row);
+        mask[op] = (uint8_t)legal;
+        if (!legal) continue;
+        for (int32_t k = 0; k < RL3_ARG_WIDTH; k++) mask[RL3_OPERATIONS + k] |= row[k];
+    }
+}
+
+void fsim_rl_step_range3(fsim_rl **rls, int32_t first, int32_t last, const int32_t *actions,
+                         fsim_obs3 *obs, fsim_obs38 *obs8, uint8_t *masks, uint8_t *opmasks,
+                         double *rewards, uint8_t *flags, double *verified,
+                         double *potentials) {
+    for (int32_t i = first; i < last; i++) {
+        fsim_rl *rl = rls[i];
+        rewards[i] = fsim_rl_step(rl, &actions[6 * i]);
+        flags[4 * i] = (uint8_t)rl->terminated;
+        flags[4 * i + 1] = (uint8_t)rl->truncated;
+        flags[4 * i + 2] = (uint8_t)rl->success;
+        flags[4 * i + 3] = (uint8_t)rl->decode_failure;
+        verified[i] = rl->verified ? rl->verified_output : -1.0;
+        potentials[i] = fsim_rl_potential(rl);
+        if (obs) fsim_rl_encode3(rl, &obs[i]);
+        else fsim_rl_encode38(rl, &obs8[i]);
+        fsim_rl_masks3(rl, &masks[(size_t)RL3_MASK_SIZE * i],
+                       &opmasks[(size_t)RL3_OPERATIONS * RL3_ARG_WIDTH * i]);
+    }
 }

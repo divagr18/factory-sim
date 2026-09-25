@@ -300,8 +300,12 @@ def test_v2_views_keep_their_shape():
     assert len(view.inventory()) == 14
 
 
-def test_vectorised_env_refuses_v3():
+def test_vectorised_env_speaks_v3_and_refuses_the_unknown():
+    """v3 runs batched now (`tests/test_vec_v3.py` pins it to this env)."""
     from fsim.vec import VecEnv
 
+    env = VecEnv(1, "construct_smelting_line", action_space="v3")
+    assert env.op_masks.shape == (1, lib.RL3_OPERATIONS, lib.RL3_ARG_WIDTH)
+    env.close()
     with pytest.raises(ValueError):
-        VecEnv("construct_smelting_line", 1, action_space="v3")
+        VecEnv(1, "construct_smelting_line", action_space="v4")
