@@ -1092,11 +1092,6 @@ def main(argv=None) -> int:
     #: purely to score them -- Robust PLR's defining constraint.
     trains = torch.ones(N, device=device)
 
-    env.reset()
-    host_step = torch.empty((2, N), dtype=torch.float32, pin_memory=device.type == "cuda")
-    step_np = host_step.numpy()
-    next_done = torch.zeros(N, device=device)
-    episodes: list[dict] = []
     fraction = args.demo_ladder == "fraction"
     gate = GatedBackplay(
         threshold=args.gate,
@@ -1104,6 +1099,17 @@ def main(argv=None) -> int:
         ladder=FRACTION_LADDER if fraction else BACKPLAY_LADDER,
         binned=fraction,
     )
+    if fraction and args.demo_schedule == "gated":
+        # The first episodes start on the first rung too. Left unset, the
+        # opening reset draws cuts from the whole build, and the binned gate,
+        # which judges the deepest quarter of the cuts it has seen, would
+        # judge those until 512 later ones had pushed them out.
+        env.demo_window = gate.window
+    env.reset()
+    host_step = torch.empty((2, N), dtype=torch.float32, pin_memory=device.type == "cuda")
+    step_np = host_step.numpy()
+    next_done = torch.zeros(N, device=device)
+    episodes: list[dict] = []
     steps = 0
     decisions = 0
     skipped_steps = 0
