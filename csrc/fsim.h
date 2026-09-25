@@ -588,6 +588,9 @@ int32_t fsim_belt_segment(fsim_env *env, int32_t index, int32_t lane);
 /* KF_* flags of an entity kind, and the seconds the character takes to mine one. */
 int32_t fsim_kind_flags(int32_t kind);
 double fsim_kind_mining_time(int32_t kind);
+/* Whether the character's mining target is in reach from where it stands (1
+ * or 0), or -1 when it mines nothing. */
+int32_t fsim_mining_in_reach(const fsim_env *env);
 /* ---- RL layer (fsim_rl.c): the tensors, masks, goal and reward of
  * FactorioRL's parameterized-v1 / local-v2 contract. */
 #define RL_GRID_PLANES 6

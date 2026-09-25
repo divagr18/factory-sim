@@ -1321,8 +1321,20 @@ int32_t fsim_belt_segment(fsim_env *env, int32_t index, int32_t lane) {
  * (the drill on a free, a stopped and a just-extended line, and `accept`'s
  * 81 inserter drops past a moving item) and for sideloads; `exact` is the
  * script call's behaviour and fits the probe's feed timing. */
+static int lane_insert_core(fsim_env *env, int32_t ref, int32_t from, int32_t target, int32_t item,
+                            int32_t id, int exact, int pickup);
+
 static int lane_insert_from(fsim_env *env, int32_t ref, int32_t from, int32_t target, int32_t item,
                             int32_t id, int exact) {
+    return lane_insert_core(env, ref, from, target, item, id, exact, 0);
+}
+
+/* `pickup`: a belt just built taking an item that lay on its tile (FactorioRL
+ * probe_handmine2 `beltpick*`): the item may land up to 64 behind its point,
+ * 64 included, and past the lane's upstream end, where it waits unseen (the
+ * engine reads it back at the lane's last position) until it moves on. */
+static int lane_insert_core(fsim_env *env, int32_t ref, int32_t from, int32_t target, int32_t item,
+                            int32_t id, int exact, int pickup) {
     fsim_lane *lane = lane_of(env, ref);
     int32_t length = lane_length_of(env, ref);
     int32_t next = env->entities[ref >> 1].lane_next[ref & 1];
@@ -1343,7 +1355,7 @@ static int lane_insert_from(fsim_env *env, int32_t ref, int32_t from, int32_t ta
         ahead = p;
         if (p + BELT_GAP > q) q = p + BELT_GAP;
     }
-    if (q - from >= BELT_GAP) return 0;
+    if (q - from >= BELT_GAP + (pickup ? 1 : 0)) return 0;
     if (q < target) q = target;
     if (exact && q != target) return 0;
     if (lane->count >= FSIM_LANE_ITEMS) return 0;
@@ -1366,7 +1378,7 @@ static int lane_insert_from(fsim_env *env, int32_t ref, int32_t from, int32_t ta
         return 1;
     }
     if (moved_to < 0) moved_to = 0;
-    if (moved_to >= length) return 0;
+    if (moved_to >= length && !pickup) return 0;
     lane_put(lane, at, moved_to, item, id, moved_to != q);
     seg_touch(env, ref);
     belt_line_added(env, ref);
@@ -3453,41 +3465,169 @@ static void update_furnace(fsim_env *env, int32_t index) {
     }
 }
 
-/* Return a picked-up machine's contents, then the machine. */
-static void pick_up(fsim_env *env, int32_t index) {
-    fsim_entity *e = &env->entities[index];
-    if (e->fuel.count > 0) insert_main(env, e->fuel.item, e->fuel.count);
-    if (e->kind == K_FURNACE) {
-        /* The ingredient of a craft in progress comes back with the source. */
-        int32_t source = e->source.count;
-        int32_t source_item = e->source.count ? e->source.item : e->ingredient;
-        if (e->crafting) {
-            if (source > 0 && e->source.item != e->ingredient) insert_main(env, e->ingredient, 1);
-            else source += 1;
-        }
-        if (source > 0) insert_main(env, source_item, source);
-        if (e->result.count > 0) insert_main(env, e->result.item, e->result.count);
+/* Where an item the character cannot hold lands (FactorioRL
+ * tools/probe_handmine2.py, `spill`, `entity`, `cover`): on a grid of 88/256
+ * round `origin`, ring by ring -- the origin, then each ring clockwise from its
+ * top-left corner -- at the first point where its box (a pile's collision box)
+ * overlaps no other pile and no colliding entity. The character does not
+ * block it; water was not measured. One item a pile. */
+#define SPILL_STEP 88
+#define SPILL_RINGS 16
+
+static void spill_offset(int32_t k, int32_t i, int32_t *dx, int32_t *dy) {
+    if (i < 2 * k + 1) { *dx = -k + i; *dy = -k; return; }            /* top row */
+    i -= 2 * k + 1;
+    if (i < 2 * k) { *dx = k; *dy = -k + 1 + i; return; }            /* right column */
+    i -= 2 * k;
+    if (i < 2 * k) { *dx = k - 1 - i; *dy = k; return; }             /* bottom row */
+    i -= 2 * k;
+    *dx = -k;
+    *dy = k - 1 - i;                                                   /* left column */
+}
+
+static int spill_blocked(const fsim_env *env, fsim_pos p) {
+    for (int32_t i = 0; i < env->entity_count; i++) {
+        const fsim_entity *e = &env->entities[i];
+        if (!e->alive) continue;
+        int32_t reach;
+        if (e->kind == K_PILE) reach = 2 * PILE_BOX;
+        else if (has_flag(e->kind, KF_COLLIDES)) reach = box_of(e->kind) + PILE_BOX;
+        else continue;
+        if (abs(e->pos.x - p.x) < reach && abs(e->pos.y - p.y) < reach) return 1;
     }
-    /* The order FactorioRL's probe_logistics2 read off the character's slots
-     * (`mine`): a chest's slots in order, then the chest; a belt's lane 1
-     * then lane 2, front to back, then the belt; an inserter's fuel, the
-     * inserter, then what it held. */
-    if (e->kind == K_CHEST)
-        for (int i = 0; i < FSIM_CHEST_SLOTS; i++)
-            if (e->chest[i].count > 0) insert_main(env, e->chest[i].item, e->chest[i].count);
+    return 0;
+}
+
+static void spill_item(fsim_env *env, fsim_pos origin, int32_t item) {
+    for (int32_t k = 0; k <= SPILL_RINGS; k++) {
+        int32_t n = k == 0 ? 1 : 8 * k;
+        for (int32_t i = 0; i < n; i++) {
+            int32_t dx = 0, dy = 0;
+            if (k > 0) spill_offset(k, i, &dx, &dy);
+            fsim_pos p = {origin.x + dx * SPILL_STEP, origin.y + dy * SPILL_STEP};
+            if (spill_blocked(env, p)) continue;
+            int32_t pile = new_entity(env, K_PILE, p, 0, 1);
+            if (pile >= 0) {
+                env->entities[pile].pile.item = item;
+                env->entities[pile].pile.count = 1;
+            }
+            return;
+        }
+    }
+}
+
+/* Into the main inventory, and what does not fit onto the ground round `at`. */
+static void insert_or_spill(fsim_env *env, fsim_pos at, int32_t item, int32_t count) {
+    if (item == IT_NONE || count <= 0) return;
+    for (int32_t left = count - insert_main(env, item, count); left > 0; left--)
+        spill_item(env, at, item);
+}
+
+/* As much of a stack as fits into the main inventory; 1 when all of it went. */
+static int take_stack(fsim_env *env, fsim_stack *s) {
+    if (s->count <= 0) return 1;
+    s->count -= insert_main(env, s->item, s->count);
+    if (s->count > 0) return 0;
+    s->item = IT_NONE;
+    return 1;
+}
+
+/* Hand-mining finished on entity `index` (FactorioRL probe_handmine2
+ * `entity`, `pile`, `spill`, `extra`; with room for everything, the order
+ * probe_logistics2 `mine` read off the character's slots). What it holds goes
+ * first, in order --
+ * a chest's slots; a furnace's fuel, source, result; a drill's or an
+ * inserter's fuel -- each as much as fits, and a stack that does not all fit
+ * keeps the entity standing: 0, and the character mines it again. A pile gives
+ * what fits and stays with the rest. Otherwise the entity goes, and then what
+ * cannot stop it comes, into the inventory or onto the ground round where it
+ * stood: a belt's lane 1 then lane 2, front to back; a furnace's ingredient in
+ * progress; the entity's own item; a drill's pending ore or an inserter's
+ * hand. Returns 1 when the entity was taken. */
+static int mine_out(fsim_env *env, int32_t index) {
+    fsim_entity *e = &env->entities[index];
+    fsim_pos at = e->pos;
+    if (e->kind == K_PILE) {
+        e->pile.count -= insert_main(env, e->pile.item, e->pile.count);
+        if (e->pile.count > 0) return 0;
+        destroy_entity(env, index);
+        unblock_drills(env, -1, at);
+        return 1;
+    }
+    fsim_stack *order[FSIM_CHEST_SLOTS];
+    int32_t n = 0;
+    if (e->kind == K_CHEST) {
+        for (int i = 0; i < FSIM_CHEST_SLOTS; i++) order[n++] = &e->chest[i];
+    } else if (e->kind == K_FURNACE) {
+        order[n++] = &e->fuel;
+        order[n++] = &e->source;
+        order[n++] = &e->result;
+    } else if (e->kind == K_DRILL || e->kind == K_INSERTER) {
+        order[n++] = &e->fuel;
+    }
+    int changed = 0;
+    for (int32_t k = 0; k < n; k++) {
+        int32_t before = order[k]->count;
+        int all = take_stack(env, order[k]);
+        if (order[k]->count != before) changed = 1;
+        if (!all) {
+            if (changed) {
+                wake(env, index);
+                unblock_drills(env, index, at);
+            }
+            return 0;
+        }
+    }
+    int32_t item = entity_item(e->kind);
+    int32_t ingredient = e->kind == K_FURNACE && e->crafting ? e->ingredient : IT_NONE;
+    int32_t held = e->kind == K_DRILL || e->kind == K_INSERTER ? e->held : IT_NONE;
+    int32_t lane_items[2 * FSIM_LANE_ITEMS], lane_count = 0;
     if (e->kind == K_BELT)
         for (int lane = 0; lane < 2; lane++)
             for (int32_t k = 0; k < e->lanes[lane].count; k++)
-                insert_main(env, e->lanes[lane].items[k].item, 1);
-    if (e->kind == K_PILE) {
-        insert_main(env, e->pile.item, e->pile.count);
-        unblock_drills(env, -1, e->pos);
-    } else {
-        insert_main(env, entity_item(e->kind), 1);
-    }
-    /* An inserter's hand after the inserter (probe_logistics2 `mine`). */
-    if (e->kind == K_INSERTER && e->held != IT_NONE) insert_main(env, e->held, 1);
+                lane_items[lane_count++] = e->lanes[lane].items[k].item;
     destroy_entity(env, index);
+    for (int32_t k = 0; k < lane_count; k++) insert_or_spill(env, at, lane_items[k], 1);
+    insert_or_spill(env, at, ingredient, 1);
+    insert_or_spill(env, at, item, 1);
+    insert_or_spill(env, at, held, 1);
+    return 1;
+}
+
+/* A belt just built takes the piles lying on its tile onto its lanes, the
+ * newest first, each where a drop at its position would go and behind what
+ * is already ahead of it; one that would land more than 64 behind its point
+ * is dropped round the belt instead (FactorioRL probe_handmine2 `beltpick`,
+ * `beltpick2`, `beltpick3`, `extra`: 48 of 52 rigs; with nine piles, five or
+ * six onto one lane, the engine refused one more item than this in 4 of the 5
+ * `bp_ring9_*`, not reduced to a rule). */
+static void belt_take_piles(fsim_env *env, int32_t belt) {
+    int32_t tx = (int32_t)floordiv(env->entities[belt].pos.x, TILE);
+    int32_t ty = (int32_t)floordiv(env->entities[belt].pos.y, TILE);
+    int any = 0;
+    for (int32_t i = 0; i < env->entity_count && !any; i++) {
+        const fsim_entity *e = &env->entities[i];
+        any = e->alive && e->kind == K_PILE && floordiv(e->pos.x, TILE) == tx &&
+              floordiv(e->pos.y, TILE) == ty;
+    }
+    if (!any) return;
+    fsim_refresh(env);   /* the belt's shape and links, as the engine has them at once */
+    for (int32_t i = env->entity_count - 1; i >= 0; i--) {
+        fsim_entity *e = &env->entities[i];
+        if (!e->alive || e->kind != K_PILE) continue;
+        if (floordiv(e->pos.x, TILE) != tx || floordiv(e->pos.y, TILE) != ty) continue;
+        fsim_pos p = e->pos;
+        int32_t item = e->pile.item, count = e->pile.count;
+        destroy_entity(env, i);
+        unblock_drills(env, -1, p);
+        for (int32_t c = 0; c < count; c++) {
+            int32_t ref, target;
+            belt_drop_target(env, belt, p, &ref, &target);
+            /* As a script's insert: the new belt is a segment of its own. */
+            if (!lane_insert_core(env, ref, target, target, item, new_item_id(env), 0, 1))
+                spill_item(env, env->entities[belt].pos, item);
+        }
+    }
 }
 
 /* A belt carries the character standing or walking on it: after its own
@@ -3505,6 +3645,31 @@ static void carry_character(fsim_env *env) {
     move_character(env, env->entities[b].direction, BELT_SPEED);
 }
 
+/* Whether what the character is mining is in reach from where it stands: a
+ * resource within 2.7 of its box, an entity within 10 of its box, as
+ * can_reach_entity (FactorioRL probe_handmine2 `carry`, `reenter`, `reach`).
+ * -1 when it mines nothing. */
+int32_t fsim_mining_in_reach(const fsim_env *env) {
+    if (!env->mining) return -1;
+    if (env->mining_target_resource >= 0) {
+        if (!env->resources[env->mining_target_resource].alive) return -1;
+        return can_reach(env, 2, env->mining_target_resource);
+    }
+    if (env->mining_target_entity >= 0) {
+        if (!env->entities[env->mining_target_entity].alive) return -1;
+        return can_reach(env, 1, env->mining_target_entity);
+    }
+    return -1;
+}
+
+static void mine_tick(fsim_env *env);
+
+/* The character's tick: its walking step, then mining from where the step
+ * left it, then a belt's carry. Carried out of reach, the tick it leaves
+ * still mines (FactorioRL record_parity_trace `hand_mine_carried`: 26 ticks
+ * of progress kept where the last one read was 25, and 0.225 on the first
+ * tick back); the engine reads progress as 0 while the target is out of
+ * reach from where the character stands, and keeps it. */
 static void update_character(fsim_env *env) {
     env->walk_pub = env->walk_set;
     if (env->walk_set) env->walk_pub_dir = env->walk_set_dir;
@@ -3512,8 +3677,12 @@ static void update_character(fsim_env *env) {
         env->char_dir8 = env->walk_pub_dir;
         walk_one_tick(env, env->walk_pub_dir);
     }
+    if (env->mining) mine_tick(env);
     if (env->chain_count) carry_character(env);
-    if (!env->mining) return;
+    if (fsim_mining_in_reach(env) == 0) env->mining_progress = 0;
+}
+
+static void mine_tick(fsim_env *env) {
     double duration;
     int32_t item;
     if (env->mining_target_resource >= 0) {
@@ -3530,6 +3699,10 @@ static void update_character(fsim_env *env) {
         return;
     }
     face(env, env->mining_pos);
+    /* Out of reach -- a belt can carry the character off while it mines --
+     * nothing is mined, and what was is kept: back in reach it goes on from
+     * there (probe_handmine2 `carry`, `reenter`, `reach`). */
+    if (!fsim_mining_in_reach(env)) return;
     /* Seconds accumulate and progress is seconds / mining time, as the
      * engine prints it; an item comes once progress passes 1, strictly
      * (FactorioRL tools/probe_handmine.py: a pile, 0.025 s, reads exactly 1
@@ -3542,18 +3715,13 @@ static void update_character(fsim_env *env) {
     env->mining_seconds = 0;
     if (env->mining_target_resource >= 0) {
         fsim_resource *r = &env->resources[env->mining_target_resource];
-        /* No room for it (FactorioRL tools/probe_handmine.py, `full_*`): the
-         * ore lands on the ground at the resource, one item, and still counts
-         * as produced; the pile then covers the tile (`start_mining`). */
-        if (main_room(env, item) >= 1) {
-            insert_main(env, item, 1);
-        } else {
-            int32_t p = new_entity(env, K_PILE, resource_pos(r), 0, 1);
-            if (p >= 0) {
-                env->entities[p].pile.item = item;
-                env->entities[p].pile.count = 1;
-            }
-        }
+        /* No room for it (FactorioRL tools/probe_handmine.py, `full_*`;
+         * probe_handmine2 `spill`): the ore lands on the ground round the
+         * resource, one item, and still counts as produced. On the tile's
+         * centre the pile then covers the tile (`start_mining`); pushed off
+         * it by a pile already there, it does not, and mining goes on. */
+        if (main_room(env, item) >= 1) insert_main(env, item, 1);
+        else spill_item(env, resource_pos(r), item);
         env->produced[item] += 1;
         r = &env->resources[env->mining_target_resource];
         r->amount -= 1;
@@ -3562,16 +3730,10 @@ static void update_character(fsim_env *env) {
             if (env->selected_kind == 2 && env->selected_index == env->mining_target_resource)
                 env->selected_kind = 0;
         }
-    } else {
-        const fsim_entity *e = &env->entities[env->mining_target_entity];
-        /* A pile the inventory has no room for at all stays where it is and
-         * is mined again, every four ticks (`full_mine_pile`, `full_no_room`).
-         * Partial room is not measured. */
-        if (e->kind == K_PILE && main_room(env, e->pile.item) == 0) return;
-        pick_up(env, env->mining_target_entity);
-        /* Mining still asked for, nothing is selected again until it stops
-         * (`cover_*`: the tile under the entity is not mined; `cover_then_retry`:
-         * it is, once mining stops and starts). */
+    } else if (mine_out(env, env->mining_target_entity)) {
+        /* Taken. Mining still asked for, only another entity at the point is
+         * mined next, never the resource under it, until mining stops
+         * (`cover_*`, `two_piles_script`, `cover_then_retry`). */
         env->mining_stalled = 1;
     }
 }
@@ -3670,38 +3832,46 @@ static void stop_mining(fsim_env *env) {
     env->mining_target_resource = -1;
 }
 
-/* The entity whose selection box holds `p`, or -1. The mod mines a resource
- * by selecting at its position, and selection prefers any entity there
- * (FactorioRL tools/probe_handmine.py, `cover_*`: a belt, chest, inserter,
- * wall, furnace, drill or pile over the ore is mined instead; a pile 0.203
- * off the tile centre is not over it; the character never is). */
-static int32_t cover_at(const fsim_env *env, fsim_pos p) {
+/* What the mod's selection at `p` finds among entities, or -1. The mod mines
+ * by selecting at the target's position, and selection prefers an entity to a
+ * resource (FactorioRL tools/probe_handmine.py, `cover_*`: a belt, chest,
+ * inserter, wall, furnace, drill or pile over the ore is mined instead; a
+ * pile 0.203 off the tile centre is not over it; the character never is), a
+ * building to a pile (probe_handmine2 `cover`), and among piles the nearest
+ * to `p`, the newest on a tie (`select`, `select2`). */
+static int32_t select_at(const fsim_env *env, fsim_pos p) {
+    int32_t pile = -1;
+    int64_t pile_d2 = 0;
     for (int32_t i = 0; i < env->entity_count; i++) {
         const fsim_entity *e = &env->entities[i];
         if (!e->alive) continue;
         int32_t half = selection_half(e->kind);
-        if (abs(e->pos.x - p.x) < half && abs(e->pos.y - p.y) < half) return i;
+        int32_t dx = e->pos.x - p.x, dy = e->pos.y - p.y;
+        if (!(abs(dx) < half && abs(dy) < half)) continue;
+        if (e->kind != K_PILE) return i;
+        int64_t d2 = (int64_t)dx * dx + (int64_t)dy * dy;
+        if (pile < 0 || d2 <= pile_d2) {
+            pile = i;
+            pile_d2 = d2;
+        }
     }
-    return -1;
+    return pile;
 }
 
 static void start_mining(fsim_env *env, int32_t kind, int32_t index, fsim_pos position) {
-    if (env->mining_stalled) {
+    int32_t cover = select_at(env, position);
+    if (cover >= 0) {
+        kind = 1;
+        index = cover;
+        env->selected_kind = 1;
+        env->selected_index = cover;
+    } else if (env->mining_stalled) {
         env->selected_kind = 0;
         env->mining = 1;
         env->mining_pos = position;
         env->mining_target_resource = -1;
         env->mining_target_entity = -1;
         return;
-    }
-    if (kind == 2) {
-        int32_t cover = cover_at(env, position);
-        if (cover >= 0) {
-            kind = 1;
-            index = cover;
-            env->selected_kind = 1;
-            env->selected_index = cover;
-        }
     }
     if (kind != env->mined_kind || index != env->mined_index) {
         env->mining_seconds = 0;
@@ -3828,6 +3998,7 @@ static int32_t act_place(fsim_env *env, const fsim_action *a) {
     int32_t index = new_entity(env, kind, centre, direction, 0);
     remove_main(env, a->item, 1);
     env->built[a->item] += 1;
+    if (kind == K_BELT) belt_take_piles(env, index);
     env->act.handle = mint_unit(env, index);
     env->act.position = centre;
     env->act.status = R_COMPLETED;

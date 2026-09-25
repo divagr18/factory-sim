@@ -713,11 +713,15 @@ class Sim:
     @staticmethod
     def _lanes(e) -> list:
         """A belt's lanes as `[name, position, id]`, ascending position then id;
-        ids are the simulator's own, for the trace normaliser to rename."""
+        ids are the simulator's own, for the trace normaliser to rename. An item
+        a belt built over it took past its lane's upstream end reads, as the
+        engine reads it, at the lane's last position (FactorioRL probe_handmine2
+        `beltpick3`)."""
         out = []
         for lane in range(2):
+            last = e.lane_length[lane] - 1 if e.lane_length[lane] > 0 else 1 << 15
             items = [
-                [ITEM_NAMES[it.item], it.pos, it.id]
+                [ITEM_NAMES[it.item], min(it.pos, last), it.id]
                 for it in e.lanes[lane].items[0 : e.lanes[lane].count]
             ]
             out.append(sorted(items, key=lambda item: (item[1], item[2])))
@@ -939,8 +943,12 @@ class Sim:
             duration = 1.0
             if env.mining_target_entity >= 0:
                 duration = lib.fsim_kind_mining_time(env.entities[env.mining_target_entity].kind)
-            env.mining_progress = progress
-            env.mining_seconds = progress * duration
+            # Out of reach the engine reads progress as 0 and keeps what was
+            # mined, so a recorded 0 there says nothing about it: this side
+            # keeps its own (FactorioRL `hand_mine_carried`).
+            if not (progress == 0 and lib.fsim_mining_in_reach(env) == 0):
+                env.mining_progress = progress
+                env.mining_seconds = progress * duration
 
         by_place = {}
         for i in range(env.entity_count):
