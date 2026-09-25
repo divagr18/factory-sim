@@ -6,9 +6,14 @@ observation, for `construct_smelting_line` and `build_line`. The arrays it
 returns are views over C memory, refreshed by `observe()`.
 
 `action_space="v3"` is `parameterized-v3` over `local-v3`: 96 entity rows of
-32 features, 18 items, a 30-slot goal (the v1 goal, then six public-marker
-triples) and `MultiDiscrete[23, 97, 226, 5, 19, 4]`. `observe3()` reads the v3
-tensors and mask whatever the action space, so a v1 run can be checked in v3.
+32 features, 18 items, a 13-slot self vector (the free share of the main
+inventory last), a 30-slot goal (the v1 goal, then six public-marker triples)
+and `MultiDiscrete[25, 97, 226, 5, 19, 4]` -- v1's operations, `mine_tile`,
+`take_fuel` and `finish`. `observe3()` reads the v3 tensors and mask whatever
+the action space, so a v1 run can be checked in v3, and `op_masks()` the v3
+masks per operation (user decision "v3 masks: per operation"): row o is
+operation o's legal values of the five argument dimensions, concatenated, and
+the flat mask is the operations then the union of the legal ones' rows.
 """
 
 from __future__ import annotations
@@ -18,7 +23,9 @@ import numpy as np
 from fsim import ffi, lib, scene_struct
 
 NVEC = (22, 33, 122, 5, 15, 4)
-NVEC3 = (23, 97, 226, 5, 19, 4)
+NVEC3 = (25, 97, 226, 5, 19, 4)
+#: v3's argument dimensions, concatenated: one row of `RlEnv.op_masks()`.
+ARG_WIDTH3 = sum(NVEC3[1:])
 TASKS = {
     "construct_smelting_line": lib.TASK_CONSTRUCT_SMELTING_LINE,
     "build_line": lib.TASK_BUILD_LINE,
@@ -157,6 +164,10 @@ class RlEnv:
             "goal": np.frombuffer(ffi.buffer(self.obs3_c.goal), np.float32),
         }
         self.mask3 = np.frombuffer(ffi.buffer(self.mask3_c, lib.RL3_MASK_SIZE), np.uint8)
+        self.opmask3_c = ffi.new("uint8_t[]", lib.RL3_OPERATIONS * lib.RL3_ARG_WIDTH)
+        self.opmask3 = np.frombuffer(
+            ffi.buffer(self.opmask3_c, lib.RL3_OPERATIONS * lib.RL3_ARG_WIDTH), np.uint8
+        ).reshape(lib.RL3_OPERATIONS, lib.RL3_ARG_WIDTH)
         self.v3 = False
 
     def _water_flat(self):
@@ -196,6 +207,12 @@ class RlEnv:
         lib.fsim_rl_encode3(self.rl, self.obs3_c)
         lib.fsim_rl_mask3(self.rl, self.mask3_c)
         return self.obs3, self.mask3
+
+    def op_masks(self) -> np.ndarray:
+        """The v3 masks per operation of the current state, whatever the
+        action space: `RL3_OPERATIONS` rows of `ARG_WIDTH3`."""
+        lib.fsim_rl_opmask3(self.rl, self.opmask3_c)
+        return self.opmask3
 
     def step(self, vector) -> tuple[dict, float, bool, bool, dict]:
         for i in range(6):

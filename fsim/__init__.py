@@ -123,6 +123,16 @@ PROFILES = {
     "observation": "local-v2",
     "observation_version": 7,
 }
+#: The v3 sensor (FactorioRL `profiles.lua`, `local-v3` v2): what `local-v2`
+#: shows, each belt's lane counts and shape, each inserter's pickup, drop and
+#: hand, each drill's drop point, the character's free and total main slots,
+#: and 96 entities.
+PROFILES_V3 = {**PROFILES, "observation": "local-v3", "observation_version": 2}
+SWEEP_V3 = 96
+
+#: A burner drill's drop point from its centre by facing, 1/256 tile
+#: (csrc/fsim.c, `drop_position`).
+DRILL_DROP = {0: (-128, -332), 4: (332, -128), 8: (128, 332), 12: (-332, 128)}
 EVENT_WINDOW = 8
 #: Neutral entities are reported inside the scene's box only.
 SCENE_RADIUS = 48
@@ -304,17 +314,22 @@ def action_struct(key: str, arguments: dict | None = None):
         a.direction = DIRECTIONS.index(arguments.get("direction", "north"))
         a.position.x = round(arguments["position"][0] * 256)
         a.position.y = round(arguments["position"][1] * 256)
-    elif key == "mine_at":
+    elif key in ("mine_at", "mine_tile"):
+        # `mine_tile` (v3) sends the mod's `mine` as `mine_at` does, with the
+        # tile's handle.
         a.verb = lib.V_MINE
-        a.handle = _handle(arguments["handle"])
+        a.handle = _handle(arguments["tile" if key == "mine_tile" else "handle"])
         a.count = int(arguments.get("count", 1))
     elif key in ("rotate_at", "rotate_at_reverse"):
         a.verb = lib.V_ROTATE
         a.handle = _handle(arguments["handle"])
         a.reverse = 1 if key == "rotate_at_reverse" else 0
-    elif key in ("give_to", "take_from"):
+    elif key in ("give_to", "take_from", "take_fuel"):
+        # `take_fuel` (v3) is a transfer out of the fuel slot: its item, which
+        # FactorioRL fills in from the observed record, is given here.
         a.verb = lib.V_TRANSFER
-        a.from_handle = _endpoint(arguments["from"] if key == "take_from" else "character")
+        taking = key in ("take_from", "take_fuel")
+        a.from_handle = _endpoint(arguments["from"] if taking else "character")
         a.to_handle = _endpoint(arguments["to"] if key == "give_to" else "character")
         a.item = ITEM_IDS.get(arguments["item"], lib.IT_NONE)
         a.count = int(arguments["count"])
@@ -459,6 +474,8 @@ class Sim:
         lib.fsim_set_water(self.env, flat, len(water))
         self.blueprint: dict = {}
         self.steps = 0
+        #: The wire profile `observation()` renders: `local-v2`, or `local-v3`.
+        self.observation_profile = "local-v2"
 
     def __del__(self) -> None:
         env = getattr(self, "env", None)
@@ -467,9 +484,13 @@ class Sim:
             self.env = None
 
     # ------------------------------------------------------------- lifecycle
-    def reset(self, blueprint: dict) -> None:
+    def reset(self, blueprint: dict, observation_profile: str | None = None) -> None:
         self.blueprint = blueprint
         self.steps = 0
+        if observation_profile is not None:
+            self.observation_profile = observation_profile
+        # The sweep's cap is the sensor's, and kept across resets.
+        self.env.sweep_cap = SWEEP_V3 if self.observation_profile == "local-v3" else 0
         scene, self._scene_arrays = scene_struct(blueprint)
         lib.fsim_reset(self.env, scene)
         check_belt_delay(self.env)
@@ -478,7 +499,20 @@ class Sim:
     def action(self, key: str, arguments: dict | None = None):
         return action_struct(key, arguments)
 
+    def fuel_item(self, handle: str) -> str | None:
+        """What a visible entity's fuel slot holds, as its record shows it
+        (FactorioRL `FactorioEnv._fuel_item`, for `take_fuel`)."""
+        for record in self.observation()["entities"]:
+            if record.get("h") == handle:
+                return next((item for item, n in (record.get("fuel") or {}).items() if n), None)
+        return None
+
     def step(self, key: str, arguments: dict | None = None, ticks: int = 30) -> None:
+        if key == "take_fuel":
+            item = self.fuel_item(str(arguments["from"]))
+            if item is None:
+                raise ValueError(f"take_fuel: {arguments['from']} holds no fuel")
+            arguments = {**arguments, "item": item}
         lib.fsim_step(self.env, self.action(key, arguments), ticks)
         self.steps += 1
         check_belt_delay(self.env)
@@ -548,10 +582,31 @@ class Sim:
                 record["fuel"] = {ITEM_NAMES[e.fuel.item]: e.fuel.count}
         if e.kind == lib.K_FURNACE and e.result.count > 0:
             record["output"] = {ITEM_NAMES[e.result.item]: e.result.count}
+        if self.observation_profile == "local-v3":
+            self._logistics_detail(e, record)
         return record
+
+    def _logistics_detail(self, e, record: dict) -> None:
+        """FactorioRL's `sensor.logistics_detail`: what a player reads off a
+        belt, an inserter and a drill."""
+        if e.kind == lib.K_BELT:
+            record["lanes"] = [e.lanes[0].count, e.lanes[1].count]
+            record["shape"] = BELT_SHAPES[e.shape]
+        elif e.kind == lib.K_INSERTER:
+            pickup, drop = self._inserter_points(e)
+            record["pickup"] = [tiles(pickup[0]), tiles(pickup[1])]
+            record["drop"] = [tiles(drop[0]), tiles(drop[1])]
+            if e.held:
+                record["held"] = ITEM_NAMES[e.held]
+        elif e.kind == lib.K_DRILL:
+            dx, dy = DRILL_DROP[e.direction]
+            record["drop"] = [tiles(e.pos.x + dx), tiles(e.pos.y + dy)]
 
     def observation(self) -> dict:
         env = self.env
+        v3 = self.observation_profile == "local-v3"
+        if v3:
+            lib.fsim_refresh(env)  # belt shapes, as the engine shows them now
         character = {
             "present": True,
             "position": [tiles(env.char_pos.x), tiles(env.char_pos.y)],
@@ -560,6 +615,9 @@ class Sim:
         }
         if env.mining:
             character["mining"] = {"active": True, "progress": env.mining_progress}
+        if v3:
+            free = sum(1 for i in range(lib.FSIM_MAIN_SLOTS) if env.main[i].count == 0)
+            character["slots"] = {"free": free, "total": lib.FSIM_MAIN_SLOTS}
         entities = [
             self._entity_record(env.seen[k].handle, env.entities[env.seen[k].entity])
             for k in range(env.seen_count)
@@ -629,7 +687,7 @@ class Sim:
             "episode_id": "ep-1",
             "tick": int(env.tick),
             "absolute_tick": int(env.tick),
-            "profiles": PROFILES,
+            "profiles": PROFILES_V3 if v3 else PROFILES,
             "character": character,
             "inventory": self.inventory(),
             "sensor": {"radius": 32, "origin": [tiles(env.origin.x), tiles(env.origin.y)]},

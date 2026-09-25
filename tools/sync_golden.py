@@ -49,6 +49,10 @@ def main() -> int:
         wanted = [(entry["trace"], entry["trace_sha256"])]
         if entry.get("ticks"):
             wanted.append((entry["ticks"]["trace"], entry["ticks"]["trace_sha256"]))
+        # The same run's observations under the local-v3 sensor
+        # (record_parity_trace.py --sensor).
+        if entry.get("local_v3"):
+            wanted.append((entry["local_v3"]["trace"], entry["local_v3"]["trace_sha256"]))
         for file_name, expected in wanted:
             source = evidence / file_name
             actual = trace_hash(source)
@@ -59,10 +63,12 @@ def main() -> int:
             shutil.copyfile(source, DEST / file_name)
             print(f"ok {file_name}")
     shutil.copyfile(evidence / "index.json", DEST / "index.json")
-    # The v3 contract (FactorioRL tools/v3_contract_golden.py) and the reach
-    # sweep the v3 mask is checked against (tools/probe_handmine.py).
-    for name, where in (("v3_contract.json.xz", evidence),
-                        ("handmine-reach.json.xz", args.source / "docs" / "evidence")):  # fmt: skip
+    # The v3 contract (FactorioRL tools/v3_contract_golden.py), the reach
+    # sweep the v3 mask is checked against (tools/probe_handmine.py), and the
+    # inventory facts the per-operation masks rest on (tools/probe_inventory.py).
+    docs = args.source / "docs" / "evidence"
+    for name, where in (("v3_contract.json.xz", evidence), ("handmine-reach.json.xz", docs),
+                        ("inventory-prototypes.json.xz", docs)):  # fmt: skip
         if (where / name).exists():
             shutil.copyfile(where / name, DEST / name)
             print(f"ok {name}")

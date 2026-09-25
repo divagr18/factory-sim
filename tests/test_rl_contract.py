@@ -65,6 +65,11 @@ def test_contract(name):
         assert found is None, found
 
 
+def recorded_v3(header: dict) -> bool:
+    """A trace recorded under the v3 catalog: its vectors, tensors and masks are v3."""
+    return header.get("catalog") == "parameterized-v3"
+
+
 def first_difference(name) -> tuple | None:
     """The first decision whose tensors, mask, goal or transition differ."""
     header, records = read_trace(GOLDEN / f"{name}.jsonl.xz")
@@ -75,6 +80,7 @@ def first_difference(name) -> tuple | None:
         decision_ticks=header["decision_ticks"],
         max_steps=header["max_decision_steps"],
         construction_tick_limit=header["construction_tick_limit"],
+        **({"action_space": "v3"} if recorded_v3(header) else {}),
     )
     if check(records[0], env) is not None:
         return 0, check(records[0], env)
@@ -135,6 +141,7 @@ def first_difference_v3(name) -> tuple | None:
         max_steps=header["max_decision_steps"],
         construction_tick_limit=header["construction_tick_limit"],
         entity_cap=96,
+        **({"action_space": "v3"} if recorded_v3(header) else {}),
     )
     for record in records:
         if record["decision"] > 0:
@@ -151,4 +158,20 @@ def first_difference_v3(name) -> tuple | None:
         if bits != want["mask"]:
             at = next(i for i, (a, b) in enumerate(zip(bits, want["mask"], strict=True)) if a != b)
             return record["decision"], f"mask bit {at}"
+        packed = packed_op_masks(env.op_masks(), mask)
+        if packed != want["op_masks"]:
+            op = next(k for k in sorted(set(packed) | set(want["op_masks"]), key=int)
+                      if packed.get(k) != want["op_masks"].get(k))  # fmt: skip
+            return record["decision"], f"operation {op}'s mask"
     return None
+
+
+def packed_op_masks(rows, mask) -> dict[str, str]:
+    """`ParameterizedEnv.packed_operation_masks`: the legal operations' rows as
+    hex, the first value the highest bit."""
+    width = (rows.shape[1] + 3) // 4
+    return {
+        str(op): format(int("".join("1" if b else "0" for b in rows[op]), 2), f"0{width}x")
+        for op in range(len(rows))
+        if mask[op]
+    }

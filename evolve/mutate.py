@@ -86,6 +86,10 @@ mines that entity instead and then nothing more until you move. With no room lef
 inventory, a mined item drops on the ground. A `mine_resource` with no free inventory slot \
 at all is refused.
 - A 2x2 machine placed at (x, y) covers tiles x..x+1, y..y+1; its centre is (x+1, y+1).
+- Returning from `build` ends the build phase at once, and so does `world.finish()`: the \
+verification window starts then, not when the budget runs out.
+- `take_fuel` empties a machine's fuel slot into the inventory; the fuel already burning \
+stays in the machine and burns on.
 - A belt carries items toward its facing, 1.875 tiles per second. Each belt tile has two \
 lanes (lane 1 on the left of travel, lane 2 on the right), each holding at most 4 items. A \
 belt whose end meets another belt's side feeds the lane on the side it comes from; a belt \

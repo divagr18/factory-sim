@@ -133,6 +133,9 @@ static int has_flag(int32_t kind, int32_t flag) { return (kind_of(kind)->flags &
 int32_t fsim_kind_flags(int32_t kind) { return kind_of(kind)->flags; }
 
 double fsim_kind_mining_time(int32_t kind) { return kind_of(kind)->mining_time; }
+int32_t fsim_stack_size(int32_t item) {
+    return item > IT_NONE && item < IT_COUNT ? STACK_SIZE[item] : 0;
+}
 
 double fsim_capacity(int32_t kind) {
     /* A burner's buffer holds 16/15 of its per-tick draw. */
@@ -3938,9 +3941,14 @@ static int32_t act_mine(fsim_env *env, const fsim_action *a) {
         item = r->item;
     } else {
         const fsim_entity *e = &env->entities[index];
+        /* A ground pile is minable but its prototype yields nothing, and the
+         * mod's `mine` refuses it for that (FactorioRL
+         * tools/probe_inventory.py, `prototypes`). One over a resource tile
+         * shares the tile's handle, which resolves to the resource. */
+        if (e->kind == K_PILE) return reject(env, E_NOT_MINEABLE);
         if (!can_reach(env, 1, index)) return reject(env, E_OUT_OF_REACH);
         position = e->pos;
-        item = e->kind == K_PILE ? e->pile.item : entity_item(e->kind);
+        item = entity_item(e->kind);
     }
     if (empty_slots(env) == 0) return reject(env, E_NO_SPACE);
     env->selected_kind = kind;
@@ -4041,7 +4049,10 @@ static fsim_stack *machine_slot(fsim_entity *m, int32_t item, int removing, int3
     }
     if (m->kind == K_FURNACE) {
         order[n] = &m->source;
-        caps[n++] = item == IT_IRON_ORE ? FURNACE_SOURCE_CAP : STACK_SIZE[item];
+        /* An insert puts 54 of any ore into an empty source slot (FactorioRL
+         * tools/probe_inventory.py, `prototypes`: `capacity`). */
+        int smeltable = item == IT_IRON_ORE || item == IT_COPPER_ORE || item == IT_STONE;
+        caps[n++] = smeltable ? FURNACE_SOURCE_CAP : STACK_SIZE[item];
         order[n] = &m->result;
         caps[n++] = STACK_SIZE[item];
     }

@@ -29,6 +29,7 @@ OPS = NVEC3[0]
 TARGETS = slice(OPS, OPS + NVEC3[1])
 PLACEMENTS = slice(OPS + NVEC3[1], OPS + NVEC3[1] + NVEC3[2])
 OP_MINE_TILE = 22
+OP_MINE_AT = 13
 SIDE = 15
 TILE = 256
 
@@ -77,10 +78,13 @@ def test_target_rows_are_legal_exactly_where_the_engine_reaches():
                     cy = (math.floor(ey) + dy) * TILE + sy * TILE // sub
                     rl.env.char_pos.x, rl.env.char_pos.y = cx, cy
                     lib.fsim_observe(rl.env)
-                    _, mask = env.observe3()
                     seen = rl.env.seen_count > 0
-                    legal = bool(mask[TARGETS][1]) if seen else False
-                    assert legal == (bits[k] == "1"), (spec["name"], dx, dy, sx, sy)
+                    # `mine_at`'s own row of the per-operation masks: target 1.
+                    legal = bool(env.op_masks()[OP_MINE_AT][1]) if seen else False
+                    # A ground pile is in reach like the rest, but `mine`
+                    # refuses it: its prototype yields nothing.
+                    reached = bits[k] == "1" and spec["name"] != "item-on-ground"
+                    assert legal == reached, (spec["name"], dx, dy, sx, sy)
                     k += 1
                     checked += 1
     assert checked == 7 * 16 * (2 * off + 1) ** 2

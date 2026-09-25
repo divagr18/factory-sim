@@ -46,7 +46,7 @@ WORLD_API = frozenset(
     "me tile patch inventory ore_tiles blocked_tiles entities decisions_left last_refused "
     "move place give take mine wait refusals failures "
     # `WorldV3` (the v3 profile: belt_smelting)
-    "rotate marker belt_lanes mine_resource".split()
+    "rotate marker belt_lanes mine_resource take_fuel finish".split()
 )
 
 #: Attributes allowed on any value: `Entity` fields, then list, dict, set and str

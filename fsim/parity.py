@@ -44,7 +44,7 @@ class Replay:
         self.over = False
 
     def reset(self) -> dict:
-        self.sim.reset(self.header["blueprint"])
+        self.sim.reset(self.header["blueprint"], self.header.get("observation_profile"))
         self.normaliser.begin({"tick": 0, "absolute_tick": 0})
         self.truth_extra = {}
         self.over = False
@@ -69,6 +69,8 @@ class Replay:
         self.sim.env.next_item_id = max(self.sim.env.next_item_id, self.items_named)
 
     def step(self, key: str, arguments: dict) -> dict:
+        if key == "finish":
+            return self._finish()
         self.sim.step(key, arguments, self.header["decision_ticks"])
         status, error = self.sim.action_outcome()
         verification = self.header.get("verification")
@@ -81,6 +83,18 @@ class Replay:
             self.over = True
         record = self.record()
         record["transition"] = {"action_status": status, "action_error": error}
+        return record
+
+    def _finish(self) -> dict:
+        """v3's `finish` (FactorioRL `FactorioEnv.finish`): one decision, no
+        world step, the verification window now, and the episode over."""
+        self.sim.steps += 1
+        verification = self.header.get("verification")
+        if verification and not self.over:
+            self._verify(verification)
+        self.over = True
+        record = self.record()
+        record["transition"] = {"action_status": "completed", "action_error": None}
         return record
 
     def _verify(self, verification: dict) -> None:

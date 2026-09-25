@@ -9,7 +9,7 @@ import random
 import numpy as np
 import pytest
 
-from fsim import expert, ffi, lib, scenes
+from fsim import ITEM_IDS, expert, ffi, lib, scenes
 from fsim.obsview import ITEMS_V3, EntityV3, ObsView
 from fsim.parity import GOLDEN
 from fsim.rl import NVEC, NVEC3, RlEnv
@@ -68,11 +68,12 @@ def test_shapes():
     assert obs["grid"].shape == (6, 65, 65)
     assert obs["entities"].shape == (96, 32)
     assert obs["entity_mask"].shape == (96,)
-    assert obs["self"].shape == (12,)
+    assert obs["self"].shape == (13,)
     assert obs["inventory"].shape == (18,)
     assert obs["goal"].shape == (30,)
     assert env.mask.shape == (sum(NVEC3),) == (lib.RL3_MASK_SIZE,)
-    assert NVEC3 == (23, 97, 226, 5, 19, 4)
+    assert NVEC3 == (25, 97, 226, 5, 19, 4)
+    assert env.op_masks().shape == (25, sum(NVEC3[1:])) == (25, lib.RL3_ARG_WIDTH)
 
 
 def test_v1_unchanged_after_a_v3_episode_in_the_same_env():
@@ -116,7 +117,9 @@ def test_v3_rows_and_goal_extend_v1():
     assert 0 < n <= 32
     assert np.array_equal(obs["entities"][:n, :16], v1["entities"][:n])
     assert np.array_equal(obs["grid"], v1["grid"])
-    assert np.array_equal(obs["self"], v1["self"])
+    assert np.array_equal(obs["self"][:12], v1["self"])
+    free = sum(1 for i in range(lib.FSIM_MAIN_SLOTS) if env.rl.env.main[i].count == 0)
+    assert obs["self"][12] == np.float32(free / lib.FSIM_MAIN_SLOTS)
     assert np.array_equal(obs["goal"][:12], v1["goal"])
     assert np.array_equal(obs["inventory"][:14], v1["inventory"])
     assert not obs["inventory"][14:].any()
@@ -126,15 +129,19 @@ def test_placement_slot_names_a_fixed_tile_and_occupied_slots_are_masked():
     env = chain_env(60)
     rl = env.rl
     rl.task.action_space = lib.ACTION_SPACE_V3
-    _, mask3 = env.observe3()
+    # A furnace to place, so `place_at` is legal and its own row of the
+    # per-operation masks shows the tiles (placement: after the 97 targets).
+    rl.env.main[0].item, rl.env.main[0].count = ITEM_IDS["stone-furnace"], 1
+    row = env.op_masks()[expert.OP_PLACE]
     here = (rl.env.char_pos.x // 256, rl.env.char_pos.y // 256)
     occupied = set()
     for k in range(rl.env.seen_count):
         e = rl.env.entities[rl.env.seen[k].entity]
         if lib.fsim_kind_flags(e.kind) & lib.KF_COLLIDES:
             occupied.add((e.pos.x // 256, e.pos.y // 256))
-    mask = mask3[PLACEMENTS]
-    assert mask[0] == 1
+    mask = row[NVEC3[1] : NVEC3[1] + NVEC3[2]]
+    assert mask[0] == 0, "place_at reads the placement: its sentinel is not legal"
+    assert row[0] == 1 and not row[1 : NVEC3[1]].any(), "nor a target: sentinel only"
     action = ffi.new("fsim_action *")
     seen_occupied = 0
     for slot in range(225):
@@ -143,8 +150,8 @@ def test_placement_slot_names_a_fixed_tile_and_occupied_slots_are_masked():
         legal = tile != here and tile not in occupied
         seen_occupied += not legal
         assert bool(mask[slot + 1]) == legal, (dx, dy)
-        # Nothing is held in this scene, so a legal tile still fails on the item;
-        # an occupied one fails first either way.
+        # Item 1 (iron ore) is not held, so a legal tile still fails on the
+        # item; an occupied one fails first either way.
         vector = ffi.new("int32_t[6]", [expert.OP_PLACE, 0, slot + 1, 1, 1, 0])
         assert lib.fsim_rl_decode(rl, vector, action) == 1
     assert seen_occupied > 5

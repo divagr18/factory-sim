@@ -588,6 +588,8 @@ int32_t fsim_belt_segment(fsim_env *env, int32_t index, int32_t lane);
 /* KF_* flags of an entity kind, and the seconds the character takes to mine one. */
 int32_t fsim_kind_flags(int32_t kind);
 double fsim_kind_mining_time(int32_t kind);
+/* An item's stack size (0 for none). */
+int32_t fsim_stack_size(int32_t item);
 /* Whether the character's mining target is in reach from where it stands (1
  * or 0), or -1 when it mines nothing. */
 int32_t fsim_mining_in_reach(const fsim_env *env);
@@ -608,7 +610,8 @@ int32_t fsim_mining_in_reach(const fsim_env *env);
 
 /* v3 (FactorioRL parameterized-v3 / local-v3): 96 rows of 32 features, the
  * items grown by the Stage-2 four, 6 public-marker triples after the goal,
- * and a 15x15 placement window. MultiDiscrete[23, 97, 226, 5, 19, 4]. */
+ * a 15x15 placement window, and a 13th self feature, the free share of the
+ * main inventory. MultiDiscrete[25, 97, 226, 5, 19, 4]. */
 #define RL3_MAX_ENTITIES 96
 #define RL3_ENTITY_FEATURES 32
 #define RL3_ITEMS 18
@@ -617,9 +620,14 @@ int32_t fsim_mining_in_reach(const fsim_env *env);
 #define RL3_TARGETS 96
 #define RL3_PLACEMENTS 225
 #define RL3_PLACEMENT_RADIUS 7
-/* v3's catalog is parameterized-v1's 22 operations and `mine_tile` (22). */
-#define RL3_OPERATIONS 23
-#define RL3_MASK_SIZE 374
+/* v3's catalog is parameterized-v1's 22 operations, `mine_tile` (22),
+ * `take_fuel` (23) and `finish` (24). */
+#define RL3_OPERATIONS 25
+#define RL3_SELF_FEATURES 13
+/* The argument dimensions (97 + 226 + 5 + 19 + 4): one row of the
+ * per-operation masks (fsim_rl_opmask3), and the flat mask after the ops. */
+#define RL3_ARG_WIDTH 351
+#define RL3_MASK_SIZE 376
 
 #define TASK_CONSTRUCT_SMELTING_LINE 1
 #define TASK_BUILD_LINE 2
@@ -650,7 +658,7 @@ typedef struct {
     float grid[25350];          /* 6 x 65 x 65 */
     float entities[3072];       /* 96 x 32 */
     int8_t entity_mask[96];
-    float self_[12];
+    float self_[13];
     float inventory[18];
     float goal[30];
 } fsim_obs3;
@@ -705,12 +713,11 @@ typedef struct {
      *   `target` k names row k-1 of the encoded entity table and `placement` p
      *   names the fixed tile ((p-1) / 11 - 5, (p-1) % 11 - 5) from the
      *   character's tile, masked when occupied instead of skipped.
-     * ACTION_SPACE_V3: v2's meanings over the v3 sizes, MultiDiscrete[23, 97,
-     *   226, 5, 19, 4]: target k is row k-1 of the 96-row table (masked, and
-     *   refused, unless visible and in reach), placement p the tile
-     *   ((p-1) / 15 - 7, (p-1) % 15 - 7) (masked unless free and within build
-     *   distance, or a resource tile within resource reach for op 22,
-     *   `mine_tile`). */
+     * ACTION_SPACE_V3: v2's meanings over the v3 sizes, MultiDiscrete[25, 97,
+     *   226, 5, 19, 4]: target k is row k-1 of the 96-row table (refused
+     *   unless visible and in reach), placement p the tile
+     *   ((p-1) / 15 - 7, (p-1) % 15 - 7), with `mine_tile` (22), `take_fuel`
+     *   (23) and `finish` (24); masked per operation (fsim_rl_opmask3). */
     int32_t action_space;
     /* The observation's entity cap (env->sweep_cap): 0 keeps local-v2's 48;
      * local-v3 is 96. */
@@ -783,6 +790,10 @@ void fsim_rl_encode8(fsim_rl *rl, fsim_obs8 *obs);
  * read in v3 too (the contract test does). */
 void fsim_rl_encode3(fsim_rl *rl, fsim_obs3 *obs);
 void fsim_rl_mask3(fsim_rl *rl, uint8_t *mask);
+/* The v3 per-operation masks (FactorioRL `ParameterizedEnv.operation_masks`):
+ * RL3_OPERATIONS rows of RL3_ARG_WIDTH, row o operation o's legal values of
+ * each argument dimension (target, placement, direction, item, amount). */
+void fsim_rl_opmask3(fsim_rl *rl, uint8_t *masks);
 /* The target argument's domain, in order: handle of target k+1. Returns the
  * count (at most `cap`). */
 int32_t fsim_rl_targets(fsim_rl *rl, int32_t *handles, int32_t cap);

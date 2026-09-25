@@ -52,8 +52,12 @@ static int32_t rl3_item_slot(int32_t item) {
 #define OP_CANCEL 20
 #define OP_WAIT 21
 /* v3 only: hand-mine the resource tile under placement slot p, count from the
- * amount dimension (FactorioRL catalog.PARAMETERIZED_V3's `mine_tile`). */
+ * amount dimension (FactorioRL catalog.PARAMETERIZED_V3's `mine_tile`); take
+ * what a burner's fuel slot holds (`take_fuel`); declare construction done,
+ * which runs the verification now and ends the episode (`finish`). */
 #define OP_MINE_TILE 22
+#define OP_TAKE_FUEL 23
+#define OP_FINISH 24
 
 static const int32_t TRANSFER_AMOUNTS[3] = {1, 5, 20};
 
@@ -146,6 +150,10 @@ typedef struct {
     int32_t row_legal_count;
     int32_t mineable[RL3_PLACEMENTS];
     int32_t mineable_count;
+    /* v3: row k's entity (visible rows; -1 remembered), and the visible
+     * resource tile whose handle it shares (a pile over the tile), or -1. */
+    int32_t row_entity[RL3_MAX_ENTITIES];
+    int32_t row_tile[RL3_MAX_ENTITIES];
 } rl_domains;
 
 /* The argument domains under action space `space` (v1, v2 or v3). */
@@ -174,6 +182,14 @@ static void rl_domains_build(const fsim_rl *rl, rl_domains *d, int32_t space) {
                          can_reach(env, 1, env->seen[rows[k].index].entity);
                 d->row_legal[k] = ok;
                 d->row_legal_count += ok;
+                d->row_entity[k] = rows[k].remembered ? -1 : env->seen[rows[k].index].entity;
+                d->row_tile[k] = -1;
+                if (!rows[k].remembered)
+                    for (int32_t j = 0; j < env->tile_count; j++)
+                        if (env->tiles[j].handle == d->targets[d->target_count - 1]) {
+                            d->row_tile[k] = j;
+                            break;
+                        }
             }
         }
     } else {
@@ -307,57 +323,286 @@ void fsim_rl_mask(fsim_rl *rl, uint8_t *mask) {
     for (int k = 0; k <= 3; k++) mask[offset + k] = 1;
 }
 
-/* The v3 mask (RL3_MASK_SIZE bytes), whatever the env's action space.
- * Mirrors `ParameterizedEnv(profile="v3").action_masks`: an operation is legal
- * when `FactorioEnv.action_masks` allows it, it can be decoded, and every
- * argument dimension it uses has a legal value -- so a verb that needs a
- * target is masked when the table has no row. */
-void fsim_rl_mask3(fsim_rl *rl, uint8_t *mask) {
-    rl_domains d;
-    rl_domains_build(rl, &d, ACTION_SPACE_V3);
-    memset(mask, 0, RL3_MASK_SIZE);
-    int rows = d.visible_count > 0 && d.row_legal_count > 0;
-    int has_items = rl_any(d.held);
-    int has_sources = rl_any(d.source);
-    /* The item dimension offers ITEMS_V3 only: an item outside it (a wall) can
-     * make the domain non-empty and still leave the dimension with nothing. */
-    int item_dim = 0;
-    for (int k = 0; k < RL3_ITEMS; k++) {
-        int32_t item = RL3_ITEM_IDS[k];
-        if (item != IT_NONE && (d.held[item] || d.source[item])) item_dim = 1;
+/* ------------------------------------------------------------------ v3 masks
+ *
+ * Per operation, which value of each argument dimension is legal: FactorioRL's
+ * `ParameterizedEnv.operation_masks` (user decision "v3 masks: per operation",
+ * option C), from the same information the observation shows -- item totals,
+ * the free slot count, each record's contents, fuel and output -- and the
+ * same rules (`factoriorl.inventory_rules`, held to the engine by
+ * tools/probe_inventory.py). A value is legal when some whole argument
+ * combination holding it is accepted; an operation when it has one. A
+ * dimension an operation does not read, and every dimension of an illegal
+ * one, offers only its sentinel. */
+
+#define RL3_DIM_TARGET 0
+#define RL3_DIM_PLACEMENT (RL3_TARGETS + 1)
+#define RL3_DIM_DIRECTION (RL3_DIM_PLACEMENT + RL3_PLACEMENTS + 1)
+#define RL3_DIM_ITEM (RL3_DIM_DIRECTION + 5)
+#define RL3_DIM_AMOUNT (RL3_DIM_ITEM + RL3_ITEMS + 1)
+#define RL3_MAIN_SLOTS 80           /* inventory_rules.MAIN_SLOTS */
+#define RL3_SOURCE_CAPACITY 54      /* inventory_rules.SOURCE_CAPACITY */
+
+/* inventory_rules.slots_of: whole stacks, and one slot for an item outside
+ * ITEMS_V3 (whose stack size the rules do not hold). */
+static int32_t rl3_slots_of(int32_t item, int32_t count) {
+    if (count <= 0) return 0;
+    if (!rl3_item_slot(item)) return 1;
+    return (count + STACK_SIZE[item] - 1) / STACK_SIZE[item];
+}
+
+/* inventory_rules.room over item totals `held` (IT_COUNT entries). */
+static int32_t rl3_room(const int32_t *held, int32_t slots, int32_t item, int32_t per_slot) {
+    if (!rl3_item_slot(item)) return 0;
+    int32_t size = per_slot ? per_slot : STACK_SIZE[item];
+    int32_t others = 0;
+    for (int32_t it = 1; it < IT_COUNT; it++)
+        if (it != item) others += rl3_slots_of(it, held[it]);
+    int32_t room = size * (slots - others) - held[item];
+    return room > 0 ? room : 0;
+}
+
+static int rl3_fuel_item_ok(int32_t item) { return item == IT_COAL || item == IT_WOOD; }
+static int rl3_smeltable(int32_t item) {
+    return item == IT_IRON_ORE || item == IT_COPPER_ORE || item == IT_STONE;
+}
+
+/* A one-slot inventory holding `stack`, as the record shows it. */
+static void rl3_slot_totals(const fsim_stack *stack, int32_t *held) {
+    memset(held, 0, sizeof(int32_t) * IT_COUNT);
+    if (stack->count > 0) held[stack->item] = stack->count;
+}
+
+/* inventory_rules.accepts: a give of `item` moves at least one. */
+static int rl3_accepts(const fsim_entity *e, int32_t item) {
+    int32_t held[IT_COUNT];
+    if (e->kind == K_CHEST) {
+        memset(held, 0, sizeof(held));
+        for (int i = 0; i < FSIM_CHEST_SLOTS; i++)
+            if (e->chest[i].count > 0) held[e->chest[i].item] += e->chest[i].count;
+        return rl3_room(held, FSIM_CHEST_SLOTS, item, 0) >= 1;
     }
-    for (int op = 0; op < RL3_OPERATIONS; op++) {
-        int legal;
-        switch (op) {
-        case OP_PLACE_AT: legal = d.placement_count > 0 && has_items && item_dim; break;
-        case OP_MINE_AT: case OP_ROTATE_AT: case OP_ROTATE_REVERSE: legal = rows; break;
-        case OP_GIVE_TO: legal = rows && has_items && item_dim; break;
-        case OP_TAKE_FROM: legal = rows && has_sources && item_dim; break;
-        case OP_SET_RECIPE: case OP_CRAFT: case OP_CANCEL: legal = 0; break;
-        case OP_MINE_TILE: legal = d.mineable_count > 0; break;
-        default: legal = 1; break;
+    if (e->kind == K_FURNACE || e->kind == K_DRILL || e->kind == K_INSERTER) {
+        if (rl3_fuel_item_ok(item)) {
+            rl3_slot_totals(&e->fuel, held);
+            if (rl3_room(held, 1, item, 0) >= 1) return 1;
         }
+        if (e->kind != K_FURNACE) return 0;
+        if (rl3_smeltable(item)) {
+            rl3_slot_totals(&e->source, held);
+            if (rl3_room(held, 1, item, RL3_SOURCE_CAPACITY) >= 1) return 1;
+        }
+        rl3_slot_totals(&e->result, held);
+        return rl3_room(held, 1, item, 0) >= 1;
+    }
+    return 0;
+}
+
+/* inventory_rules.holds: what the inventories a transfer reads hold. */
+static int32_t rl3_holds(const fsim_entity *e, int32_t item) {
+    int32_t n = 0;
+    if (e->kind == K_CHEST) {
+        for (int i = 0; i < FSIM_CHEST_SLOTS; i++)
+            if (e->chest[i].item == item) n += e->chest[i].count;
+        return n;
+    }
+    if (e->kind == K_FURNACE || e->kind == K_DRILL || e->kind == K_INSERTER)
+        if (e->fuel.count > 0 && e->fuel.item == item) n += e->fuel.count;
+    if (e->kind == K_FURNACE) {
+        if (e->source.count > 0 && e->source.item == item) n += e->source.count;
+        if (e->result.count > 0 && e->result.item == item) n += e->result.count;
+    }
+    return n;
+}
+
+/* inventory_rules.fuel_item, or IT_NONE. */
+static int32_t rl3_fuel_item(const fsim_entity *e) {
+    if (e->kind != K_FURNACE && e->kind != K_DRILL && e->kind != K_INSERTER) return IT_NONE;
+    return e->fuel.count > 0 ? e->fuel.item : IT_NONE;
+}
+
+/* An item the character can place: it has an entity (inventory_rules.PLACES)
+ * and its recipe is enabled (the observation's `recipes`: the simulator's
+ * base recipes, and steam power once researched -- none of which it has an
+ * item for). */
+static int rl3_placeable(int32_t item) {
+    switch (item) {
+    case IT_STONE_FURNACE: case IT_TRANSPORT_BELT: case IT_WOODEN_CHEST:
+    case IT_BURNER_DRILL: case IT_BURNER_INSERTER: return 1;
+    default: return 0;   /* small-electric-pole: no enabled recipe */
+    }
+}
+
+typedef struct {
+    rl_domains d;
+    int32_t targets;
+    int32_t held[IT_COUNT];
+    int32_t room[IT_COUNT];      /* the main inventory's, per item */
+    int can_mine;
+} rl3_facts;
+
+static void rl3_facts_build(const fsim_rl *rl, rl3_facts *f) {
+    const fsim_env *env = rl->env;
+    rl_domains_build(rl, &f->d, ACTION_SPACE_V3);
+    f->targets = f->d.target_count < RL3_TARGETS ? f->d.target_count : RL3_TARGETS;
+    memset(f->held, 0, sizeof(f->held));
+    for (int i = 0; i < FSIM_MAIN_SLOTS; i++)
+        if (env->main[i].count > 0) f->held[env->main[i].item] += env->main[i].count;
+    for (int32_t it = 0; it < IT_COUNT; it++)
+        f->room[it] = rl3_room(f->held, RL3_MAIN_SLOTS, it, 0);
+    /* The mod refuses a mine while one runs, and with no main slot free. */
+    int busy = 0;
+    for (int32_t i = 0; i < FSIM_MAX_INFLIGHT; i++) {
+        const fsim_inflight *q = &env->inflight[i];
+        if (q->used && !q->terminal && q->verb == V_MINE) busy = 1;
+    }
+    f->can_mine = !busy && empty_slots(env) > 0;
+}
+
+/* Visible, within reach, and not a pile sharing a resource tile's handle. */
+static int rl3_reachable(const rl3_facts *f, int32_t k) {
+    return f->d.row_legal[k] && f->d.row_tile[k] < 0;
+}
+
+/* Row `op` of the per-operation masks; returns whether the op is legal. */
+static int rl3_op_row(const fsim_rl *rl, const rl3_facts *f, int32_t op, uint8_t *row) {
+    const fsim_env *env = rl->env;
+    const rl_domains *d = &f->d;
+    memset(row, 0, RL3_ARG_WIDTH);
+    row[RL3_DIM_TARGET] = row[RL3_DIM_PLACEMENT] = row[RL3_DIM_DIRECTION] = 1;
+    row[RL3_DIM_ITEM] = row[RL3_DIM_AMOUNT] = 1;
+    if (op < 12 || op == OP_WAIT || op == OP_FINISH) return 1;
+    uint8_t w[RL3_ARG_WIDTH];
+    memset(w, 0, sizeof(w));
+    int legal = 0;
+    switch (op) {
+    case OP_PLACE_AT: {
+        int items = 0, slots = 0;
+        for (int32_t k = 0; k < RL3_ITEMS; k++) {
+            int32_t it = RL3_ITEM_IDS[k];
+            if (it != IT_NONE && f->held[it] > 0 && rl3_placeable(it)) {
+                w[RL3_DIM_ITEM + 1 + k] = 1;
+                items = 1;
+            }
+        }
+        for (int32_t k = 0; k < RL3_PLACEMENTS; k++)
+            if (d->placement_legal[k]) {
+                w[RL3_DIM_PLACEMENT + 1 + k] = 1;
+                slots = 1;
+            }
+        for (int k = 1; k <= 4; k++) w[RL3_DIM_DIRECTION + k] = 1;
+        legal = items && slots;
+        break;
+    }
+    case OP_MINE_AT:
+        if (!f->can_mine) break;
+        for (int32_t k = 0; k < f->targets; k++) {
+            if (d->remembered[k]) continue;
+            int ok;
+            if (d->row_tile[k] >= 0) {
+                /* The resource the shared handle resolves to: resource reach. */
+                const fsim_resource *res = &env->resources[env->tiles[d->row_tile[k]].resource];
+                ok = centre_distance(env->char_pos, resource_pos(res)) <= RESOURCE_REACH;
+            } else {
+                ok = d->row_legal[k] && env->entities[d->row_entity[k]].kind != K_PILE;
+            }
+            if (ok) {
+                w[RL3_DIM_TARGET + 1 + k] = 1;
+                legal = 1;
+            }
+        }
+        break;
+    case OP_ROTATE_AT: case OP_ROTATE_REVERSE:
+        for (int32_t k = 0; k < f->targets; k++) {
+            if (!rl3_reachable(f, k)) continue;
+            int32_t kind = env->entities[d->row_entity[k]].kind;
+            if (kind == K_BELT || kind == K_INSERTER || kind == K_DRILL) {
+                w[RL3_DIM_TARGET + 1 + k] = 1;
+                legal = 1;
+            }
+        }
+        break;
+    case OP_GIVE_TO: case OP_TAKE_FROM:
+        for (int32_t k = 0; k < f->targets; k++) {
+            if (!rl3_reachable(f, k)) continue;
+            const fsim_entity *e = &env->entities[d->row_entity[k]];
+            for (int32_t j = 0; j < RL3_ITEMS; j++) {
+                int32_t it = RL3_ITEM_IDS[j];
+                if (it == IT_NONE) continue;
+                int ok = op == OP_GIVE_TO
+                    ? f->held[it] > 0 && rl3_accepts(e, it)
+                    : d->source[it] && rl3_holds(e, it) > 0 && f->room[it] >= 1;
+                if (ok) {
+                    w[RL3_DIM_TARGET + 1 + k] = 1;
+                    w[RL3_DIM_ITEM + 1 + j] = 1;
+                    legal = 1;
+                }
+            }
+        }
+        if (legal)
+            for (int k = 1; k <= 3; k++) w[RL3_DIM_AMOUNT + k] = 1;
+        break;
+    case OP_MINE_TILE:
+        if (!f->can_mine) break;
+        for (int32_t k = 0; k < RL3_PLACEMENTS; k++)
+            if (d->mineable[k]) {
+                w[RL3_DIM_PLACEMENT + 1 + k] = 1;
+                legal = 1;
+            }
+        if (legal)
+            for (int k = 1; k <= 3; k++) w[RL3_DIM_AMOUNT + k] = 1;
+        break;
+    case OP_TAKE_FUEL:
+        for (int32_t k = 0; k < f->targets; k++) {
+            if (!rl3_reachable(f, k)) continue;
+            int32_t fuel = rl3_fuel_item(&env->entities[d->row_entity[k]]);
+            if (fuel != IT_NONE && f->room[fuel] >= 1) {
+                w[RL3_DIM_TARGET + 1 + k] = 1;
+                legal = 1;
+            }
+        }
+        if (legal)
+            for (int k = 1; k <= 3; k++) w[RL3_DIM_AMOUNT + k] = 1;
+        break;
+    default:
+        break;   /* set_recipe_at, craft_recipe, cancel_request: no dimension */
+    }
+    if (!legal) return 0;
+    /* The dimensions the op reads take its values, sentinel off; the rest
+     * keep the sentinel alone. */
+    static const int32_t starts[5] = {RL3_DIM_TARGET, RL3_DIM_PLACEMENT, RL3_DIM_DIRECTION,
+                                      RL3_DIM_ITEM, RL3_DIM_AMOUNT};
+    static const int32_t sizes[5] = {RL3_TARGETS + 1, RL3_PLACEMENTS + 1, 5, RL3_ITEMS + 1, 4};
+    for (int dim = 0; dim < 5; dim++) {
+        int any = 0;
+        for (int32_t k = 1; k < sizes[dim]; k++) any |= w[starts[dim] + k];
+        if (!any) continue;
+        memcpy(row + starts[dim], w + starts[dim], (size_t)sizes[dim]);
+    }
+    return 1;
+}
+
+void fsim_rl_opmask3(fsim_rl *rl, uint8_t *masks) {
+    rl3_facts f;
+    rl3_facts_build(rl, &f);
+    for (int32_t op = 0; op < RL3_OPERATIONS; op++)
+        rl3_op_row(rl, &f, op, masks + op * RL3_ARG_WIDTH);
+}
+
+/* The v3 mask (RL3_MASK_SIZE bytes), whatever the env's action space:
+ * `ParameterizedEnv.action_masks` under v3 -- the operations that have a
+ * legal combination, then per argument dimension the union of their rows. */
+void fsim_rl_mask3(fsim_rl *rl, uint8_t *mask) {
+    rl3_facts f;
+    rl3_facts_build(rl, &f);
+    uint8_t row[RL3_ARG_WIDTH];
+    memset(mask, 0, RL3_MASK_SIZE);
+    for (int32_t op = 0; op < RL3_OPERATIONS; op++) {
+        int legal = rl3_op_row(rl, &f, op, row);
         mask[op] = (uint8_t)legal;
+        if (!legal) continue;
+        for (int32_t k = 0; k < RL3_ARG_WIDTH; k++) mask[RL3_OPERATIONS + k] |= row[k];
     }
-    int32_t offset = RL3_OPERATIONS;
-    mask[offset] = 1;
-    for (int32_t k = 0; k < d.target_count && k < RL3_TARGETS; k++)
-        mask[offset + 1 + k] = (uint8_t)d.row_legal[k];
-    offset += RL3_TARGETS + 1;
-    mask[offset] = 1;
-    /* One dimension for place_at's tile and mine_tile's: the union. */
-    for (int32_t k = 0; k < RL3_PLACEMENTS; k++)
-        mask[offset + 1 + k] = (uint8_t)(d.placement_legal[k] || d.mineable[k] != 0);
-    offset += RL3_PLACEMENTS + 1;
-    for (int k = 0; k <= 4; k++) mask[offset + k] = 1;
-    offset += 5;
-    mask[offset] = 1;
-    for (int k = 0; k < RL3_ITEMS; k++) {
-        int32_t item = RL3_ITEM_IDS[k];
-        mask[offset + 1 + k] = (uint8_t)(item != IT_NONE && (d.held[item] || d.source[item]));
-    }
-    offset += RL3_ITEMS + 1;
-    for (int k = 0; k <= 3; k++) mask[offset + k] = 1;
 }
 
 /* v3 decode for ops 12..17 (moves, wait and the undecodable three are handled
@@ -393,6 +638,21 @@ static int32_t rl_decode3(fsim_rl *rl, const int32_t *v, fsim_action *out) {
         out->handle = d.mineable[placement - 1];
         out->count = TRANSFER_AMOUNTS[amount - 1];
         return 0;
+    case OP_TAKE_FUEL: {
+        /* `FactorioEnv._fuel_item`: the visible row's fuel slot item, from
+         * the record, or a failure when it holds none. */
+        if (target < 1 || target > targets) return 1;
+        if (amount < 1 || amount > 3) return 1;
+        if (!d.row_legal[target - 1]) return 1;
+        int32_t fuel = rl3_fuel_item(&rl->env->entities[d.row_entity[target - 1]]);
+        if (fuel == IT_NONE) return 1;
+        out->verb = V_TRANSFER;
+        out->from_handle = d.targets[target - 1];
+        out->to_handle = 0;
+        out->item = fuel;
+        out->count = TRANSFER_AMOUNTS[amount - 1];
+        return 0;
+    }
     default:
         return 1;
     }
@@ -456,6 +716,9 @@ int32_t fsim_rl_decode(fsim_rl *rl, const int32_t *v, fsim_action *out) {
     }
     if (op == OP_WAIT) return 0;
     if (op == OP_SET_RECIPE || op == OP_CRAFT || op == OP_CANCEL) return 1;
+    /* `finish` takes no argument and is always legal; fsim_rl_step runs it,
+     * and as an action it is no world step. */
+    if (rl->task.action_space == ACTION_SPACE_V3 && op == OP_FINISH) return 0;
     if (rl->task.action_space == ACTION_SPACE_V3) return rl_decode3(rl, v, out);
 
     rl_domains d;
@@ -773,6 +1036,9 @@ static void rl_encode_into(fsim_rl *rl, rl_fields *obs) {
         }
         obs->self_[11] = (float)((double)refused / (double)env->event_count);
     }
+    if (obs->v3)
+        obs->self_[RL_SELF_FEATURES] =
+            (float)((double)empty_slots(env) / (double)FSIM_MAIN_SLOTS);
     const int32_t *item_ids = obs->v3 ? RL3_ITEM_IDS : RL_ITEM_IDS;
     const int32_t item_count = obs->v3 ? RL3_ITEMS : RL_ITEMS;
     for (int k = 0; k < item_count; k++) {
@@ -1044,7 +1310,50 @@ static void rl_verify(fsim_rl *rl) {
     rl->verified_output = output < sourced ? output : sourced;
 }
 
+/* `finish` (v3): FactorioRL's `FactorioEnv.finish`. No world step; the
+ * verification window runs now, as when the budget runs out, and the episode
+ * terminates on it, the transition scored as `run_verification` scores its
+ * own: the verifier's normalised output, and the terminal shaping terms. A
+ * task without a window ends on its success condition as it stands. */
+static double rl_finish(fsim_rl *rl) {
+    rl->decode_failure = 0;
+    rl->steps++;
+    double reward;
+    int succeeded;
+    if (rl->task.task == TASK_CONSTRUCT_SMELTING_LINE && !rl->verified) {
+        memset(rl->components, 0, sizeof(rl->components));
+        rl_verify(rl);
+        double score = rl->verified_output / VERIFY_TARGET;
+        rl->components[0] = score < 1.0 ? score : 1.0;
+        reward = rl->components[0];
+        succeeded = rl_succeeded(rl);
+    } else {
+        succeeded = rl_succeeded(rl);
+        reward = rl_rewards(rl, succeeded);
+    }
+    int shaping = rl->task.shaping;
+    if (shaping) {
+        double parts[2];
+        double shaped = rl_shaping(rl, shaping, 1, parts);
+        int32_t at = rl->task.task == TASK_CONSTRUCT_SMELTING_LINE ? 1 : 3;
+        if (shaping == SHAPING_BOTH) {
+            rl->components[at] = parts[0];
+            rl->components[at + 1] = parts[1];
+        } else {
+            rl->components[at] = shaped;
+        }
+        reward += shaped;
+    }
+    rl->reward = reward;
+    rl->terminated = 1;
+    rl->truncated = 0;
+    rl->success = succeeded;
+    rl->done = 1;
+    return reward;
+}
+
 double fsim_rl_step(fsim_rl *rl, const int32_t *vector) {
+    if (rl->task.action_space == ACTION_SPACE_V3 && vector[0] == OP_FINISH) return rl_finish(rl);
     fsim_action action;
     rl->decode_failure = fsim_rl_decode(rl, vector, &action);
     if (rl->decode_failure) rl->decode_failures++;

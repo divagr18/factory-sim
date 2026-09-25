@@ -24,6 +24,17 @@ The union masks the environment supplies are the only runtime input the head
 needs; which operation reads which argument is a static table of the catalog.
 So a policy exported from here runs unchanged against FactorioRL's real-engine
 environment, whose `action_masks()` is the same flat 201-entry vector.
+
+**v3: a mask per operation** (user decision "v3 masks: per operation", option
+C). `action_space="v3"` is `MultiDiscrete[25, 97, 226, 5, 19, 4]` over the v3
+tensors, and its environment also supplies `op_masks` (`RlEnv.op_masks()`,
+FactorioRL `ParameterizedEnv.operation_masks`): per operation, its own legal
+values of each argument dimension. Given them, the arguments are drawn under
+the sampled operation's row instead of the union, and `evaluate` scores a
+stored action under the row of the operation it stores -- the same
+conditional mask it was sampled under, which is what keeps the PPO ratio the
+ratio of the two policies' probabilities of that action. Without them the head
+is exactly what it was.
 """
 
 from __future__ import annotations
@@ -39,6 +50,10 @@ NVEC = (22, 33, 122, 5, 15, 4)
 ARG_NVEC = NVEC[1:]
 OPS = NVEC[0]
 MASKED = -1e8
+#: v3 (FactorioRL parameterized-v3): v1's operations, `mine_tile`,
+#: `take_fuel` and `finish`, over the 96-row table and the 15x15 window.
+NVEC3 = (25, 97, 226, 5, 19, 4)
+_MINE_TILE, _TAKE_FUEL = 22, 23
 
 #: parameterized-v1: which of (target, placement, direction, item, amount)
 #: each operation reads. Moves (0-11), set_recipe/craft/cancel (18-20, never
@@ -46,13 +61,17 @@ MASKED = -1e8
 _PLACE, _MINE, _ROTATE, _ROTATE_REVERSE, _GIVE, _TAKE = 12, 13, 14, 15, 16, 17
 
 
-def argument_uses() -> torch.Tensor:
-    uses = torch.zeros(OPS, len(ARG_NVEC), dtype=torch.bool)
+def argument_uses(action_space: str = "v1") -> torch.Tensor:
+    ops = NVEC3[0] if action_space == "v3" else OPS
+    uses = torch.zeros(ops, len(ARG_NVEC), dtype=torch.bool)
     uses[_PLACE, [1, 2, 3]] = True
     for op in (_MINE, _ROTATE, _ROTATE_REVERSE):
         uses[op, 0] = True
     for op in (_GIVE, _TAKE):
         uses[op, [0, 3, 4]] = True
+    if action_space == "v3":
+        uses[_MINE_TILE, [1, 4]] = True  # a resource tile's slot, and a count
+        uses[_TAKE_FUEL, [0, 4]] = True  # a burner's row, and a count
     return uses
 
 
@@ -75,8 +94,20 @@ class Extractor(nn.Module):
     Entity and vector encoders are `FactorioExtractor`'s.
     """
 
-    def __init__(self, features_dim: int = 256) -> None:
+    def __init__(
+        self,
+        features_dim: int = 256,
+        entity_features: int = 16,
+        vector_dim: int = 12 + 14 + 12,
+        crop: int = 13,
+    ) -> None:
+        """The defaults are v1's; v3 reads 32 features a row, a 13 + 18 + 30
+        vector and a 17x17 crop (the 15x15 window and its one-cell margin)."""
         super().__init__()
+        #: The crop: `crop` cells a side from grid row and column `crop_start`,
+        #: centred on the character's cell 32.
+        self.crop: int = crop
+        self.crop_start: int = 32 - crop // 2
         self.grid_net = nn.Sequential(
             nn.Conv2d(6, 32, kernel_size=4, stride=4),
             nn.ReLU(),
@@ -86,10 +117,12 @@ class Extractor(nn.Module):
             nn.Linear(64 * 8 * 8, 128),
             nn.ReLU(),
         )
-        self.crop_net = nn.Sequential(nn.Flatten(), nn.Linear(6 * 13 * 13, 128), nn.ReLU())
-        self.entity_net = nn.Sequential(nn.Linear(16, 64), nn.ReLU(), nn.Linear(64, 64), nn.ReLU())
+        self.crop_net = nn.Sequential(nn.Flatten(), nn.Linear(6 * crop * crop, 128), nn.ReLU())
+        self.entity_net = nn.Sequential(
+            nn.Linear(entity_features, 64), nn.ReLU(), nn.Linear(64, 64), nn.ReLU()
+        )
         self.vector_net = nn.Sequential(
-            nn.Linear(12 + 14 + 12, 128), nn.ReLU(), nn.Linear(128, 128), nn.ReLU()
+            nn.Linear(vector_dim, 128), nn.ReLU(), nn.Linear(128, 128), nn.ReLU()
         )
         self.head = nn.Sequential(
             nn.Linear(128 + 128 + 64 + 64 + 128, features_dim),
@@ -156,7 +189,8 @@ class Extractor(nn.Module):
         for index, layer in enumerate(self.grid_net):
             if index >= 1:
                 h = layer(h)
-        crop = grid[:, :, 26:39, 26:39].to(self.input_dtype).div_(255.0)
+        a, b = self.crop_start, self.crop_start + self.crop
+        crop = grid[:, :, a:b, a:b].to(self.input_dtype).div_(255.0)
         return h, crop
 
     def forward(self, grid, entities, entity_mask, self_, inventory, goal):
@@ -176,7 +210,8 @@ class Extractor(nn.Module):
                 grid = torch.round(grid * 255.0).to(self.input_dtype)
             grid = grid.div_(255.0)
             g = self._grid(grid)
-            crop_raw = grid[:, :, 26:39, 26:39]
+            a, b = self.crop_start, self.crop_start + self.crop
+            crop_raw = grid[:, :, a:b, a:b]
         c = self.crop_net(crop_raw)
         e = self.entity_net(entities)
         mask = entity_mask.float().unsqueeze(-1)
@@ -199,15 +234,16 @@ def _layer(i: int, o: int, std: float = 2**0.5) -> nn.Linear:
     return layer
 
 
-def _layout() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Where each of the 179 argument entries sits in a (5, 122) padded grid.
+def _layout(arg_nvec=ARG_NVEC) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Where each of the 179 argument entries (351 under v3) sits in a (5, 122)
+    padded grid ((5, 226) under v3).
 
-    Returns the flat scatter index into 5 * 122, the argument dimension of
+    Returns the flat scatter index into 5 * width, the argument dimension of
     each entry, and which entries are a dimension's UNUSED sentinel (index 0).
     """
-    width = max(ARG_NVEC)
+    width = max(arg_nvec)
     index, dim, sentinel = [], [], []
-    for j, size in enumerate(ARG_NVEC):
+    for j, size in enumerate(arg_nvec):
         for k in range(size):
             index.append(j * width + k)
             dim.append(j)
@@ -307,21 +343,33 @@ class Policy(nn.Module):
     row of the entity table, so it is scored by a pointer head over the rows'
     embeddings, and its `placement` names a fixed tile of the 11x11 window, so
     it is scored by a small convolution over the grid crop whose central 11x11
-    cells are those tiles."""
+    cells are those tiles. "v3" is FactorioRL's parameterized-v3, v2's heads
+    over the v3 tensors: 96 rows, the 15x15 window from a 17x17 crop, and the
+    per-operation masks (see the module docstring)."""
 
     def __init__(self, features_dim: int = 256, action_space: str = "v1") -> None:
         super().__init__()
-        if action_space not in ("v1", "v2"):
+        if action_space not in ("v1", "v2", "v3"):
             raise ValueError(f"unknown action space {action_space!r}")
         self.action_space = action_space
-        self.v2: bool = action_space == "v2"
+        v3 = action_space == "v3"
+        nvec = NVEC3 if v3 else NVEC
+        ops = nvec[0]
+        arg_nvec = nvec[1:]
+        #: The pointer and placement heads (v2's, and v3's).
+        self.v2: bool = action_space in ("v2", "v3")
         self.features_dim: int = features_dim
-        self.rows: int = ROWS
+        self.rows: int = 96 if v3 else ROWS
         self.row_dim: int = ROW_DIM
-        self.crop: int = CROP
-        self.extractor = Extractor(features_dim)
+        self.crop: int = 17 if v3 else CROP
+        #: The placement window's side: the crop less its one-cell margin.
+        self.side: int = self.crop - 2
+        if v3:
+            self.extractor = Extractor(features_dim, 32, 13 + 18 + 30, self.crop)
+        else:
+            self.extractor = Extractor(features_dim)
         self.extractor.expose = self.v2
-        context = features_dim + OPS
+        context = features_dim + ops
         if self.v2:
             self.target_head = PointerHead(ROW_DIM, context)
             self.place_head = PlacementHead(context)
@@ -329,9 +377,9 @@ class Policy(nn.Module):
             # Placeholders, so TorchScript compiles the v2 branch; no parameters.
             self.target_head = _Unused()
             self.place_head = _Unused()
-        self.op_head = nn.Sequential(_layer(features_dim, 256), nn.ReLU(), _layer(256, OPS, 0.01))
+        self.op_head = nn.Sequential(_layer(features_dim, 256), nn.ReLU(), _layer(256, ops, 0.01))
         self.arg_head = nn.Sequential(
-            _layer(features_dim + OPS, 256), nn.ReLU(), _layer(256, sum(ARG_NVEC), 0.01)
+            _layer(features_dim + ops, 256), nn.ReLU(), _layer(256, sum(arg_nvec), 0.01)
         )
         #: Autoregressive tail: direction, item and amount scored *after* the
         #: target is known, conditioned on the row the policy chose. Five
@@ -342,21 +390,21 @@ class Policy(nn.Module):
         #: Conditional Action Trees (arXiv:2104.07294) handle the same shape of
         #: action; `train.py --autoregressive` turns it on.
         self.autoregressive: bool = False
-        self.tail_sizes: list[int] = list(ARG_NVEC[2:])
+        self.tail_sizes: list[int] = list(arg_nvec[2:])
         self.after_target = nn.Sequential(
-            _layer(context + ROW_DIM, 128), nn.ReLU(), _layer(128, sum(ARG_NVEC[2:]), 0.01)
+            _layer(context + ROW_DIM, 128), nn.ReLU(), _layer(128, sum(arg_nvec[2:]), 0.01)
         )
         #: Stands in for the row embedding when no target was named.
         self.absent_target = nn.Parameter(torch.zeros(ROW_DIM))
         self.value_head = nn.Sequential(_layer(features_dim, 256), nn.ReLU(), _layer(256, 1, 1.0))
-        index, dim, sentinel = _layout()
-        self.register_buffer("uses", argument_uses(), persistent=False)
+        index, dim, sentinel = _layout(arg_nvec)
+        self.register_buffer("uses", argument_uses(action_space), persistent=False)
         self.register_buffer("pad_index", index, persistent=False)
         self.register_buffer("pad_dim", dim, persistent=False)
         self.register_buffer("pad_sentinel", sentinel, persistent=False)
-        self.arg_sizes: list[int] = list(ARG_NVEC)
-        self.arg_width: int = max(ARG_NVEC)
-        self.ops: int = OPS
+        self.arg_sizes: list[int] = list(arg_nvec)
+        self.arg_width: int = max(arg_nvec)
+        self.ops: int = ops
         self.masked: float = MASKED
 
     def features(self, grid, entities, entity_mask, self_, inventory, goal):
@@ -370,7 +418,13 @@ class Policy(nn.Module):
         logits = self.op_head(features[:, : self.features_dim])
         return torch.where(op_mask, logits, torch.full_like(logits, self.masked)), op_mask
 
-    def _arg_parts(self, features: torch.Tensor, mask: torch.Tensor, op: torch.Tensor):
+    def _arg_parts(
+        self,
+        features: torch.Tensor,
+        mask: torch.Tensor,
+        op: torch.Tensor,
+        op_masks: torch.Tensor | None = None,
+    ):
         """Unscattered argument logits, their legality, and the op context.
 
         Split out from `_arguments` because the autoregressive tail rescores
@@ -380,10 +434,16 @@ class Policy(nn.Module):
 
         An argument the op does not read may only be its sentinel; one it does
         read may not be, while anything else in its dimension is legal.
-        Padding is masked. One pass for all five dimensions.
+        Padding is masked. One pass for all five dimensions. With `op_masks`
+        (B x ops x the argument widths), "legal" is the row of the operation
+        `op`, not the union the flat mask carries.
         """
         batch = features.shape[0]
-        seg = mask[:, self.ops :]  # B x 179
+        if op_masks is None:
+            seg = mask[:, self.ops :]  # B x 179
+        else:
+            width = op_masks.shape[2]
+            seg = op_masks.gather(1, op.view(batch, 1, 1).expand(batch, 1, width)).squeeze(1)
         used = self.uses[op][:, self.pad_dim]  # B x 179
         real = seg & ~self.pad_sentinel
         others = torch.zeros(batch, len(self.arg_sizes), device=seg.device, dtype=features.dtype)
@@ -439,7 +499,8 @@ class Policy(nn.Module):
         """Replace the target and placement segments with the v2 heads' scores.
 
         Segments of `flat`: target [0, 33), placement [33, 155), then
-        direction, item and amount. The sentinels (0 and 33) stay the MLP's.
+        direction, item and amount ([0, 97) and [97, 323) under v3). The
+        sentinels (0 and 33, or 0 and 97) stay the MLP's.
         """
         batch = features.shape[0]
         start = self.features_dim
@@ -448,9 +509,14 @@ class Policy(nn.Module):
         crop = features[:, start + width :].reshape(batch, 6, self.crop, self.crop)
         targets = self.target_head(rows, context)
         cells = self.place_head(crop, context)
-        # Grid rows are y and columns x; slot (dx + 5) * 11 + (dy + 5).
-        placements = cells.transpose(1, 2).reshape(batch, 121)
-        return torch.cat([flat[:, :1], targets, flat[:, 33:34], placements, flat[:, 155:]], dim=1)
+        # Grid rows are y and columns x; slot (dx + 5) * 11 + (dy + 5), and
+        # (dx + 7) * 15 + (dy + 7) under v3.
+        placements = cells.transpose(1, 2).reshape(batch, self.side * self.side)
+        t = self.rows + 1
+        rest = t + self.side * self.side + 1
+        return torch.cat(
+            [flat[:, :1], targets, flat[:, t : t + 1], placements, flat[:, rest:]], dim=1
+        )
 
     def act(
         self,
@@ -458,6 +524,7 @@ class Policy(nn.Module):
         mask: torch.Tensor,
         greedy: bool = False,
         epsilon: float = 0.0,
+        op_masks: torch.Tensor | None = None,
     ):
         """-> actions (B x 6, int64), log-probabilities (B).
 
@@ -466,6 +533,9 @@ class Policy(nn.Module):
         it -- measured, one action repeated for the last 200 decisions of an
         episode. Mnih et al. (2015) evaluated with an epsilon of 0.05 for the
         same reason. It has no effect unless `greedy`.
+
+        `op_masks`: v3's per-operation masks. The operation is drawn under the
+        flat mask's operation part, and the arguments under its own row.
         """
         op_logits, _ = self._op_logits(features, mask)
         if greedy:
@@ -474,7 +544,7 @@ class Policy(nn.Module):
         else:
             roll = torch.ones(op_logits.shape[0], device=op_logits.device, dtype=torch.bool)
             op = _gumbel_argmax(op_logits)
-        flat, allowed, context = self._arg_parts(features, mask, op)
+        flat, allowed, context = self._arg_parts(features, mask, op, op_masks)
         logits, _ = self._scatter(flat, allowed)
         if self.autoregressive:
             # Draw the target first, then score what may be done with it.
@@ -490,29 +560,47 @@ class Policy(nn.Module):
         arg_logp = torch.log_softmax(logits, -1).gather(2, args.unsqueeze(2)).squeeze(2)
         return torch.cat([op.unsqueeze(1), args], dim=1), logp + arg_logp.sum(1)
 
-    def head_logits(self, features: torch.Tensor, mask: torch.Tensor, op: torch.Tensor):
+    def head_logits(
+        self,
+        features: torch.Tensor,
+        mask: torch.Tensor,
+        op: torch.Tensor,
+        op_masks: torch.Tensor | None = None,
+    ):
         """-> operation logits and legality, argument logits and legality.
 
         What a KL against a frozen prior needs: the distributions themselves,
         not the log-probability of one action.
         """
         op_logits, op_mask = self._op_logits(features, mask)
-        flat, allowed, context = self._arg_parts(features, mask, op)
+        flat, allowed, context = self._arg_parts(features, mask, op, op_masks)
         if self.autoregressive:
             # No target has been chosen here, so the tail sees the stand-in.
             flat = self._retail(features, context, flat, torch.zeros_like(op))
         arg_logits, pad_mask = self._scatter(flat, allowed)
         return op_logits, op_mask, arg_logits, pad_mask
 
-    def evaluate(self, features: torch.Tensor, mask: torch.Tensor, actions: torch.Tensor):
-        """-> log-probabilities and entropies (B) of stored actions."""
+    def evaluate(
+        self,
+        features: torch.Tensor,
+        mask: torch.Tensor,
+        actions: torch.Tensor,
+        op_masks: torch.Tensor | None = None,
+    ):
+        """-> log-probabilities and entropies (B) of stored actions.
+
+        With `op_masks`, each action's arguments are scored under the row of
+        the operation it stores: the conditional mask `act` sampled them under,
+        so the PPO ratio compares like with like. The argument entropy is
+        likewise that of the stored operation's conditional distribution.
+        """
         op = actions[:, 0]
         op_logits, op_mask = self._op_logits(features, mask)
         op_logp = torch.log_softmax(op_logits, -1)
         logp = op_logp.gather(1, op.unsqueeze(1)).squeeze(1)
         zero = torch.zeros_like(op_logp)
         entropy = -torch.where(op_mask, op_logp.exp() * op_logp, zero).sum(-1)
-        flat, allowed, context = self._arg_parts(features, mask, op)
+        flat, allowed, context = self._arg_parts(features, mask, op, op_masks)
         if self.autoregressive:
             # Teacher forcing: score the tail under the target that was taken,
             # which is what makes the summed factors the joint log-probability.
@@ -529,16 +617,29 @@ class Exported(nn.Module):
 
     TorchScript, so FactorioRL can run it with torch alone and no import of
     this package. Inputs are the `local-v1` tensors, batched, as float32 (the
-    entity mask as any integer type) and the flat 201-entry mask as bool.
+    entity mask as any integer type) and the flat 201-entry mask as bool. A v3
+    policy takes the v3 tensors, the flat 376-entry mask, and the
+    per-operation masks (B x 25 x 351, bool) as `op_masks`.
     """
 
     def __init__(self, policy: Policy) -> None:
         super().__init__()
         self.policy = policy
 
-    def forward(self, grid, entities, entity_mask, self_, inventory, goal, mask, greedy: bool):
+    def forward(
+        self,
+        grid,
+        entities,
+        entity_mask,
+        self_,
+        inventory,
+        goal,
+        mask,
+        greedy: bool,
+        op_masks: torch.Tensor | None = None,
+    ):
         features = self.policy.features(grid, entities, entity_mask, self_, inventory, goal)
-        actions, _ = self.policy.act(features, mask, greedy)
+        actions, _ = self.policy.act(features, mask, greedy, 0.0, op_masks)
         return actions
 
 

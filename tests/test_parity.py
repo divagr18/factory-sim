@@ -109,7 +109,29 @@ def test_known_gaps_are_logistics_scenarios():
         "logistics_belt_rotate_and_mine", "logistics_belt_pickup",
         "logistics_inserter_fuel_exhaustion", "logistics_smelting_chain",
         "logistics_sideload_merge", "hand_mine_rules", "hand_mine_spills",
-        "hand_mine_contents", "hand_mine_build_over", "hand_mine_carried"}  # fmt: skip
+        "hand_mine_contents", "hand_mine_build_over", "hand_mine_carried",
+        "v3_take_fuel", "v3_finish"}  # fmt: skip
+
+
+SENSED = sorted(name for name, entry in INDEX.items() if entry.get("local_v3"))
+
+
+@pytest.mark.parametrize("name", SENSED)
+def test_the_local_v3_sensor(name):
+    """The simulator's `local-v3` observation, free-running each trace, against
+    the engine's own (FactorioRL record_parity_trace.py --sensor replayed the
+    same run under that sensor, and checked everything else identical)."""
+    header, records = read_trace(GOLDEN / f"{name}.jsonl.xz")
+    _, sensed = read_trace(GOLDEN / INDEX[name]["local_v3"]["trace"])
+    replay = Replay({**header, "observation_profile": "local-v3"})
+    actual = replay.reset()
+    for record, want in zip(records, sensed, strict=True):
+        if record["decision"] > 0:
+            action = record["transition"]["action"]
+            actual = replay.step(action["key"], action["arguments"])
+        expected = {**record, "observation": want["observation"]}
+        found = compare(expected, actual, parts=("observation",))
+        assert found is None, (record["decision"], found)
 
 
 @pytest.mark.parametrize("name", ["construct_smelting_line_reference", "masked_random_rollout"])

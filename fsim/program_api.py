@@ -29,11 +29,13 @@ one over the real game, and `play` runs a program on either.
 A task on the v3 profile (`TASK_PROFILES`; `belt_smelting`) gets `WorldV3`
 instead: the same verbs and queries over v3's tensors and action vector (a
 15x15 placement window, 96 entity rows, `ITEMS_V3`), plus `rotate`, the task's
-named public markers (`marker`) and belt lanes (`belt_lanes`), and `EntityV3`
-rows that carry what the v3 layout adds. Deliberately no pathfinding and no
-belt-routing helper: which tiles a line runs over is the problem the program
-has to solve, so the API offers the observation and one-decision actions and
-nothing that plans.
+named public markers (`marker`) and belt lanes (`belt_lanes`), `take_fuel` and
+`finish`, and `EntityV3` rows that carry what the v3 layout adds. A v3
+program's return is its `finish`: the verification window runs then, rather
+than after the rest of the budget is waited out (user decision, 2026-09-25).
+Deliberately no pathfinding and no belt-routing helper: which tiles a line
+runs over is the problem the program has to solve, so the API offers the
+observation and one-decision actions and nothing that plans.
 """
 
 from __future__ import annotations
@@ -67,7 +69,7 @@ PLACEMENT_RADIUS = 5
 PLACEMENT_RADIUS_V3 = 7
 OP_PLACE, OP_MINE, OP_GIVE, OP_TAKE, OP_WAIT = 12, 13, 16, 17, 21
 OP_ROTATE, OP_ROTATE_REVERSE = 14, 15
-OP_MINE_TILE = 22  # v3 only
+OP_MINE_TILE, OP_TAKE_FUEL, OP_FINISH = 22, 23, 24  # v3 only
 #: The action space each task's programs run under; unlisted tasks are v2.
 TASK_PROFILES = {
     "construct_smelting_line": "v2",
@@ -489,6 +491,28 @@ class WorldV3(World):
         index = self._marker_names.index(name)
         return slots[index] if index < len(slots) else None
 
+    def take_fuel(self, entity, amount: int) -> bool:
+        """Move `amount` (1, 5 or 20) of the fuel in `entity`'s fuel slot into the inventory.
+
+        What is burning stays in the machine and burns on; with room for only
+        part of it, what fits moves and the action counts as refused.
+        """
+        intent = f"take_fuel {_describe(entity)} x{amount}"
+        if amount not in AMOUNTS or isinstance(amount, bool):
+            return self._refuse(intent, "amount must be 1, 5 or 20")
+        row = self._row(entity)
+        if row is None:
+            return self._refuse(intent, "no such entity in the table")
+        vector = (OP_TAKE_FUEL, row + 1, 0, 0, 0, AMOUNTS[amount])
+        return self._act(intent, vector, "no fuel in its fuel slot, or out of reach")
+
+    def finish(self) -> bool:
+        """End the build phase now: the verification window runs at once and the episode ends.
+
+        Returning from `build` does the same.
+        """
+        return self._act("finish", (OP_FINISH, 0, 0, 0, 0, 0))
+
     def belt_lanes(self, entity) -> tuple[int, int] | None:
         """Items on a belt's lane 1 (left of travel) and lane 2, or None if not a belt."""
         row = self._row(entity)
@@ -577,15 +601,20 @@ def play(
     else:
         world = world_cls(backend, decision_budget, markers=markers)
     error = None
+    returned = False
     try:
         with _Watchdog(time_limit_s):
             build(world)
+        returned = True
     except ProgramTimeLimit:
         error = f"ProgramTimeLimit: ran past {time_limit_s:g} s"
     except BudgetExhausted:
         pass
     except Exception as exc:  # the program's own bug: recorded, and the episode still ends
         error = f"{type(exc).__name__}: {exc}"
+    # A v3 program's return is its `finish`, if it has a decision left for it.
+    if returned and isinstance(world, WorldV3) and not backend.done and world.decisions_left() > 0:
+        world.finish()
     success, verified_output = backend.finish(world._note_plate)
     return EpisodeResult(
         success=success,

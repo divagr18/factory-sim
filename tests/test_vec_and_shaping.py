@@ -184,6 +184,8 @@ def test_potential_matches_factoriorl_on_every_recorded_decision(name):
         decision_ticks=header["decision_ticks"],
         max_steps=header["max_decision_steps"],
         construction_tick_limit=header["construction_tick_limit"],
+        # A trace recorded under the v3 catalog steps v3 vectors.
+        **({"action_space": "v3"} if header.get("catalog") == "parameterized-v3" else {}),
     )
     expected = POTENTIALS[name]
     assert len(expected) == len(records)
