@@ -1039,8 +1039,12 @@ static void lane_take(fsim_lane *lane, int32_t at) {
  *   A boundary in force on a loop parts it at the seam as well, and so does
  *   breaking the loop open.
  *
- * Not measured, and chosen: the place in seg_order of pieces a loaded
- * (hidden) state leaves holding items (they move last, like a merge).
+ * Not measured: the place in seg_order of a segment a hidden-state load
+ * gives items the simulator did not have (it moves last, like a merge). The
+ * engine's order cannot be read (LuaTransportLine exposes nothing of it), and
+ * no check reaches this: a load changes belt contents only after they have
+ * differed from the recording (FactorioRL docs/sim-logistics.md, "A loaded
+ * state and the activation order"). What to do with it is open.
  */
 
 static int32_t DELAY_COUNT = 0;
@@ -1779,16 +1783,23 @@ static void seg_restart_touched(fsim_env *env, const uint8_t *touch, const int64
 /* ------------------------------------------------------------ boundaries
  *
  * FactorioRL docs/sim-logistics.md, "Fifth probe" (probe_logistics5 `bound`,
- * `dist`, `trig`, `trig2`, `trig3`). An entity working on a lane marks a
- * boundary in it, where its segment splits and merges stop:
+ * `dist`, `drill`, `loop3`, `trig`, `trig2`, `trig3`). An entity working on
+ * a lane marks a boundary in it, where its segment splits and merges stop:
  *
  * - Where: at the upstream edge of the belt holding the point R downstream
  *   of the downstream edge of the entity's belt, measured along the lane
- *   (a turn's lanes are 295 and 106 long): R = 640 for an inserter (its
- *   pickup, both lanes; its drop, the lane it drops on) and for a drill's
- *   output, 384 for a sideload, on the lane it lands on (the delays lie in
- *   618..657 and 362..401 on the 11 patterns of turns measured; no belt edge
- *   falls between). On a straight line: two belts and three downstream.
+ *   (a turn's lanes are 295 and 106 long) toward the front of its chain,
+ *   and none if the front comes first -- on a closed loop, its seam
+ *   (`loop3`: from the loop's front belt, or the belt behind it on the
+ *   outer lane of a 2 x 2 loop, no split; from the belt two behind, the
+ *   split). R is measured to lie in (618, 657] for an inserter (its pickup,
+ *   both lanes; its drop, the lane it drops on) and for a drill's output
+ *   (`drill`: 36 rigs of turns, independently of the inserters), and in
+ *   (362, 401] for a sideload, on the lane it lands on. No belt edge a lane
+ *   can reach lies strictly inside either interval (a 2 x 2 loop's six inner
+ *   lanes, 636, would, but the loop's front comes first), so any value in
+ *   them gives the same boundaries: 640 and 384. On a straight line: two
+ *   belts and three downstream.
  * - When: from the entity's first item on the lane -- a drop, a drill's
  *   output, a sideload arriving (a tick before the item reads) -- or, for an
  *   inserter picking up, from the first time it looks for an item there: it
@@ -1811,12 +1822,13 @@ static void seg_restart_touched(fsim_env *env, const uint8_t *touch, const int64
 #define BOUND_SIDELOAD 384
 
 /* The lane whose downstream edge is the boundary of an entity on lane `r`,
- * `reach` along the lane from `r`'s downstream edge, or -1. */
+ * `reach` along the lane from `r`'s downstream edge, or -1: the search does
+ * not go past the front of the chain, a closed loop's seam included. */
 static int32_t bnd_lane(const fsim_env *env, int32_t r, int32_t reach) {
     int32_t x = r, cum = 0;
     for (int32_t steps = 0; steps < FSIM_MAX_LANES; steps++) {
         int32_t nx = env->entities[x >> 1].lane_next[x & 1];
-        if (nx < 0 || nx == r) return -1;
+        if (nx < 0 || env->lane_pos[nx] + 1 != env->lane_pos[x]) return -1;
         cum += lane_length_of(env, nx);
         if (cum >= reach) return x;
         x = nx;

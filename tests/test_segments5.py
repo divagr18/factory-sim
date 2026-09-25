@@ -11,8 +11,9 @@ the same rigs here; every reading must agree on every tick. Families:
 - `change`, `feedchg`: turning and removing belts of young and merged lines,
   and of a feed near its sideload;
 - `loop`, `loop2`: closed loops, and where their seam is;
-- `bound`, `dist`: where attachments mark their boundaries, in many
-  geometries;
+- `bound`, `dist`, `drill`: where attachments mark their boundaries, in many
+  geometries, drills included;
+- `loop3`: 2 x 2 loops, where the boundary search meets the loop's front;
 - `trig`, `trig2`, `trig3`: what sets a boundary off, and boundaries close
   together.
 """
@@ -35,6 +36,8 @@ FAMILIES = (
     "loop2",
     "bound",
     "dist",
+    "drill",
+    "loop3",
     "trig",
     "trig2",
     "trig3",

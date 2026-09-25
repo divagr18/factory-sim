@@ -1,7 +1,8 @@
 """Replay FactorioRL's fifth logistics probe (tools/probe_logistics5.py) rigs.
 
 A rig there is data: a base tile and a list of timed operations (build a belt,
-chest or burner inserter, put an item on a belt, rotate or destroy an entity),
+chest, burner inserter or burner mining drill -- on iron ore the probe lays
+under it -- put an item on a belt, rotate or destroy an entity),
 which the probe ran in Factorio 2.0.60 and this module runs in the simulator.
 Each rig runs alone in a fresh world, at the probe's own tiles (the belt merge
 delay depends on the tile).
@@ -30,10 +31,18 @@ NAMES = {v: k for k, v in ITEM_IDS.items()}
 class Rig5:
     def __init__(self, rig: dict) -> None:
         self.rig = rig
-        self.sim = Sim(water=[])
-        self.sim.reset({"character": {"position": [0.5, 0.5]}})
-        self.env = self.sim.env
         self.bx, self.by = rig["base"]
+        # Ore under every drill the rig builds, as the probe creates it.
+        ore = []
+        for op in rig["ops"]:
+            if op[1] == "drill":
+                cx, cy = self.bx + op[3], self.by + op[4]
+                ore += [(cx + dx, cy + dy) for dx in (-1, 0) for dy in (-1, 0)]
+        self.sim = Sim(water=[])
+        self.sim.reset({"character": {"position": [0.5, 0.5]},
+                        "resources": [{"name": "iron-ore", "position": [x + 0.5, y + 0.5],
+                                       "amount": 5000} for x, y in ore]})  # fmt: skip
+        self.env = self.sim.env
         self.labels: dict[str, int] = {}
         self.belts: list[int] = []
         self.ins: list[int] = []
@@ -71,6 +80,15 @@ class Rig5:
                 lib.fsim_entity_insert(env, i, ITEM_IDS["coal"], coal)
             self.labels[label] = i
             self.ins.append(i)
+        elif kind == "drill":
+            # a burner mining drill at tile corner (dx, dy), on iron ore
+            dx, dy, d, coal = args
+            x, y = self.bx + dx, self.by + dy
+            index = lib.fsim_add_entity(env, lib.K_DRILL, x * 256, y * 256, d)
+            assert index >= 0, (self.rig["name"], x, y)
+            if coal:
+                lib.fsim_entity_insert(env, index, ITEM_IDS["coal"], coal)
+            self.labels[label] = index
         elif kind == "put":
             lane, pos, item = args
             lib.fsim_refresh(env)

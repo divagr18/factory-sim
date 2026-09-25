@@ -914,8 +914,9 @@ class Sim:
         is in its cycle is read back from its drawn hand (`_load_hand`). What
         the engine does not export -- which tile a drill is on in its cycle,
         whether it has delivered to its target before, whether a furnace has
-        consumed its current ingredient, which belt items moved last tick --
-        stays the simulator's.
+        consumed its current ingredient, which belt items moved last tick,
+        belt-line segments (membership, timers, boundaries set off, sleep and
+        activation order) -- stays the simulator's.
         Entities are matched by name and position; a world whose entities
         differ is not the same world, and the comparison after the step says
         so.
