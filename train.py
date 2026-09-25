@@ -1106,6 +1106,7 @@ def main(argv=None) -> int:
     )
     steps = 0
     decisions = 0
+    skipped_steps = 0
     unfinished = 0.0
     spread = 0.0
     start = time.perf_counter()
@@ -1351,8 +1352,14 @@ def main(argv=None) -> int:
                         loss = loss + rho * prior_kl
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
-                nn.utils.clip_grad_norm_(policy.parameters(), args.max_grad_norm)
-                optimizer.step()
+                norm = nn.utils.clip_grad_norm_(policy.parameters(), args.max_grad_norm)
+                if torch.isfinite(norm):
+                    optimizer.step()
+                else:
+                    # One non-finite gradient would write NaN into every
+                    # weight, and the run would carry on as garbage. Skipped
+                    # and counted instead (`skipped_steps`).
+                    skipped_steps += 1
                 for _ in range(args.critic_updates - 1 if critic_opt is not None else 0):
                     # SAO's decoupled frequency: the critic sees the same
                     # minibatch again on the features the trunk already
@@ -1402,6 +1409,7 @@ def main(argv=None) -> int:
             # This rollout's reward, shaping included: what the critic sees.
             "reward_mean": float(rew_buf.mean()),
             "finite": all(math.isfinite(v) for v in loss_means),
+            "skipped_steps": skipped_steps,
             **dict(zip(stats, loss_means, strict=True)),
         }
         if recent:
