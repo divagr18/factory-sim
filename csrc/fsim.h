@@ -166,6 +166,7 @@ typedef struct {
     int16_t pos;
     uint8_t item;
     uint8_t moved;        /* it moved in this tick's belt update */
+    uint8_t entered;      /* crossed this tick into a segment still to move: how far */
     int32_t id;           /* the simulator's own item number, not the engine's */
 } fsim_belt_item;
 
@@ -222,15 +223,24 @@ typedef struct {
     int32_t hand_x, hand_y;       /* held_stack_position less the position, 1/256 */
     int32_t belt_asleep;          /* asleep on its pickup belt's segment (rule 6) */
     int64_t woke_tick;            /* the tick an item on that segment woke it */
+    int64_t look_when;            /* tick + 1 an item added to its segment made it look, or 0 */
     /* belt */
     fsim_lane lanes[2];           /* lane 1 (left of travel), lane 2 */
     /* Belt-line segments (fsim.c, "segments"): when it was built, each lane's
      * merge delay from the measured table (-1: the table has no entry), and
      * the tick each lane's merge timer runs out, or 0 when none is running. */
     int64_t built_tick;
+    /* Its boundaries (fsim.c, "boundaries"): per slot -- an inserter's
+     * pickup belt lanes 0 and 1 and its drop lane 2, a drill's output 2, a
+     * feed front's sideload 0 -- the tick + 1 it was first set off, or 0,
+     * and the tick its split is due, or 0. */
+    int64_t bnd_trig[3];
+    int64_t bnd_split[3];
     int64_t merge_at[2];
     int32_t delay[2];
     int32_t seg_new;              /* built since the last rebuild_logistics */
+    int32_t seg_rot;              /* turned since the last rebuild_logistics, at rot_tick */
+    int64_t rot_tick;
     /* Derived from the neighbours, rebuilt whenever entities change
      * (fsim.c, rebuild_logistics); a hidden-state load rebuilds them too. */
     int32_t shape;                /* BELT_* */
@@ -439,21 +449,29 @@ typedef struct {
      * A segment is named by its head, its downstream-most lane; the arrays
      * marked "by head" mean something only at a head. */
     int32_t lane_pos[1024];     /* a lane's index in its chain, the front 0 */
-    int32_t seg_head[1024];     /* the head of the segment a lane is in, -1 on a loop */
+    int32_t seg_head[1024];     /* the head of the segment a lane is in, or -1 */
     int32_t seg_join[1024];     /* the lane downstream it is merged with, or -1 */
-    uint8_t seg_cut[1024];      /* a boundary lies between it and the lane downstream */
-    uint8_t lane_dirty[1024];   /* an entity has put an item on it or taken one off */
+    uint8_t seg_cut[1024];      /* a boundary in force lies between it and the lane downstream */
     uint8_t seg_listed[1024];   /* by head: in seg_order (awake) */
     uint8_t seg_sleep[1024];    /* by head: holds items, none of which could move */
+    uint8_t seg_busy[1024];     /* by head: moving now (move_segment) */
+    uint8_t seg_wrap[1024];     /* its join is a closed loop's seam, joined all round */
     int32_t side_first[1024];   /* the first chain front that sideloads into a lane, or -1 */
     int32_t side_link[1024];    /* the next one after a front, or -1 */
     int32_t belts_changed;      /* a belt was built, removed or turned since the last rebuild */
     int64_t seg_moved[1024];    /* by head: the tick it last moved */
-    int64_t seg_split_at[1024]; /* by head: the tick it splits at its boundaries, or 0 */
     int32_t seg_count;          /* entries in seg_order */
     int32_t seg_order[2048];    /* awake segments, by head, oldest activation first; -1 gone */
     int64_t seg_next_timer;     /* the earliest merge or split due, or 0 */
     int32_t belt_phase;         /* the belts are moving (update_belts) */
+    int32_t updating;           /* inside a world tick (update_world) */
+    /* Edges a belt built, removed or turned cuts at the next rebuild
+     * (fsim.c, seg_cut_radius): the lane, flags (1: it was merged across the
+     * edge, 2: the edge is this lane's downstream one, to cut), the tick. */
+    int32_t seg_pend_count;
+    int32_t seg_pend[4 * FSIM_MAX_LANES];
+    uint8_t seg_pend_joined[4 * FSIM_MAX_LANES];
+    int64_t seg_pend_tick[4 * FSIM_MAX_LANES];
     /* Belts built on a tile the merge-delay table does not cover: counted,
      * and the first such tile kept. Their lanes never merge; the Python layer
      * refuses to go on (fsim.BeltDelayMissing). */
@@ -538,6 +556,11 @@ void fsim_inserter_hold(fsim_env *env, int32_t index, int32_t item);
 void fsim_script_touched(fsim_env *env, int32_t index);
 /* LuaEntity.destroy on the item pile `index`. */
 void fsim_remove_pile(fsim_env *env, int32_t index);
+/* LuaEntity.rotate{reverse} on belt or inserter `index`: a quarter turn
+ * clockwise, or anticlockwise when `reverse`. 1 when it turned. */
+int32_t fsim_script_rotate(fsim_env *env, int32_t index, int32_t reverse);
+/* LuaEntity.destroy on belt `index`: its items go with it. 1 when destroyed. */
+int32_t fsim_script_destroy(fsim_env *env, int32_t index);
 /* Bring belt shapes and links and inserter targets up to date with the
  * entities; ticks do this themselves, a render between them calls it. */
 void fsim_refresh(fsim_env *env);

@@ -264,3 +264,24 @@ what is left does not pay for the extra launch.
 It stays opt-in and stays off. The lesson is the one this file keeps
 recording: a kernel measured on one card, in isolation, against a microbenchmark
 is not a speedup until it is measured in the trainer on the card that runs it.
+
+## Belt-heavy scene (2026-09-25)
+
+`uv run python bench/bench_belts.py [--ticks 20000] [--repeat 3]`
+
+Six lines of 45 belts with a sideload feed each, eight inserters loading
+and emptying them, and two closed 6 x 4 loops with an inserter dropping onto
+each: 338 belts (676 lanes), about 180 items moving, 16 to 18 segments
+awake. The first 700 ticks are not timed (every merge delay has run out).
+Laptop (Ryzen 7 5800H), best of three per run, two runs interleaved with the
+commit before:
+
+| | ticks/s | belt-lane ticks/s |
+|---|---:|---:|
+| before (0799d6a: loops relaxed as a whole every tick) | 139,000 to 144,000 | 94 to 98 M |
+| after (loops move as segments; the fifth probe's rules) | 194,000 to 201,000 | 131 to 136 M |
+
+The reference replay (`bench.py`) is unchanged within the laptop's noise,
+interleaved: one environment 151,400 to 164,200 decisions/s before and
+158,300 to 171,700 after (four runs each); eight environments 844,000 to
+973,000 before and 854,000 to 910,000 after (two runs each).

@@ -43,13 +43,6 @@ NOT_COMPARED = {
     # is not reproduced. The pickups from the other two sides are exact.
     "tpick_r_e": "hand x at a turn pickup, 1/256",
     "tpick_l_e": "hand x at a turn pickup, 1/256",
-    # An item put onto the pickup belt itself, a belt running along the arm
-    # into the inserter, while the inserter sleeps: the engine's first move
-    # (paid from the 810 J it kept) differs from the model's.
-    "seg_a_8": "item added onto the pickup belt",
-    "seg_ar_8": "item added onto the pickup belt",
-    "seg_b_7": "item added onto the pickup belt",
-    "seg_d_8": "item added onto the pickup belt",
 }
 
 

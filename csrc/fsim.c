@@ -185,6 +185,10 @@ _Static_assert(sizeof(((fsim_lane *)0)->items) / sizeof(fsim_belt_item) == FSIM_
 /* ------------------------------------------------------------------ helpers */
 
 static void wake(fsim_env *env, int32_t index);
+static void seg_belt_changing(fsim_env *env, int32_t index, int removing);
+static void rebuild_logistics(fsim_env *env);
+static void seg_trigger(fsim_env *env, int32_t owner, int32_t slot, int64_t when);
+static void seg_bound_due(fsim_env *env, int32_t owner, int32_t slot);
 static void belt_line_added(fsim_env *env, int32_t ref);
 static void arm_draw(fsim_entity *s);
 
@@ -799,6 +803,7 @@ static void inserter_unlist(fsim_env *env, int32_t index) {
 
 static void destroy_entity(fsim_env *env, int32_t index) {
     fsim_entity *e = &env->entities[index];
+    if (e->kind == K_BELT) seg_belt_changing(env, index, 1);
     if (e->kind == K_INSERTER) {
         if (e->sleep_seq) env->sleeper_count--;
         else inserter_unlist(env, index);
@@ -991,40 +996,38 @@ static void lane_take(fsim_lane *lane, int32_t at) {
 
 /* ------------------------------------------------------------------ segments
  *
- * FactorioRL docs/sim-logistics.md, "Third probe" and "Fourth probe": the
- * engine keeps a lane's line on each belt as its own object at first and
- * merges consecutive ones into one, a *segment*, later. Segments are what
- * moves (in activation order) and what a waiting inserter watches.
+ * FactorioRL docs/sim-logistics.md, "Third probe", "Fourth probe" and "Fifth
+ * probe": the engine keeps a lane's line on each belt as its own object at
+ * first and merges consecutive ones into one, a *segment*, later. Segments
+ * are what moves (in activation order) and what a waiting inserter watches.
  *
  * - Merge. Every tile and lane has a delay d, 1 to 600 ticks, measured over
  *   the whole area scenes use and shipped as a table (fsim/data/belt-delay.*,
  *   fsim_set_belt_delay). A belt's lane starts a timer of d when it is built;
- *   when any timer on a lane chain runs out the whole chain merges, and every
- *   timer on it stops. A lane whose timer is not running starts it again
- *   when a belt is built next to it on its chain.
- * - Boundaries. An entity that works on a lane marks a boundary between the
- *   belts two and three downstream of its own (k+2|k+3): an inserter picking
- *   up (both lanes), an inserter dropping or a drill putting out (the lane it
- *   drops on); a feed sideloading onto belt k marks k+1|k+2 on the target
- *   lane. Every attached entity's boundary counts, whether it has worked yet
- *   or not (`logistics_belt_pickup`: pickups not yet made split at t=133).
- * - A chain an entity has put an item on or taken one off (`lane_dirty`)
- *   merges into its pieces between boundaries. A merged segment such an
- *   interaction happens on splits at its boundaries d (of its head's tile and
- *   lane) after the first one. Script inserts are not interactions.
+ *   when any timer on a lane chain runs out the whole chain merges into its
+ *   pieces between the boundaries in force ("boundaries"), and every timer on
+ *   it stops.
+ * - Belts built, removed or turned cut the segments around them and restart
+ *   the timers of the pieces (seg_cut_radius).
  * - Order. Segments that hold items move each tick, last activated first: a
  *   segment that gets an item while it has none goes to the end of
  *   seg_order, which runs from the end. A segment moves the segment ahead of
  *   it, or the one it sideloads into, first when that one holds items and has
  *   not moved this tick -- so the second of two sideloads onto an empty
- *   target in one tick moves the first 8/256 on. Merged pieces keep the
- *   downstream piece's place when it held items, and otherwise go first in
- *   seg_order (move last).
+ *   target in one tick moves the first 8/256 on. When a segment splits or is
+ *   cut, the piece holding its head keeps its place (probe_logistics5
+ *   `order`: splits, removed and turned belts, sensitive both ways); pieces
+ *   with a new head that hold items move last if the segment was awake and
+ *   are asleep if not. Merged pieces keep the downstream piece's place when
+ *   it held items, and otherwise move last.
+ * - Closed loops are chains too, listed from their oldest belt: its lane
+ *   heads a segment, and a loop that is one segment has its seam there
+ *   (probe_logistics5 `loop`, `loop2`: built from any belt, either way round).
+ *   A boundary in force on a loop parts it at the seam as well, and so does
+ *   breaking the loop open.
  *
- * Not measured, and chosen: the place in seg_order of pieces a split, a
- * removed belt or a loaded state leaves holding items (first, like a merge);
- * what rotating a belt does to its timers (nothing); closed loops (they move
- * as a whole, before the segments, as before).
+ * Not measured, and chosen: the place in seg_order of pieces a loaded
+ * (hidden) state leaves holding items (they move last, like a merge).
  */
 
 static int32_t DELAY_COUNT = 0;
@@ -1085,7 +1088,7 @@ static void seg_timer(fsim_env *env, int64_t at) {
 static int32_t seg_lanes(const fsim_env *env, int32_t head, const int32_t **refs) {
     int32_t c = env->lane_chain[head];
     const int32_t *all = &env->chain_lanes[env->chain_first[c]];
-    int32_t size = env->chain_size[c];
+    int32_t size = env->chain_size[c] < 0 ? -env->chain_size[c] : env->chain_size[c];
     int32_t p = env->lane_pos[head], n = 1;
     while (p + n < size && env->seg_join[all[p + n]] == all[p + n - 1]) n++;
     *refs = all + p;
@@ -1159,36 +1162,12 @@ static void seg_check(fsim_env *env, int32_t ref) {
     }
 }
 
-/* An entity put an item on lane `ref` or took one off, in the engine's tick
- * `when`: a drop, a drill's output or a sideload goes on a tick before the
- * simulator places it, already moved once (lane_insert), a pickup on the same
- * tick (`logistics_belt_pickup`: drops read at t=47 split the line at
- * 46 + 87; `logistics_smelting_chain`: the drill's first ore, read at 243,
- * at 242 + 492). */
-static void seg_interact(fsim_env *env, int32_t ref, int64_t when) {
-    env->lane_dirty[ref] = 1;
-    int32_t h = env->seg_head[ref];
-    if (h < 0 || env->seg_split_at[h]) return;
-    const int32_t *refs;
-    int32_t n = seg_lanes(env, h, &refs);
-    for (int32_t k = 1; k < n; k++) {
-        if (!env->seg_cut[refs[k]]) continue;
-        int32_t d = env->entities[h >> 1].delay[h & 1];
-        if (d < 1) return;
-        env->seg_split_at[h] = when + d;
-        seg_timer(env, env->seg_split_at[h]);
-        return;
-    }
-}
-
 /* Heads of chain `c`'s lanes from its joins. */
 static void seg_heads(fsim_env *env, int32_t c) {
-    int32_t size = env->chain_size[c];
+    int32_t size = env->chain_size[c] < 0 ? -env->chain_size[c] : env->chain_size[c];
     const int32_t *refs = &env->chain_lanes[env->chain_first[c]];
-    if (size < 0) {
-        for (int32_t k = 0; k < -size; k++) env->seg_head[refs[k]] = -1;
-        return;
-    }
+    /* A closed loop is listed from its oldest belt, whose lane heads a
+     * segment even when the whole loop is one (the seam, "segments"). */
     int32_t head = -1;
     for (int32_t k = 0; k < size; k++) {
         if (k == 0 || env->seg_join[refs[k]] != refs[k - 1]) head = refs[k];
@@ -1216,67 +1195,56 @@ static void seg_wake_watchers(fsim_env *env, int32_t c) {
     }
 }
 
-/* Chain `c` merges: whole, or into its pieces between boundaries when an
- * entity has worked on it. */
+/* Chain `c` merges: whole, or into its pieces between its active
+ * boundaries ("boundaries"). */
 static void seg_merge_chain(fsim_env *env, int32_t c) {
     int32_t size = env->chain_size[c];
     const int32_t *refs = &env->chain_lanes[env->chain_first[c]];
     int32_t n = size < 0 ? -size : size;
     for (int32_t k = 0; k < n; k++) env->entities[refs[k] >> 1].merge_at[refs[k] & 1] = 0;
+    int loop = size < 0;
+    size = n;
     if (size <= 1) return;
-    int dirty = 0;
-    for (int32_t k = 0; k < size && !dirty; k++) dirty = env->lane_dirty[refs[k]];
     int32_t old_head[FSIM_MAX_LANES];
     uint8_t awake[FSIM_MAX_LANES];
     for (int32_t k = 0; k < size; k++) {
         old_head[k] = env->seg_head[refs[k]];
-        awake[k] = old_head[k] == refs[k] && env->seg_listed[refs[k]];
+        awake[k] = old_head[k] >= 0 && env->seg_listed[old_head[k]];
     }
-    for (int32_t k = 1; k < size; k++)
-        if (!(dirty && env->seg_cut[refs[k]])) env->seg_join[refs[k]] = refs[k - 1];
+    for (int32_t k = 1; k < size; k++) {
+        if (env->seg_cut[refs[k]]) {
+            /* a boundary: parted, even where the lanes were one already
+             * (`turn_side_before`: a merge at t=770 splits there) */
+            env->seg_join[refs[k]] = -1;
+            continue;
+        }
+        env->seg_join[refs[k]] = refs[k - 1];
+    }
+    if (loop) {
+        /* One segment all round, from the seam, unless a boundary is in
+         * force on the loop: then the seam parts it too (probe_logistics5
+         * `loop` `feed_old`: pieces l8..l0 and l1..l7). */
+        int any = 0;
+        for (int32_t k = 0; k < size && !any; k++) any = env->seg_cut[refs[k]];
+        env->seg_join[refs[0]] = any ? -1 : refs[size - 1];
+        env->seg_wrap[refs[0]] = (uint8_t)!any;
+    }
     seg_heads(env, c);
     for (int32_t k = 0; k < size; k++) {
         int32_t h = refs[k];
         if (env->seg_head[h] == h || old_head[k] != h) continue;
         seg_list_remove(env, h);            /* was a head, now merged into another */
-        env->seg_split_at[h] = 0;
         env->seg_sleep[h] = 0;
     }
     for (int32_t k = 0; k < size; k++) {
         int32_t h = refs[k];
         if (env->seg_head[h] != h || env->seg_listed[h]) continue;
         int any = 0;
-        for (int32_t j = k + 1; j < size && env->seg_head[refs[j]] == h; j++) any |= awake[j];
+        for (int32_t j = k; j < size && env->seg_head[refs[j]] == h; j++) any |= awake[j];
         if (any) seg_list_front(env, h);
         else env->seg_sleep[h] = !seg_empty(env, h);
     }
     seg_wake_watchers(env, c);
-}
-
-/* Segment `head` splits at its boundaries. */
-static void seg_split(fsim_env *env, int32_t head) {
-    const int32_t *refs;
-    int32_t n = seg_lanes(env, head, &refs);
-    env->seg_split_at[head] = 0;
-    int32_t pieces[FSIM_MAX_LANES];
-    int32_t np = 0;
-    for (int32_t k = 1; k < n; k++)
-        if (env->seg_cut[refs[k]]) {
-            env->seg_join[refs[k]] = -1;
-            pieces[np++] = refs[k];
-        }
-    if (!np) return;
-    int awake = env->seg_listed[head];
-    seg_heads(env, env->lane_chain[head]);
-    if (seg_empty(env, head)) {
-        seg_list_remove(env, head);
-        env->seg_sleep[head] = 0;
-    }
-    for (int32_t k = 0; k < np; k++) {
-        if (seg_empty(env, pieces[k])) continue;
-        if (awake) seg_list_front(env, pieces[k]);
-        else env->seg_sleep[pieces[k]] = 1;
-    }
 }
 
 /* Merges and splits due by now. */
@@ -1295,25 +1263,24 @@ static void seg_timers(fsim_env *env) {
             }
         }
     }
-    for (int32_t c = 0; c < env->chain_count; c++) {
-        int32_t size = env->chain_size[c];
-        const int32_t *refs = &env->chain_lanes[env->chain_first[c]];
-        for (int32_t k = 0; k < size; k++) {
-            int32_t h = refs[k];
-            if (env->seg_head[h] == h && env->seg_split_at[h] && env->seg_split_at[h] <= now)
-                seg_split(env, h);
-        }
+    for (int32_t i = 0; i < env->entity_count; i++) {
+        fsim_entity *e = &env->entities[i];
+        if (!e->alive) continue;
+        for (int32_t k = 0; k < 3; k++)
+            if (e->bnd_split[k] && e->bnd_split[k] <= now) {
+                e->bnd_split[k] = 0;
+                seg_bound_due(env, i, k);
+            }
     }
     env->seg_next_timer = 0;
     for (int32_t c = 0; c < env->chain_count; c++) {
         int32_t size = env->chain_size[c];
         const int32_t *refs = &env->chain_lanes[env->chain_first[c]];
         int32_t n = size < 0 ? -size : size;
-        for (int32_t k = 0; k < n; k++) {
-            seg_timer(env, env->entities[refs[k] >> 1].merge_at[refs[k] & 1]);
-            if (env->seg_head[refs[k]] == refs[k]) seg_timer(env, env->seg_split_at[refs[k]]);
-        }
+        for (int32_t k = 0; k < n; k++) seg_timer(env, env->entities[refs[k] >> 1].merge_at[refs[k] & 1]);
     }
+    for (int32_t i = 0; i < env->entity_count; i++)
+        for (int32_t k = 0; k < 3; k++) seg_timer(env, env->entities[i].bnd_split[k]);
 }
 
 int32_t fsim_belt_segment(fsim_env *env, int32_t index, int32_t lane) {
@@ -1363,13 +1330,25 @@ static int lane_insert_from(fsim_env *env, int32_t ref, int32_t from, int32_t ta
     if (q < target) q = target;
     if (exact && q != target) return 0;
     if (lane->count >= FSIM_LANE_ITEMS) return 0;
-    /* The move it makes at once, never past the lane's downstream edge: a
-     * script insert within 8 of the edge reads 0 on its own belt (`accept`,
-     * `drop_c768`..`c775`), whatever lies beyond. */
+    /* The move it makes at once, along its segment: past the lane's
+     * downstream edge only onto a lane merged with it (FactorioRL
+     * probe_logistics5: a script insert at 0 on an old line reads 248 on
+     * the next belt); on a lane that is a segment of its own an insert
+     * within 8 of the edge reads 0 on its own belt (probe_logistics4
+     * `accept`, `drop_c768`..`c775`), whatever lies beyond. */
     int32_t moved_to = q - BELT_SPEED;
     if (ahead != INT32_MIN && ahead + BELT_GAP > moved_to) moved_to = ahead + BELT_GAP;
-    if (moved_to < 0) moved_to = 0;
     if (moved_to > q) moved_to = q;
+    if (moved_to < 0 && next >= 0 && env->seg_join[ref] == next &&
+        env->lane_pos[next] == env->lane_pos[ref] - 1 && lane_of(env, next)->count < FSIM_LANE_ITEMS) {
+        /* (not across a loop's seam: `sq_old`, 0 reads 0 before the seam) */
+        fsim_lane *down = lane_of(env, next);
+        lane_put(down, down->count, lane_length_of(env, next) + moved_to, item, id, 1);
+        seg_touch(env, next);
+        belt_line_added(env, next);
+        return 1;
+    }
+    if (moved_to < 0) moved_to = 0;
     if (moved_to >= length) return 0;
     lane_put(lane, at, moved_to, item, id, moved_to != q);
     seg_touch(env, ref);
@@ -1420,11 +1399,15 @@ static int belt_drop_target(const fsim_env *env, int32_t index, fsim_pos p, int3
     return 1;
 }
 
-static int belt_drop(fsim_env *env, int32_t index, fsim_pos p, int32_t item) {
+/* `owner` (an inserter or a drill) puts `item` on belt `index` at `p`; its
+ * first item sets its boundary off, a tick before the simulator places it
+ * (lane_insert: the item reads one step on; `logistics_belt_pickup`: drops
+ * read at t=47 split the line at 46 + 87). */
+static int belt_drop(fsim_env *env, int32_t index, fsim_pos p, int32_t item, int32_t owner) {
     int32_t ref, target;
     if (!belt_drop_target(env, index, p, &ref, &target)) return 0;
     if (!lane_insert(env, ref, target, item, new_item_id(env), 0)) return 0;
-    seg_interact(env, ref, env->tick - 1);
+    seg_trigger(env, owner, 2, env->tick - 1);
     return 1;
 }
 
@@ -1442,54 +1425,77 @@ static int32_t belt_at(const fsim_env *env, fsim_pos p) {
 
 static void seg_wake_move(fsim_env *env, int32_t head);
 
+/* The lane upstream of lane `r` on its chain (round a loop), or -1. */
+static int32_t lane_up(const fsim_env *env, int32_t r) {
+    int32_t c = env->lane_chain[r];
+    if (c < 0) return -1;
+    int32_t size = env->chain_size[c];
+    int32_t p = env->lane_pos[r] + 1;
+    if (p < (size < 0 ? -size : size)) return env->chain_lanes[env->chain_first[c] + p];
+    return size < 0 ? env->chain_lanes[env->chain_first[c]] : -1;
+}
+
 /* One tick of segment `head`: what it runs into first, then its own lanes
- * front first, as one line. */
+ * front first, as one line. An item crossing into a segment still to move
+ * this tick -- round a loop, the segment the move started from -- moves
+ * again when that one does; on a loop that is one segment, across the seam
+ * onto its own back, it moves again as far as it went in (FactorioRL
+ * probe_logistics5 `loop`: 6 before the seam reads 256 - 4 after it, 0
+ * reads 256 - 16). */
 static void move_segment(fsim_env *env, int32_t head) {
     int64_t now = env->tick;
     env->seg_moved[head] = now;
-    int32_t c = env->lane_chain[head];
-    const int32_t *all = &env->chain_lanes[env->chain_first[c]];
-    int32_t p = env->lane_pos[head];
+    env->seg_busy[head] = 1;
     const fsim_entity *front = &env->entities[head >> 1];
-    int32_t side = p == 0 ? front->lane_side[head & 1] : -1;
+    int32_t down = front->lane_next[head & 1];
+    int32_t side = down < 0 ? front->lane_side[head & 1] : -1;
     int32_t entry = front->lane_entry[head & 1];
-    int32_t down = p > 0 ? all[p - 1] : side;
-    if (down >= 0) {
-        int32_t dh = env->seg_head[down];
-        if (dh >= 0 && env->seg_listed[dh] && env->seg_moved[dh] != now) move_segment(env, dh);
+    int32_t target = down >= 0 ? down : side;
+    if (target >= 0) {
+        int32_t dh = env->seg_head[target];
+        if (dh >= 0 && dh != head && env->seg_listed[dh] && env->seg_moved[dh] != now)
+            move_segment(env, dh);
     }
-    /* Chain coordinates, from the chain's front: this segment's downstream
-     * edge, and the back item ahead of it after its move. */
-    int32_t offset = 0;
-    for (int32_t k = 0; k < p; k++) offset += lane_length_of(env, all[k]);
+    /* The back item ahead, in the front lane's coordinates (below 0: past
+     * its downstream edge), along the lanes downstream. */
     int has_ahead = 0;
     int32_t ahead = 0;
-    for (int32_t k = p - 1, edge = offset; k >= 0; k--) {
-        edge -= lane_length_of(env, all[k]);
-        const fsim_lane *l = lane_of(env, all[k]);
+    /* (A loop that is one segment: its front item is held by nothing
+     * ahead, `full_young_s0` t=340.) */
+    int self_loop = down >= 0 && env->seg_head[down] == head;
+    for (int32_t x = self_loop ? -1 : down, edge = 0, steps = 0;
+         x >= 0 && x != head && steps < FSIM_MAX_LANES; steps++) {
+        const fsim_lane *l = lane_of(env, x);
+        int32_t len = lane_length_of(env, x);
         if (l->count) {
             has_ahead = 1;
-            ahead = edge + l->items[l->count - 1].pos;
+            ahead = edge - len + l->items[l->count - 1].pos;
             break;
         }
+        edge -= len;
+        x = env->entities[x >> 1].lane_next[x & 1];
     }
     const int32_t *refs;
     int32_t n = seg_lanes(env, head, &refs);
     int moved = 0;
     for (int32_t k = 0; k < n; k++) {
         fsim_lane *lane = lane_of(env, refs[k]);
+        int32_t len = lane_length_of(env, refs[k]);
+        int32_t dref = k > 0 ? refs[k - 1] : down;
         int32_t i = 0;
         while (i < lane->count) {
             fsim_belt_item *it = &lane->items[i];
-            int32_t old = offset + it->pos;
-            int32_t want = old - BELT_SPEED;
+            int32_t old = it->pos;
+            int32_t step = it->entered ? it->entered : BELT_SPEED;
+            it->entered = 0;
+            int32_t want = old - step;
             if (has_ahead) {
                 if (ahead + BELT_GAP > want) want = ahead + BELT_GAP;
-            } else if (want < 0) {
+            } else if (want < 0 && dref < 0) {
                 /* The front of the chain at its end: across into the side of
                  * another belt if it sideloads, else it stops at 0. */
                 if (side >= 0 && lane_insert_from(env, side, entry, entry + old, it->item, it->id, 0)) {
-                    seg_interact(env, side, now - 1);
+                    seg_trigger(env, head >> 1, 0, now - 1);
                     lane_take(lane, i);
                     moved = 1;
                     continue;
@@ -1499,34 +1505,39 @@ static void move_segment(fsim_env *env, int32_t head) {
             if (want > old) want = old;
             has_ahead = 1;
             ahead = want;
-            if (want < offset) {
+            if (want < 0 && dref >= 0) {
                 /* Onto the lane ahead, behind everything already there: in
                  * this segment, or across into the next one. */
-                int32_t dref = k > 0 ? refs[k - 1] : all[p - 1];
                 fsim_lane *dl = lane_of(env, dref);
-                int32_t down_length = lane_length_of(env, dref);
                 if (dl->count < FSIM_LANE_ITEMS) {
+                    int32_t dh = env->seg_head[dref];
                     fsim_belt_item moving = *it;
                     lane_take(lane, i);
-                    lane_put(dl, dl->count, want - (offset - down_length), moving.item, moving.id,
+                    lane_put(dl, dl->count, lane_length_of(env, dref) + want, moving.item, moving.id,
                              1);
+                    /* Round a loop that is one segment, onto its own back:
+                     * it moves again as far as it went in; into another
+                     * segment still to move, a full step (`drop_old`: 2
+                     * reads 106 - 14 after a boundary). */
+                    if (k == 0 && dh == head) dl->items[dl->count - 1].entered = (uint8_t)(-want);
                     moved = 1;
-                    if (k == 0) {
+                    if (k == 0 && dh != head) {
                         seg_touch(env, dref);
                         belt_line_added(env, dref);
                     }
                     continue;
                 }
-                want = offset;      /* no room: cannot happen at 64 apart */
+                want = 0;           /* no room: cannot happen at 64 apart */
                 ahead = want;
             }
             it->moved = (uint8_t)(want != old);
             moved |= want != old;
-            it->pos = (int16_t)(want - offset);
+            it->pos = (int16_t)want;
             i++;
         }
-        offset += lane_length_of(env, refs[k]);
+        ahead -= len;
     }
+    env->seg_busy[head] = 0;
     /* Nothing could move: asleep until an item goes on or comes off, the
      * belts change, or what it runs into moves (FactorioRL probe_logistics4
      * `sleep`, and `ins_*` of the third probe: a stopped target the first of
@@ -1538,7 +1549,8 @@ static void move_segment(fsim_env *env, int32_t head) {
     /* What runs into it, asleep, wakes and moves now: the lane behind on the
      * chain, and the chains sideloading onto it (a release moves the whole
      * stopped line on the same tick, `sleep`). */
-    if (p + n < env->chain_size[c]) seg_wake_move(env, env->seg_head[all[p + n]]);
+    int32_t up = lane_up(env, refs[n - 1]);
+    if (up >= 0) seg_wake_move(env, env->seg_head[up]);
     for (int32_t k = 0; k < n; k++)
         for (int32_t f = env->side_first[refs[k]]; f >= 0; f = env->side_link[f])
             seg_wake_move(env, env->seg_head[f]);
@@ -1551,77 +1563,10 @@ static void seg_wake_move(fsim_env *env, int32_t head) {
     if (env->seg_moved[head] != env->tick) move_segment(env, head);
 }
 
-typedef struct {
-    int32_t pos;                /* chain coordinate */
-    int32_t move;
-    fsim_belt_item it;
-} ring_item;
-
-/* One tick of a closed loop of lanes. Not measured: every item moves 8 unless
- * that brings it within 64 of the item ahead after that one's own move -- the
- * largest movement that keeps the straight-line rule, found by relaxation. */
-static void update_ring(fsim_env *env, const int32_t *refs, int32_t size) {
-    int32_t total = 0, length = 0;
-    for (int32_t k = 0; k < size; k++) total += lane_of(env, refs[k])->count;
-    if (total == 0) return;
-    ring_item *items = (ring_item *)malloc(sizeof(ring_item) * (size_t)total);
-    int32_t *offsets = (int32_t *)malloc(sizeof(int32_t) * (size_t)size);
-    if (!items || !offsets) {
-        free(items);
-        free(offsets);
-        return;
-    }
-    int32_t n = 0;
-    for (int32_t k = 0; k < size; k++) {
-        fsim_lane *lane = lane_of(env, refs[k]);
-        offsets[k] = length;
-        for (int32_t i = 0; i < lane->count; i++) {
-            items[n].pos = length + lane->items[i].pos;
-            items[n].move = BELT_SPEED;
-            items[n].it = lane->items[i];
-            n++;
-        }
-        length += lane_length_of(env, refs[k]);
-        lane->count = 0;
-    }
-    for (int changed = 1; changed;) {
-        changed = 0;
-        for (int32_t i = 0; i < n; i++) {
-            int32_t a = i > 0 ? i - 1 : n - 1;
-            int32_t gap = items[i].pos - items[a].pos + (i > 0 ? 0 : length);
-            int32_t move = n > 1 ? gap + items[a].move - BELT_GAP : BELT_SPEED;
-            if (move > BELT_SPEED) move = BELT_SPEED;
-            if (move < 0) move = 0;
-            if (move < items[i].move) {
-                items[i].move = move;
-                changed = 1;
-            }
-        }
-    }
-    for (int32_t i = 0; i < n; i++) {
-        int32_t pos = items[i].pos - items[i].move;
-        if (pos < 0) pos += length;
-        int32_t k = size - 1;
-        while (k > 0 && offsets[k] > pos) k--;
-        fsim_lane *lane = lane_of(env, refs[k]);
-        int32_t at = lane->count;
-        while (at > 0 && lane->items[at - 1].pos > pos - offsets[k]) at--;
-        if (lane->count < FSIM_LANE_ITEMS)
-            lane_put(lane, at, pos - offsets[k], items[i].it.item, items[i].it.id,
-                     items[i].move != 0);
-    }
-    free(items);
-    free(offsets);
-}
-
-/* One tick of the belts: merges and splits due, closed loops, then the
- * segments holding items, last activated first (see "segments"). */
+/* One tick of the belts: merges and splits due, then the segments holding
+ * items, last activated first (see "segments"); closed loops too. */
 static void update_belts(fsim_env *env) {
     seg_timers(env);
-    for (int32_t c = 0; c < env->chain_count; c++) {
-        int32_t size = env->chain_size[c];
-        if (size < 0) update_ring(env, &env->chain_lanes[env->chain_first[c]], -size);
-    }
     seg_compact(env);
     int32_t n = env->seg_count;
     if (n == 0) return;
@@ -1690,12 +1635,291 @@ static int drill_blocked(const fsim_entity *d);
 static int32_t drill_block_signature(const fsim_env *env, int32_t belt, fsim_pos drop);
 static void unblock_drills(fsim_env *env, int32_t index, fsim_pos where);
 
-/* Mark the boundary `steps` lanes downstream of lane `ref`: between that
- * lane and the one after it ("segments"). */
-static void seg_mark_cut(fsim_env *env, int32_t ref, int32_t steps) {
-    for (int32_t i = 0; i < steps && ref >= 0; i++)
-        ref = env->entities[ref >> 1].lane_next[ref & 1];
-    if (ref >= 0 && env->entities[ref >> 1].lane_next[ref & 1] >= 0) env->seg_cut[ref] = 1;
+/* A belt built, removed or turned cuts the segments around it (FactorioRL
+ * probe_logistics5 `change`, `feedchg`, `bound` `side_*`, `dist` `side_*`).
+ * Think of the edges between belts as nodes: each belt's downstream edge,
+ * joined to the downstream edge of the belt feeding it and of the belt it
+ * feeds, and a feed's front (its sideload link) to the downstream edge of
+ * the belt it sideloads onto. Each belt on a tile next to the changed one --
+ * connected to it or not -- has every edge within 1 of its downstream edge
+ * cut when the belt is built or turned (before and after the turn), within
+ * 2 when it is removed. On a straight line that is the belt upstream, the
+ * belt itself and the two downstream for a build or a turn, the two upstream
+ * and the three downstream for a removal; for a feed, the belt it lands on
+ * and the next; and a belt running past a new feed's side has its own. */
+static void seg_pend_add(fsim_env *env, int32_t ref, int cut_down, int joined, int64_t tick) {
+    if (ref < 0 || ref >= FSIM_MAX_LANES || env->seg_pend_count >= 4 * FSIM_MAX_LANES) return;
+    env->seg_pend[env->seg_pend_count] = ref;
+    env->seg_pend_joined[env->seg_pend_count] = (uint8_t)((joined ? 1 : 0) | (cut_down ? 2 : 0));
+    env->seg_pend_tick[env->seg_pend_count++] = tick;
+}
+
+static void seg_cut_radius(fsim_env *env, int32_t origin, int32_t radius, int64_t tick) {
+    int32_t n = env->entity_count;
+    int32_t dist[FSIM_MAX_ENTITIES], queue[FSIM_MAX_ENTITIES];
+    for (int32_t i = 0; i < n; i++) dist[i] = -1;
+    int32_t head = 0, tail = 0;
+    dist[origin] = 0;
+    queue[tail++] = origin;
+    while (head < tail) {
+        int32_t b = queue[head++];
+        const fsim_entity *e = &env->entities[b];
+        for (int lane = 0; lane < 2; lane++) {
+            int32_t r = b * 2 + lane;
+            int32_t nxt = e->lane_next[lane];
+            if (nxt >= 0) {
+                int joined = r < FSIM_MAX_LANES && env->seg_join[r] == nxt;
+                seg_pend_add(env, r, 1, joined, tick);
+                seg_pend_add(env, nxt, 0, joined, tick);
+            } else {
+                seg_pend_add(env, r, 1, 0, tick);
+            }
+        }
+        if (dist[b] >= radius) continue;
+        /* neighbours: the belt it feeds or sideloads onto, and the belts
+         * feeding it from behind, from a turn's side or by a sideload */
+        int32_t near[2] = {e->lane_next[0] >= 0 ? e->lane_next[0] >> 1 : -1,
+                           e->lane_side[0] >= 0 ? e->lane_side[0] >> 1 : -1};
+        for (int k = 0; k < 2; k++)
+            if (near[k] >= 0 && dist[near[k]] < 0) {
+                dist[near[k]] = dist[b] + 1;
+                queue[tail++] = near[k];
+            }
+        for (int32_t p = 0; p < n; p++) {
+            const fsim_entity *q = &env->entities[p];
+            if (dist[p] >= 0 || !q->alive || q->kind != K_BELT) continue;
+            int feeds = (q->lane_next[0] >= 0 && q->lane_next[0] >> 1 == b) ||
+                        (q->lane_side[0] >= 0 && q->lane_side[0] >> 1 == b);
+            if (!feeds) continue;
+            dist[p] = dist[b] + 1;
+            queue[tail++] = p;
+        }
+    }
+}
+
+/* The belts on the four tiles next to belt `index`: each cuts within
+ * `radius` of its downstream edge. */
+static void seg_cut_around(fsim_env *env, int32_t index, int32_t radius, int64_t tick) {
+    static const int32_t STEP[4][2] = {{0, -1}, {1, 0}, {0, 1}, {-1, 0}};
+    const fsim_entity *b = &env->entities[index];
+    for (int k = 0; k < 4; k++) {
+        fsim_pos p = {b->pos.x + STEP[k][0] * TILE, b->pos.y + STEP[k][1] * TILE};
+        int32_t j = belt_at(env, p);
+        if (j >= 0 && j != index) seg_cut_radius(env, j, radius, tick);
+    }
+}
+
+/* Belt `index` is about to be removed (`removing`) or turned: what it cuts
+ * on the belts as they stand; once turned, it cuts again on its new chain
+ * (rebuild_segments). */
+static void seg_belt_changing(fsim_env *env, int32_t index, int removing) {
+    if (env->logistics_version != env->entities_version) rebuild_logistics(env);
+    seg_cut_around(env, index, removing ? 2 : 1, env->tick);
+    if (!removing) {
+        env->entities[index].seg_rot = 1;
+        env->entities[index].rot_tick = env->tick;
+    }
+}
+
+/* Cut the pending edges. The pieces next to a cut restart their merge
+ * timers from the tick of the change, with d of the piece's head, when the
+ * cut parted merged lanes (after a removal the pieces merge again at the
+ * tick of the removal plus the least of those delays); a piece that was not
+ * merged across the cut keeps a timer still running (`rm_*_young`) and
+ * starts one that has run out (`rot_k3_old180`: a lone belt turned back into
+ * its line merges d after). */
+static void seg_apply_cuts(fsim_env *env, uint8_t *touch, int64_t *touch_tick) {
+    for (int32_t k = 0; k < env->seg_pend_count; k++) {
+        int32_t r = env->seg_pend[k];
+        const fsim_entity *e = &env->entities[r >> 1];
+        if (!e->alive || e->kind != K_BELT) continue;
+        if ((env->seg_pend_joined[k] & 2) && env->seg_join[r] >= 0) {
+            env->seg_join[r] = -1;
+            env->seg_wrap[r] = 0;
+        }
+        touch[r] |= (uint8_t)(1 | ((env->seg_pend_joined[k] & 1) << 1));
+        touch_tick[r] = env->seg_pend_tick[k];
+    }
+    env->seg_pend_count = 0;
+}
+
+static void seg_restart_touched(fsim_env *env, const uint8_t *touch, const int64_t *touch_tick,
+                                int32_t lanes) {
+    uint8_t mark[FSIM_MAX_LANES];
+    int64_t when[FSIM_MAX_LANES];
+    memset(mark, 0, sizeof(mark));
+    for (int32_t r = 0; r < lanes; r++) {
+        if (!touch[r]) continue;
+        int32_t h = env->seg_head[r];
+        if (h < 0) continue;
+        mark[h] |= touch[r];
+        when[h] = touch_tick[r];
+    }
+    for (int32_t h = 0; h < lanes; h++) {
+        if (!mark[h]) continue;
+        fsim_entity *he = &env->entities[h >> 1];
+        if (he->delay[h & 1] < 1) continue;
+        if ((mark[h] & 2) || !he->merge_at[h & 1]) he->merge_at[h & 1] = when[h] + he->delay[h & 1];
+    }
+}
+
+/* ------------------------------------------------------------ boundaries
+ *
+ * FactorioRL docs/sim-logistics.md, "Fifth probe" (probe_logistics5 `bound`,
+ * `dist`, `trig`, `trig2`, `trig3`). An entity working on a lane marks a
+ * boundary in it, where its segment splits and merges stop:
+ *
+ * - Where: at the upstream edge of the belt holding the point R downstream
+ *   of the downstream edge of the entity's belt, measured along the lane
+ *   (a turn's lanes are 295 and 106 long): R = 640 for an inserter (its
+ *   pickup, both lanes; its drop, the lane it drops on) and for a drill's
+ *   output, 384 for a sideload, on the lane it lands on (the delays lie in
+ *   618..657 and 362..401 on the 11 patterns of turns measured; no belt edge
+ *   falls between). On a straight line: two belts and three downstream.
+ * - When: from the entity's first item on the lane -- a drop, a drill's
+ *   output, a sideload arriving (a tick before the item reads) -- or, for an
+ *   inserter picking up, from the first time it looks for an item there: it
+ *   chooses one on its pickup belt (only that lane), or, with none there,
+ *   waits while items it would take are on the lane's segment. An idle
+ *   inserter, one whose chest is full, or a feed nothing has come down, marks
+ *   nothing; a script's insert does not either, but it wakes a waiting
+ *   inserter, which then looks.
+ * - A merged segment splits there at that tick plus d of the chain's front
+ *   lane (not the piece's: a second split on an upstream piece counts the
+ *   same d, `seq_*`). Merges from then on stop there.
+ * - Close together: an entity whose belt lies between another's belt and
+ *   that one's boundary marks none, so of two on belts one or two apart only
+ *   the upstream one counts; when such an upstream one comes later, at its
+ *   split the downstream boundary goes and its two pieces are one again
+ *   (`late_up`).
+ */
+
+#define BOUND_INSERTER 640
+#define BOUND_SIDELOAD 384
+
+/* The lane whose downstream edge is the boundary of an entity on lane `r`,
+ * `reach` along the lane from `r`'s downstream edge, or -1. */
+static int32_t bnd_lane(const fsim_env *env, int32_t r, int32_t reach) {
+    int32_t x = r, cum = 0;
+    for (int32_t steps = 0; steps < FSIM_MAX_LANES; steps++) {
+        int32_t nx = env->entities[x >> 1].lane_next[x & 1];
+        if (nx < 0 || nx == r) return -1;
+        cum += lane_length_of(env, nx);
+        if (cum >= reach) return x;
+        x = nx;
+    }
+    return -1;
+}
+
+/* The lane entity `owner` works on in `slot`, and its reach; -1 for none. */
+static int32_t attach_lane(const fsim_env *env, int32_t owner, int32_t slot, int32_t *reach) {
+    const fsim_entity *e = &env->entities[owner];
+    if (!e->alive) return -1;
+    *reach = BOUND_INSERTER;
+    if (e->kind == K_INSERTER) {
+        if (slot < 2) {
+            if (e->pickup_target < 0 || env->entities[e->pickup_target].kind != K_BELT) return -1;
+            return e->pickup_target * 2 + slot;
+        }
+        if (e->drop_target < 0 || env->entities[e->drop_target].kind != K_BELT) return -1;
+        int32_t ref, target;
+        if (!belt_drop_target(env, e->drop_target, inserter_point(e, -INSERTER_DROP), &ref,
+                              &target))
+            return -1;
+        return ref;
+    }
+    if (e->kind == K_DRILL && slot == 2) {
+        fsim_pos drop = drop_position(e);
+        if (machine_at(env, drop, owner) >= 0) return -1;
+        int32_t belt = belt_at(env, drop), ref, target;
+        if (belt < 0 || !belt_drop_target(env, belt, drop, &ref, &target)) return -1;
+        return ref;
+    }
+    if (e->kind == K_BELT && slot == 0 && e->lane_side[0] >= 0) {
+        *reach = BOUND_SIDELOAD;
+        return e->lane_side[0];
+    }
+    return -1;
+}
+
+typedef struct {
+    int32_t chain, pos, bound, bound_pos;
+} bnd_sort;
+
+/* Chain, then upstream first; the entity that reaches further first. */
+static int bnd_cmp(const void *pa, const void *pb) {
+    const bnd_sort *a = pa, *b = pb;
+    if (a->chain != b->chain) return a->chain < b->chain ? -1 : 1;
+    if (a->pos != b->pos) return a->pos > b->pos ? -1 : 1;
+    if (a->bound_pos != b->bound_pos) return a->bound_pos < b->bound_pos ? -1 : 1;
+    return 0;
+}
+
+/* The boundaries in force, from every entity whose boundary is set off. */
+static void seg_bounds(fsim_env *env) {
+    int32_t lanes = env->entity_count * 2;
+    if (lanes > FSIM_MAX_LANES) lanes = FSIM_MAX_LANES;
+    for (int32_t r = 0; r < lanes; r++) env->seg_cut[r] = 0;
+    bnd_sort list[3 * FSIM_MAX_ENTITIES];
+    int32_t n = 0;
+    for (int32_t i = 0; i < env->entity_count; i++) {
+        const fsim_entity *e = &env->entities[i];
+        if (!e->alive) continue;
+        for (int32_t k = 0; k < 3; k++) {
+            if (!e->bnd_trig[k]) continue;
+            int32_t reach, r = attach_lane(env, i, k, &reach);
+            if (r < 0 || r >= FSIM_MAX_LANES || env->lane_chain[r] < 0) continue;
+            int32_t x = bnd_lane(env, r, reach);
+            if (x < 0) continue;
+            list[n].chain = env->lane_chain[r];
+            list[n].pos = env->lane_pos[r];
+            list[n].bound = x;
+            list[n].bound_pos = env->lane_pos[x];
+            n++;
+        }
+    }
+    qsort(list, (size_t)n, sizeof(list[0]), bnd_cmp);
+    int32_t chain = -1, zone_end = 0;
+    for (int32_t k = 0; k < n; k++) {
+        if (list[k].chain != chain) {
+            chain = list[k].chain;
+            zone_end = -1;
+        } else if (zone_end >= 0 && list[k].pos >= zone_end) {
+            continue;                       /* its belt is inside the zone above */
+        }
+        env->seg_cut[list[k].bound] = 1;
+        zone_end = list[k].bound_pos;
+    }
+}
+
+/* Entity `owner` works on its lane in `slot` in the engine's tick `when`:
+ * the first time, its boundary is set off and its split is due d of the
+ * chain's front lane later. */
+static void seg_trigger(fsim_env *env, int32_t owner, int32_t slot, int64_t when) {
+    fsim_entity *e = &env->entities[owner];
+    if (e->bnd_trig[slot]) return;
+    if (env->logistics_version != env->entities_version) rebuild_logistics(env);
+    int32_t reach, r = attach_lane(env, owner, slot, &reach);
+    if (r < 0 || r >= FSIM_MAX_LANES || env->lane_chain[r] < 0) return;
+    e->bnd_trig[slot] = when + 1;
+    int32_t c = env->lane_chain[r];
+    int32_t front = env->chain_lanes[env->chain_first[c]];
+    int32_t d = env->entities[front >> 1].delay[front & 1];
+    if (d >= 1) {
+        e->bnd_split[slot] = when + d;
+        seg_timer(env, e->bnd_split[slot]);
+    }
+    seg_bounds(env);
+}
+
+/* The split of entity `owner`'s boundary in `slot` is due: its chain is
+ * made again into the pieces between the boundaries in force, as a merge
+ * makes it (`split_rot_k5_4x`: belts cut apart by a turn in the meantime are
+ * one again then; `late_up`: a boundary put out of force goes). */
+static void seg_bound_due(fsim_env *env, int32_t owner, int32_t slot) {
+    int32_t reach, r = attach_lane(env, owner, slot, &reach);
+    if (r < 0 || r >= FSIM_MAX_LANES || env->lane_chain[r] < 0) return;
+    seg_merge_chain(env, env->lane_chain[r]);
 }
 
 /* Segments after the links and chains changed (rebuild_logistics): joins
@@ -1710,13 +1934,25 @@ static void rebuild_segments(fsim_env *env, const int32_t *pred) {
         int32_t size = env->chain_size[c] < 0 ? -env->chain_size[c] : env->chain_size[c];
         for (int32_t j = 0; j < size; j++) env->lane_pos[env->chain_lanes[env->chain_first[c] + j]] = j;
     }
+    /* A loop broken open parts at its seam too (probe_logistics5 `loop2`
+     * `rm_l6`: l0 alone, merging again d of its own after). */
+    for (int32_t r = 0; r < lanes; r++) {
+        if (!env->seg_wrap[r]) continue;
+        env->seg_wrap[r] = 0;
+        int32_t c = env->lane_chain[r];
+        if (env->entities[r >> 1].alive && c >= 0 && env->chain_size[c] < 0 && env->lane_pos[r] == 0)
+            env->seg_wrap[r] = 1;
+        else if (env->seg_join[r] >= 0) {
+            seg_pend_add(env, r, 1, 1, env->tick);
+            seg_pend_add(env, env->seg_join[r], 0, 1, env->tick);
+        }
+    }
     for (int32_t r = 0; r < lanes; r++) {
         const fsim_entity *e = &env->entities[r >> 1];
         env->seg_cut[r] = 0;
         if (!e->alive || e->kind != K_BELT) {
             env->seg_join[r] = env->seg_head[r] = -1;
             if (env->seg_listed[r]) seg_list_remove(env, r);
-            env->seg_split_at[r] = 0;
             continue;
         }
         if (env->seg_join[r] >= 0 && env->seg_join[r] != e->lane_next[r & 1]) env->seg_join[r] = -1;
@@ -1737,31 +1973,23 @@ static void rebuild_segments(fsim_env *env, const int32_t *pred) {
             }
         }
     }
-    for (int32_t i = 0; i < env->entity_count; i++) env->entities[i].seg_new = 0;
-    /* Boundaries. */
-    for (int32_t i = 0; i < env->entity_count; i++) {
-        const fsim_entity *e = &env->entities[i];
-        if (!e->alive) continue;
-        if (e->kind == K_INSERTER) {
-            if (e->pickup_target >= 0 && env->entities[e->pickup_target].kind == K_BELT)
-                for (int lane = 0; lane < 2; lane++) seg_mark_cut(env, e->pickup_target * 2 + lane, 2);
-            if (e->drop_target >= 0 && env->entities[e->drop_target].kind == K_BELT) {
-                int32_t ref, target;
-                if (belt_drop_target(env, e->drop_target, inserter_point(e, -INSERTER_DROP), &ref,
-                                     &target))
-                    seg_mark_cut(env, ref, 2);
-            }
-        } else if (e->kind == K_DRILL) {
-            fsim_pos drop = drop_position(e);
-            if (machine_at(env, drop, i) >= 0) continue;
-            int32_t belt = belt_at(env, drop), ref, target;
-            if (belt >= 0 && belt_drop_target(env, belt, drop, &ref, &target))
-                seg_mark_cut(env, ref, 2);
-        } else if (e->kind == K_BELT) {
-            for (int lane = 0; lane < 2; lane++)
-                if (e->lane_side[lane] >= 0) seg_mark_cut(env, e->lane_side[lane], 1);
+    /* What building and turning belts cut, on the chains as they now are
+     * (seg_cut_radius). */
+    for (int32_t i = 0; i < env->entity_count && i * 2 + 1 < FSIM_MAX_LANES; i++) {
+        fsim_entity *b = &env->entities[i];
+        if (!b->alive || b->kind != K_BELT) {
+            b->seg_rot = 0;
+            continue;
         }
+        if (b->seg_new) seg_cut_around(env, i, 1, b->built_tick);
+        if (b->seg_rot) seg_cut_around(env, i, 1, b->rot_tick);
+        b->seg_rot = 0;
     }
+    uint8_t touch[FSIM_MAX_LANES];
+    int64_t touch_tick[FSIM_MAX_LANES];
+    memset(touch, 0, sizeof(touch));
+    seg_apply_cuts(env, touch, touch_tick);
+    for (int32_t i = 0; i < env->entity_count; i++) env->entities[i].seg_new = 0;
     /* The chain fronts sideloading onto each lane. */
     for (int32_t r = 0; r < lanes; r++) env->side_first[r] = env->side_link[r] = -1;
     for (int32_t r = lanes - 1; r >= 0; r--) {
@@ -1771,15 +1999,16 @@ static void rebuild_segments(fsim_env *env, const int32_t *pred) {
         env->side_link[r] = env->side_first[t];
         env->side_first[t] = r;
     }
+    seg_bounds(env);
     /* Heads, and the activation order: what no longer heads a segment or
      * holds nothing leaves it; a belt built, removed or turned wakes every
      * segment asleep; what holds items and is neither in it nor asleep (a
      * piece a removed belt left) goes first. */
     for (int32_t c = 0; c < env->chain_count; c++) seg_heads(env, c);
+    seg_restart_touched(env, touch, touch_tick, lanes);
     for (int32_t r = 0; r < lanes; r++) {
         if (env->seg_head[r] == r) continue;
         if (env->seg_listed[r]) seg_list_remove(env, r);
-        env->seg_split_at[r] = 0;
         env->seg_sleep[r] = 0;
     }
     for (int32_t r = 0; r < lanes; r++)
@@ -1799,8 +2028,9 @@ static void rebuild_segments(fsim_env *env, const int32_t *pred) {
         const fsim_entity *e = &env->entities[r >> 1];
         if (!e->alive || e->kind != K_BELT) continue;
         seg_timer(env, e->merge_at[r & 1]);
-        if (env->seg_head[r] == r) seg_timer(env, env->seg_split_at[r]);
     }
+    for (int32_t i = 0; i < env->entity_count; i++)
+        for (int32_t k = 0; k < 3; k++) seg_timer(env, env->entities[i].bnd_split[k]);
 }
 
 /* Belt shapes, lane links, the chains and the order they run in, and every
@@ -2266,7 +2496,7 @@ static int inserter_drop(fsim_env *env, int32_t index) {
     } else {
         fsim_entity *d = &env->entities[s->drop_target];
         if (d->kind == K_BELT) {
-            done = belt_drop(env, s->drop_target, at, s->held);
+            done = belt_drop(env, s->drop_target, at, s->held, index);
         } else {
             done = machine_accepts(d, s->held, 1, 1) == 1;
             if (done) wake(env, s->drop_target);
@@ -2439,6 +2669,10 @@ static int arm_step(fsim_entity *s, arm_target t, double budget, double *spent, 
         *short_tick = 1;
         if (e_ext >= budget) {
             len = s->arm_len + (dl > 0 ? 1.0 : -1.0) * ext * (budget / e_ext);
+            /* Less than a step then left: on the target, as after a full
+             * step (FactorioRL probe_logistics2 `seg_*_8`, `seg_b_7`: 810 J
+             * buy 0.0162 of a 0.0337 extension and the arm is on the item). */
+            if (fabs(t.len - len) < ARM_EXT) len = t.len;
             s->arm_len = len;
             spent[0] = budget;
             return 0;
@@ -2727,6 +2961,21 @@ static int belt_line_busy(const fsim_env *env, const fsim_entity *s) {
  * its pickup belt by then (probe_logistics tick_ins: a drill's output onto
  * the line at t=483, after the inserters ran, shows as a refill at t=484). */
 static void belt_line_added(fsim_env *env, int32_t ref) {
+    /* An inserter waiting for an item looks (its boundary on that lane is
+     * set off, "boundaries") in the tick of the add: a script's between
+     * ticks, an item crossing belts as they move, an entity's a tick before
+     * it reads. */
+    int64_t when = env->updating && !env->belt_phase ? env->tick - 1 : env->tick;
+    for (int32_t k = 0; k < env->inserter_count; k++) {
+        int32_t index = env->inserters[k];
+        fsim_entity *s = &env->entities[index];
+        if (s->held || s->chase_id || s->pickup_target < 0 || s->pickup_target == ref >> 1 ||
+            env->entities[s->pickup_target].kind != K_BELT || s->phase == INS_WAIT_DROP)
+            continue;
+        if (s->look_when || (s->bnd_trig[0] && s->bnd_trig[1])) continue;
+        if (same_watch(env, s->pickup_target * 2, ref) || same_watch(env, s->pickup_target * 2 + 1, ref))
+            s->look_when = when + 1;
+    }
     if (env->belt_sleepers == 0) return;
     for (int32_t k = 0; k < env->inserter_count; k++) {
         fsim_entity *s = &env->entities[env->inserters[k]];
@@ -2740,6 +2989,18 @@ static void belt_line_added(fsim_env *env, int32_t ref) {
          * segment); woken by another entity, from the next. */
         if (!env->belt_phase) s->woke_tick = env->tick;
     }
+}
+
+/* Whether an item `s` would take is on the segment of its pickup belt's lane. */
+static int belt_lane_wanted(const fsim_env *env, const fsim_entity *s, int32_t lane) {
+    const int32_t *refs;
+    int32_t n = watched_lanes(env, s->pickup_target * 2 + lane, &refs);
+    for (int32_t k = 0; k < n; k++) {
+        const fsim_lane *l = lane_of((fsim_env *)env, refs[k]);
+        for (int32_t at = 0; at < l->count; at++)
+            if (inserter_wants(env, s, l->items[at].item)) return 1;
+    }
+    return 0;
 }
 
 /* Whether any item on the segments of `s`'s pickup belt is one it would take. */
@@ -2813,6 +3074,19 @@ static void inserter_chase(fsim_env *env, int32_t index) {
     fsim_entity *s = &env->entities[index];
     belt_pick pick;
     int have = 0;
+    if (s->look_when) {
+        /* An add to its segment made it look, as of that tick: with nothing
+         * to chase on its pickup belt, at the lanes holding items it would
+         * take (`pick_k0_both`: with items on both lanes of its pickup belt
+         * it looks only at the one it chases). */
+        int64_t when = s->look_when - 1;
+        s->look_when = 0;
+        if (!belt_choose(env, s, &pick))
+            for (int32_t lane = 0; lane < 2; lane++)
+                if (!s->bnd_trig[lane] && belt_lane_wanted(env, s, lane))
+                    seg_trigger(env, index, lane, when);
+        s = &env->entities[index];
+    }
     if (s->belt_asleep) {
         /* An item on the pickup belt wakes it, into a move on what it kept. */
         if (!belt_choose(env, s, &pick)) return;
@@ -2820,6 +3094,8 @@ static void inserter_chase(fsim_env *env, int32_t index) {
         env->belt_sleepers--;
         have = 1;
         s->chase_id = pick.id;
+        seg_trigger(env, index, pick.lane, env->tick - 1);
+        s = &env->entities[index];
     } else if (s->chase_id) {
         have = belt_find(env, s, s->chase_id, &pick);
         if (!have && hand_over_pickup(s)) {
@@ -2835,6 +3111,16 @@ static void inserter_chase(fsim_env *env, int32_t index) {
         s->chase_id = pick.id;
     }
     if (!have) s->chase_id = 0;
+    /* It looks: at the item it chases, or with none on its pickup belt at
+     * every lane whose segment holds one it would take ("boundaries"). */
+    if (have) {
+        seg_trigger(env, index, pick.lane, env->tick - 1);
+    } else {
+        for (int32_t lane = 0; lane < 2; lane++)
+            if (!s->bnd_trig[lane] && belt_lane_wanted(env, s, lane))
+                seg_trigger(env, index, lane, env->tick - 1);
+    }
+    s = &env->entities[index];
     arm_target t = have ? arm_toward(pick.vx, pick.vy) : arm_pickup_point(s);
     int at_rest = !have && s->arm_at && s->phase == INS_WAIT_PICKUP;
     double spent[2] = {0.0, 0.0};
@@ -2856,7 +3142,6 @@ static void inserter_chase(fsim_env *env, int32_t index) {
         fsim_entity *b = &env->entities[s->pickup_target];
         s->held = b->lanes[pick.lane].items[pick.at].item;
         lane_take(&b->lanes[pick.lane], pick.at);
-        seg_interact(env, s->pickup_target * 2 + pick.lane, env->tick);
         seg_check(env, s->pickup_target * 2 + pick.lane);
         s->chase_id = 0;
         s->phase = is_fuel(s->held) && s->fuel.count == 0 ? INS_TO_SELF : INS_TO_DROP;
@@ -3010,7 +3295,7 @@ static void update_drill(fsim_env *env, int32_t index) {
         } else if (belt >= 0) {
             /* Onto the lane whose half holds the drop point: lane 1 at 128
              * for a drill facing south onto a belt running east. */
-            if (!belt_drop(env, belt, drop, d->held)) {
+            if (!belt_drop(env, belt, drop, d->held, index)) {
                 d->status = ST_WAITING_FOR_SPACE;
                 d->block_sig = drill_block_signature(env, belt, drop);
                 return;
@@ -3258,6 +3543,7 @@ static void update_character(fsim_env *env) {
  * 4. drills and furnaces in reverse creation order: a furnace sees ore a
  *    drill delivered this tick only on the next one. */
 static void update_world(fsim_env *env) {
+    env->updating = 1;
     if (env->steam_power_at && env->tick >= env->steam_power_at) env->steam_power = 1;
     /* Belt shapes first: a belt built this step carries the character. */
     if (env->logistics_version != env->entities_version) rebuild_logistics(env);
@@ -3277,6 +3563,7 @@ static void update_world(fsim_env *env) {
         default: break;
         }
     }
+    env->updating = 0;
 }
 
 /* ------------------------------------------------------------------ inflight */
@@ -3472,6 +3759,7 @@ static int32_t act_rotate(fsim_env *env, const fsim_action *a) {
     if (kind != 1 || !has_flag(env->entities[index].kind, KF_DIRECTED))
         return reject(env, E_INVALID_TARGET);
     fsim_entity *d = &env->entities[index];
+    if (d->kind == K_BELT) seg_belt_changing(env, index, 0);
     d->direction = (d->direction + (a->reverse ? 12 : 4)) % 16;
     if (d->kind == K_BELT || d->kind == K_INSERTER) {
         /* New links and targets (rebuild_logistics). Not measured: where a
@@ -4206,6 +4494,26 @@ void fsim_remove_pile(fsim_env *env, int32_t index) {
     if (!e->alive || e->kind != K_PILE) return;
     destroy_entity(env, index);
     unblock_drills(env, -1, e->pos);
+}
+
+int32_t fsim_script_rotate(fsim_env *env, int32_t index, int32_t reverse) {
+    if (index < 0 || index >= env->entity_count) return 0;
+    fsim_entity *d = &env->entities[index];
+    if (!d->alive || (d->kind != K_BELT && d->kind != K_INSERTER)) return 0;
+    if (d->kind == K_BELT) seg_belt_changing(env, index, 0);
+    d->direction = (d->direction + (reverse ? 12 : 4)) % 16;
+    env->entities_version++;
+    if (d->kind == K_BELT) env->belts_changed = 1;
+    return 1;
+}
+
+int32_t fsim_script_destroy(fsim_env *env, int32_t index) {
+    if (index < 0 || index >= env->entity_count) return 0;
+    fsim_entity *e = &env->entities[index];
+    if (!e->alive || e->kind != K_BELT) return 0;
+    e->lanes[0].count = e->lanes[1].count = 0;
+    destroy_entity(env, index);
+    return 1;
 }
 
 void fsim_refresh(fsim_env *env) {
