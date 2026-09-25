@@ -108,7 +108,7 @@ def test_known_gaps_are_logistics_scenarios():
     assert LOGISTICS - set(KNOWN_GAPS) == {
         "logistics_belt_rotate_and_mine", "logistics_belt_pickup",
         "logistics_inserter_fuel_exhaustion", "logistics_smelting_chain",
-        "logistics_sideload_merge"}  # fmt: skip
+        "logistics_sideload_merge", "hand_mine_rules"}  # fmt: skip
 
 
 @pytest.mark.parametrize("name", ["construct_smelting_line_reference", "masked_random_rollout"])

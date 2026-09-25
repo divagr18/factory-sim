@@ -50,8 +50,9 @@ class FactorioBuildTaskConfig(vf.TaskConfig):
     """Simulator worker processes per env worker; 0 runs programs in-process (no isolation)."""
     job_timeout_s: float = Field(30.0, gt=0)
     """Per-chunk wall-clock limit before a worker (and its program) is killed."""
-    decision_budget: int = Field(600, ge=1)
-    """Decisions the program may spend in the build phase of each scene."""
+    decision_budget: int | None = Field(None, ge=1)
+    """Decisions the program may spend in the build phase of each scene; None is the
+    task's own (600 for construct_smelting_line, 2500 for belt_smelting)."""
 
 
 class FactorioBuildTask(vf.Task[FactorioBuildData, vf.State, FactorioBuildTaskConfig]):
@@ -105,7 +106,7 @@ class FactorioBuildTask(vf.Task[FactorioBuildData, vf.State, FactorioBuildTaskCo
 
 class FactorioBuildConfig(vf.TasksetConfig):
     sim_task: str = "construct_smelting_line"
-    """factory-sim task. Only construct_smelting_line has a prompt and pinned sets."""
+    """factory-sim task, one of `core.SUPPORTED_TASKS` (belt_smelting: once its scenes land)."""
     split: Literal["train", "val", "holdout"] = "train"
     """Scene split. `holdout` is the frozen FactorioRL holdout: evaluation only."""
     n_scenes: int = Field(16, ge=1, le=core.MAX_SCENES)

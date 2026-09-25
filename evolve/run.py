@@ -118,6 +118,8 @@ class Config:
     status_every_s: float = 30.0
     #: Which of `SEEDS` the population starts from.
     seed_program: str = "trivial"
+    #: The task programs are written and scored for (`evaluate.TASKS`).
+    task: str = "construct_smelting_line"
 
 
 def _now_iso() -> str:
@@ -512,16 +514,17 @@ class Evolution:
         if op == "crossover" and len({p.id for p in parents}) < 2:
             op, parents = "rewrite", parents[:1]  # one member: nothing to cross with
         ref = self.api_reference
+        task = self.config.task
         if op == "crossover":
             messages = mutate.prompt_crossover(
-                ref, parent_dict(parents[0]), parent_dict(parents[1])
+                ref, parent_dict(parents[0]), parent_dict(parents[1]), task=task
             )
         elif op == "rewrite":
             messages = mutate.prompt_rewrite(
-                ref, parent_dict(parents[0]), self.rng.choice(mutate.HINTS)
+                ref, parent_dict(parents[0]), self.rng.choice(mutate.hints(task)), task=task
             )
         else:
-            messages = mutate.OPERATORS[op](ref, parent_dict(parents[0]))
+            messages = mutate.OPERATORS[op](ref, parent_dict(parents[0]), task=task)
         return _Job(op, island, parents, messages, mutate.prompt_hash(messages))
 
     def build_batch(self, n: int) -> list[_Job]:
@@ -849,6 +852,12 @@ def spend_ledger(provider, args):
     return SpendLedger(provider.ledger_path, provider.price, min(caps))
 
 
+def _task(config: Config) -> dict:
+    """`task=` for the evaluator calls, only for a task other than the default, so a
+    construct_smelting_line run calls them exactly as it always has."""
+    return {} if config.task == "construct_smelting_line" else {"task": config.task}
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m evolve.run", description=__doc__.split("\n")[0])
     p.add_argument("--name", required=True)
@@ -880,6 +889,13 @@ def build_parser() -> argparse.ArgumentParser:
         "so a larger one fits fewer requests in a minute",
     )
     p.add_argument("--no-game-notes", action="store_true")
+    p.add_argument(
+        "--task",
+        choices=mutate.TASKS,
+        default="construct_smelting_line",
+        help="the task programs are written and scored for; belt_smelting runs on the v3 "
+        "World once its scenes are ported to fsim.scenes",
+    )
     p.add_argument(
         "--seed-program",
         choices=tuple(SEEDS),
@@ -940,6 +956,7 @@ def config_from_args(args) -> Config:
         seed_program=args.seed_program,
         migrate_every=args.migrate_every,
         request_timeout=args.request_timeout,
+        task=args.task,
     )
 
 
@@ -997,7 +1014,7 @@ def main(argv=None) -> int:
     from evolve.pool import EvalPool
 
     if args.dry_run:
-        dry_run(config, run_dir, evaluate.api_reference())
+        dry_run(config, run_dir, evaluate.api_reference(**_task(config)))
         return 0
 
     provider = load_provider(args.config)
@@ -1008,7 +1025,7 @@ def main(argv=None) -> int:
         concurrency=args.concurrency,
         timeout_s=min(SOCKET_TIMEOUT_S, args.request_timeout),
     )
-    sets = evaluate.scene_sets()
+    sets = evaluate.scene_sets(**_task(config))
     digests = {
         split: [evaluate.scene_digest(s[2]) for s in scenes] for split, scenes in sets.items()
     }
@@ -1036,7 +1053,7 @@ def main(argv=None) -> int:
             job="evolve.evaluate:worker_job",
             timeout_s=args.job_timeout,
         ) as pool:
-            evaluator = evaluate.Evaluator(pool, sets)
+            evaluator = evaluate.Evaluator(pool, sets, **_task(config))
             evo = Evolution(
                 config,
                 client,
@@ -1044,7 +1061,7 @@ def main(argv=None) -> int:
                 store,
                 islands,
                 run_dir / "status.json",
-                api_reference=evaluate.api_reference(),
+                api_reference=evaluate.api_reference(**_task(config)),
                 ledger=ledger,
             )
             status = evo.run()

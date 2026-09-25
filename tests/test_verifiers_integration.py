@@ -102,6 +102,20 @@ def test_only_construct_smelting_line_is_offered():
         core.rows("plate_line", "train", 8, 1)
 
 
+def test_belt_smelting_is_known_but_gated_on_its_scenes():
+    assert "belt_smelting" in core.KNOWN_TASKS
+    if evaluate.scenes_ported("belt_smelting"):
+        assert "belt_smelting" in core.SUPPORTED_TASKS
+        return
+    assert core.SUPPORTED_TASKS == (TASK,)
+    with pytest.raises(ValueError, match="not ported"):
+        core.rows("belt_smelting", "train", 8, 1)
+    # The prompt itself already exists and names the v3 API.
+    text = core.system_prompt(True, "belt_smelting")
+    assert "world.belt_lanes" in text and mutate.GAME_NOTES_BELT_SMELTING in text
+    assert mutate.GAME_NOTES_BELT_SMELTING not in core.system_prompt(False, "belt_smelting")
+
+
 # ------------------------------------------------------------------ holdout
 
 

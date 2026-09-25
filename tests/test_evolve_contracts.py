@@ -30,12 +30,15 @@ def test_the_seed_passes_the_sandbox():
 
 
 def test_the_sandbox_knows_every_world_method_and_nothing_else():
-    """`WORLD_API` is readable off any name, so it must be exactly World's surface.
+    """`WORLD_API` is readable off any name, so it must be exactly World's surface
+    (with `WorldV3`'s, the v3 profile's World).
 
     A method World gains but the list lacks only works on the literal name
     `world`; a name the list keeps after World drops it is an attribute any value
     may be asked for."""
-    methods = _public_methods(World)
+    from fsim.program_api import WorldV3
+
+    methods = _public_methods(World) | _public_methods(WorldV3)
     counters = {"refusals", "failures"}  # plain int attributes, set in __init__
     assert methods | counters == sandbox.WORLD_API, (
         f"World has {sorted(methods - sandbox.WORLD_API)} not in WORLD_API; "

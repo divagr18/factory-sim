@@ -182,7 +182,12 @@ def test_a_chunk_the_pool_lost_counts_as_failed_scenes(sets):
 def test_api_reference_lists_exactly_the_sandboxs_world_api():
     ref = ev.api_reference()
     listed = set(re.findall(r"world\.(\w+)\(", ref))
-    assert listed == sandbox.WORLD_API - ev.COUNTERS
+    v3 = ev.api_reference("belt_smelting")
+    listed_v3 = set(re.findall(r"world\.(\w+)\(", v3))
+    # v2 lists its own methods; v3 lists every name the sandbox allows.
+    assert listed < listed_v3
+    assert listed_v3 == sandbox.WORLD_API - ev.COUNTERS
+    assert listed_v3 - listed == {"rotate", "marker", "belt_lanes", "mine_resource"}
     assert all(f"world.{c}" in ref for c in ev.COUNTERS)
     assert "Entity" in ref and "facing" in ref
 

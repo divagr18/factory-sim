@@ -23,6 +23,23 @@ static const int32_t RL_ITEM_IDS[RL_ITEMS] = {
     IT_WOODEN_CHEST, IT_BURNER_DRILL, IT_BURNER_INSERTER,
 };
 
+/* encoders.ITEMS_V3: ITEMS, then assembling-machine-1, boiler, steam-engine
+ * and offshore-pump, which the simulator does not have. */
+static const int32_t RL3_ITEM_IDS[RL3_ITEMS] = {
+    IT_IRON_ORE, IT_COPPER_ORE, IT_COAL, IT_STONE, IT_IRON_PLATE, IT_COPPER_PLATE,
+    IT_STONE_FURNACE, IT_IRON_GEAR, IT_TRANSPORT_BELT, IT_WOOD, IT_SMALL_POLE,
+    IT_WOODEN_CHEST, IT_BURNER_DRILL, IT_BURNER_INSERTER, IT_NONE, IT_NONE, IT_NONE, IT_NONE,
+};
+
+/* An item's (ITEMS_V3 index + 1), or 0 outside the vocabulary: v3's item
+ * features are this / RL3_ITEMS. */
+static int32_t rl3_item_slot(int32_t item) {
+    if (item == IT_NONE) return 0;
+    for (int32_t k = 0; k < RL3_ITEMS; k++)
+        if (RL3_ITEM_IDS[k] == item) return k + 1;
+    return 0;
+}
+
 /* Catalog operation indices (parameterized-v1). */
 #define OP_PLACE_AT 12
 #define OP_MINE_AT 13
@@ -34,6 +51,9 @@ static const int32_t RL_ITEM_IDS[RL_ITEMS] = {
 #define OP_CRAFT 19
 #define OP_CANCEL 20
 #define OP_WAIT 21
+/* v3 only: hand-mine the resource tile under placement slot p, count from the
+ * amount dimension (FactorioRL catalog.PARAMETERIZED_V3's `mine_tile`). */
+#define OP_MINE_TILE 22
 
 static const int32_t TRANSFER_AMOUNTS[3] = {1, 5, 20};
 
@@ -71,8 +91,9 @@ typedef struct {
 } rl_row;
 
 /* The entity table's rows: visible entities then remembered ones, stably by
- * distance from the character, at most RL_MAX_ENTITIES. */
-static int32_t rl_rows(const fsim_env *env, rl_row *rows) {
+ * distance from the character, at most `limit` (RL_MAX_ENTITIES, or
+ * RL3_MAX_ENTITIES under v3). */
+static int32_t rl_rows(const fsim_env *env, rl_row *rows, int32_t limit) {
     double ox = tiles(env->char_pos.x), oy = tiles(env->char_pos.y);
     int32_t n = 0;
     for (int32_t k = 0; k < env->seen_count; k++) {
@@ -100,32 +121,60 @@ static int32_t rl_rows(const fsim_env *env, rl_row *rows) {
         }
         rows[j + 1] = v;
     }
-    return n > RL_MAX_ENTITIES ? RL_MAX_ENTITIES : n;
+    return n > limit ? limit : n;
 }
 
 /* ------------------------------------------------------------------ domains */
 
+/* Only the counts, `held` and `source` are zeroed: every other array is
+ * read no further than its count (or, for `placement_legal`, than the slots a
+ * v2 or v3 build writes). */
 typedef struct {
-    int32_t targets[RL_MAX_ENTITIES + FSIM_MAX_TILES + 64];
+    int32_t targets[FSIM_MAX_SWEEP + FSIM_MAX_TILES];
     int32_t target_count;
-    int32_t placements[2 * RL_PLACEMENTS];   /* tile x, y */
+    int32_t remembered[RL3_MAX_ENTITIES];     /* v2, v3: target k is a remembered row */
+    int32_t visible_count;                    /* visible entities + resource tiles */
+    int32_t placements[2 * RL3_PLACEMENTS];   /* tile x, y */
     int32_t placement_count;
-    int32_t placement_legal[RL_PLACEMENTS];  /* v2: slot k is a legal tile */
-    int32_t held[IT_COUNT];                  /* item held with a count */
-    int32_t source[IT_COUNT];                /* item some visible entity holds */
+    int32_t placement_legal[RL3_PLACEMENTS];  /* v2, v3: slot k is a legal tile */
+    int32_t held[IT_COUNT];                   /* item held with a count */
+    int32_t source[IT_COUNT];                 /* item some visible entity holds */
+    /* v3 only: row k names a visible entity within reach (can_reach), and
+     * slot k's tile holds a visible resource within resource reach (its tile
+     * handle, or 0). */
+    int32_t row_legal[RL3_MAX_ENTITIES];
+    int32_t row_legal_count;
+    int32_t mineable[RL3_PLACEMENTS];
+    int32_t mineable_count;
 } rl_domains;
 
-static void rl_domains_build(const fsim_rl *rl, rl_domains *d) {
+/* The argument domains under action space `space` (v1, v2 or v3). */
+static void rl_domains_build(const fsim_rl *rl, rl_domains *d, int32_t space) {
     const fsim_env *env = rl->env;
-    int v2 = rl->task.action_space == ACTION_SPACE_V2;
-    memset(d, 0, sizeof(*d));
-    if (v2) {
+    int grid = space == ACTION_SPACE_V2 || space == ACTION_SPACE_V3;
+    int32_t radius = space == ACTION_SPACE_V3 ? RL3_PLACEMENT_RADIUS : RL_PLACEMENT_RADIUS;
+    d->target_count = 0;
+    d->placement_count = 0;
+    d->visible_count = env->seen_count + env->tile_count;
+    memset(d->held, 0, sizeof(d->held));
+    memset(d->source, 0, sizeof(d->source));
+    if (grid) {
         rl_row rows[FSIM_MAX_SWEEP + FSIM_MAX_MEMORY];
-        int32_t n = rl_rows(env, rows);
+        int32_t n = rl_rows(env, rows,
+                            space == ACTION_SPACE_V3 ? RL3_MAX_ENTITIES : RL_MAX_ENTITIES);
+        if (space == ACTION_SPACE_V3) d->row_legal_count = 0;
         for (int32_t k = 0; k < n; k++) {
+            d->remembered[k] = rows[k].remembered;
             d->targets[d->target_count++] = rows[k].remembered
                 ? env->memory[rows[k].index].handle
                 : env->seen[rows[k].index].handle;
+            if (space == ACTION_SPACE_V3) {
+                /* `can_reach_entity` (FactorioRL docs/evidence/handmine-reach). */
+                int ok = !rows[k].remembered &&
+                         can_reach(env, 1, env->seen[rows[k].index].entity);
+                d->row_legal[k] = ok;
+                d->row_legal_count += ok;
+            }
         }
     } else {
         for (int32_t k = 0; k < env->seen_count; k++)
@@ -138,37 +187,58 @@ static void rl_domains_build(const fsim_rl *rl, rl_domains *d) {
     int32_t here_y = (int32_t)floordiv(env->char_pos.y, TILE);
     /* Occupancy of the (2R+1)^2 window, marked in one pass over the sweep
      * and the blocked tiles instead of once per candidate. */
-    enum { SIDE = 2 * RL_PLACEMENT_RADIUS + 1 };
-    uint8_t occupied_at[SIDE * SIDE];
-    memset(occupied_at, 0, sizeof(occupied_at));
-    occupied_at[RL_PLACEMENT_RADIUS * SIDE + RL_PLACEMENT_RADIUS] = 1; /* own tile */
+    const int32_t side = 2 * radius + 1;
+    uint8_t occupied_at[(2 * RL3_PLACEMENT_RADIUS + 1) * (2 * RL3_PLACEMENT_RADIUS + 1)];
+    memset(occupied_at, 0, (size_t)(side * side));
+    occupied_at[radius * side + radius] = 1; /* own tile */
     for (int32_t k = 0; k < env->seen_count; k++) {
         const fsim_entity *e = &env->entities[env->seen[k].entity];
         if (!has_flag(e->kind, KF_COLLIDES)) continue;
-        int64_t dx = floordiv(e->pos.x, TILE) - here_x + RL_PLACEMENT_RADIUS;
-        int64_t dy = floordiv(e->pos.y, TILE) - here_y + RL_PLACEMENT_RADIUS;
-        if (dx >= 0 && dx < SIDE && dy >= 0 && dy < SIDE) occupied_at[dx * SIDE + dy] = 1;
+        int64_t dx = floordiv(e->pos.x, TILE) - here_x + radius;
+        int64_t dy = floordiv(e->pos.y, TILE) - here_y + radius;
+        if (dx >= 0 && dx < side && dy >= 0 && dy < side) occupied_at[dx * side + dy] = 1;
     }
     for (int32_t k = 0; k < env->blocked_count; k++) {
-        int64_t dx = (int64_t)env->blocked[2 * k] - here_x + RL_PLACEMENT_RADIUS;
-        int64_t dy = (int64_t)env->blocked[2 * k + 1] - here_y + RL_PLACEMENT_RADIUS;
-        if (dx >= 0 && dx < SIDE && dy >= 0 && dy < SIDE) occupied_at[dx * SIDE + dy] = 1;
+        int64_t dx = (int64_t)env->blocked[2 * k] - here_x + radius;
+        int64_t dy = (int64_t)env->blocked[2 * k + 1] - here_y + radius;
+        if (dx >= 0 && dx < side && dy >= 0 && dy < side) occupied_at[dx * side + dy] = 1;
     }
-    for (int32_t dx = -RL_PLACEMENT_RADIUS; dx <= RL_PLACEMENT_RADIUS; dx++) {
-        for (int32_t dy = -RL_PLACEMENT_RADIUS; dy <= RL_PLACEMENT_RADIUS; dy++) {
+    for (int32_t dx = -radius; dx <= radius; dx++) {
+        for (int32_t dy = -radius; dy <= radius; dy++) {
             int32_t tx = here_x + dx, ty = here_y + dy;
-            int32_t slot = (dx + RL_PLACEMENT_RADIUS) * SIDE + dy + RL_PLACEMENT_RADIUS;
-            if (v2) {
+            int32_t slot = (dx + radius) * side + dy + radius;
+            if (grid) {
                 d->placements[2 * slot] = tx;
                 d->placements[2 * slot + 1] = ty;
-                d->placement_legal[slot] = !occupied_at[slot];
-                d->placement_count += !occupied_at[slot];
+                int ok = !occupied_at[slot];
+                /* v3: and within the mod's build distance of the character,
+                 * straight-line to the requested tile centre (actions.lua). */
+                if (ok && space == ACTION_SPACE_V3) {
+                    fsim_pos centre = {tx * TILE + TILE / 2, ty * TILE + TILE / 2};
+                    ok = centre_distance(env->char_pos, centre) <= BUILD_DISTANCE;
+                }
+                d->placement_legal[slot] = ok;
+                d->placement_count += ok;
                 continue;
             }
             if (occupied_at[slot]) continue;
             d->placements[2 * d->placement_count] = tx;
             d->placements[2 * d->placement_count + 1] = ty;
             d->placement_count++;
+        }
+    }
+    if (space == ACTION_SPACE_V3) {
+        /* Visible resource tiles within resource reach, straight-line to the
+         * tile centre as actions.lua checks it; all lie inside the window. */
+        memset(d->mineable, 0, sizeof(d->mineable));
+        d->mineable_count = 0;
+        for (int32_t k = 0; k < env->tile_count; k++) {
+            const fsim_resource *r = &env->resources[env->tiles[k].resource];
+            if (centre_distance(env->char_pos, resource_pos(r)) > RESOURCE_REACH) continue;
+            int32_t dx = r->tx - here_x, dy = r->ty - here_y;
+            if (dx < -radius || dx > radius || dy < -radius || dy > radius) continue;
+            d->mineable[(dx + radius) * side + dy + radius] = env->tiles[k].handle;
+            d->mineable_count++;
         }
     }
     for (int i = 0; i < FSIM_MAIN_SLOTS; i++)
@@ -195,8 +265,10 @@ static int rl_any(const int32_t *flags) {
 
 void fsim_rl_mask(fsim_rl *rl, uint8_t *mask) {
     rl_domains d;
-    rl_domains_build(rl, &d);
+    /* v1 and v2 only: a v3 env's mask is fsim_rl_mask3's, and this one keeps
+     * to v1's layout rather than write past a v1-sized buffer. */
     int v2 = rl->task.action_space == ACTION_SPACE_V2;
+    rl_domains_build(rl, &d, v2 ? ACTION_SPACE_V2 : ACTION_SPACE_V1);
     memset(mask, 0, RL_MASK_SIZE);
     int has_targets = d.target_count > 0;
     int has_items = rl_any(d.held);
@@ -235,13 +307,147 @@ void fsim_rl_mask(fsim_rl *rl, uint8_t *mask) {
     for (int k = 0; k <= 3; k++) mask[offset + k] = 1;
 }
 
+/* The v3 mask (RL3_MASK_SIZE bytes), whatever the env's action space.
+ * Mirrors `ParameterizedEnv(profile="v3").action_masks`: an operation is legal
+ * when `FactorioEnv.action_masks` allows it, it can be decoded, and every
+ * argument dimension it uses has a legal value -- so a verb that needs a
+ * target is masked when the table has no row. */
+void fsim_rl_mask3(fsim_rl *rl, uint8_t *mask) {
+    rl_domains d;
+    rl_domains_build(rl, &d, ACTION_SPACE_V3);
+    memset(mask, 0, RL3_MASK_SIZE);
+    int rows = d.visible_count > 0 && d.row_legal_count > 0;
+    int has_items = rl_any(d.held);
+    int has_sources = rl_any(d.source);
+    /* The item dimension offers ITEMS_V3 only: an item outside it (a wall) can
+     * make the domain non-empty and still leave the dimension with nothing. */
+    int item_dim = 0;
+    for (int k = 0; k < RL3_ITEMS; k++) {
+        int32_t item = RL3_ITEM_IDS[k];
+        if (item != IT_NONE && (d.held[item] || d.source[item])) item_dim = 1;
+    }
+    for (int op = 0; op < RL3_OPERATIONS; op++) {
+        int legal;
+        switch (op) {
+        case OP_PLACE_AT: legal = d.placement_count > 0 && has_items && item_dim; break;
+        case OP_MINE_AT: case OP_ROTATE_AT: case OP_ROTATE_REVERSE: legal = rows; break;
+        case OP_GIVE_TO: legal = rows && has_items && item_dim; break;
+        case OP_TAKE_FROM: legal = rows && has_sources && item_dim; break;
+        case OP_SET_RECIPE: case OP_CRAFT: case OP_CANCEL: legal = 0; break;
+        case OP_MINE_TILE: legal = d.mineable_count > 0; break;
+        default: legal = 1; break;
+        }
+        mask[op] = (uint8_t)legal;
+    }
+    int32_t offset = RL3_OPERATIONS;
+    mask[offset] = 1;
+    for (int32_t k = 0; k < d.target_count && k < RL3_TARGETS; k++)
+        mask[offset + 1 + k] = (uint8_t)d.row_legal[k];
+    offset += RL3_TARGETS + 1;
+    mask[offset] = 1;
+    /* One dimension for place_at's tile and mine_tile's: the union. */
+    for (int32_t k = 0; k < RL3_PLACEMENTS; k++)
+        mask[offset + 1 + k] = (uint8_t)(d.placement_legal[k] || d.mineable[k] != 0);
+    offset += RL3_PLACEMENTS + 1;
+    for (int k = 0; k <= 4; k++) mask[offset + k] = 1;
+    offset += 5;
+    mask[offset] = 1;
+    for (int k = 0; k < RL3_ITEMS; k++) {
+        int32_t item = RL3_ITEM_IDS[k];
+        mask[offset + 1 + k] = (uint8_t)(item != IT_NONE && (d.held[item] || d.source[item]));
+    }
+    offset += RL3_ITEMS + 1;
+    for (int k = 0; k <= 3; k++) mask[offset + k] = 1;
+}
+
+/* v3 decode for ops 12..17 (moves, wait and the undecodable three are handled
+ * by the caller). As `ParameterizedEnv.decode` then `step_arguments`: an
+ * argument left unused or out of range, an occupied tile, a target row that is
+ * remembered rather than visible (not in the `targets` domain), or an item not
+ * held (not held by any visible entity, for take_from) is a failure. */
+static int32_t rl_decode3(fsim_rl *rl, const int32_t *v, fsim_action *out) {
+    rl_domains d;
+    rl_domains_build(rl, &d, ACTION_SPACE_V3);
+    int32_t op = v[0];
+    int32_t targets = d.target_count < RL3_TARGETS ? d.target_count : RL3_TARGETS;
+    int32_t target = v[1], placement = v[2], direction = v[3], item_index = v[4], amount = v[5];
+    switch (op) {
+    case OP_PLACE_AT:
+        if (item_index < 1 || item_index > RL3_ITEMS) return 1;
+        if (placement < 1 || placement > RL3_PLACEMENTS || !d.placement_legal[placement - 1])
+            return 1;
+        if (direction < 1 || direction > 4) return 1;
+        break;
+    case OP_MINE_AT: case OP_ROTATE_AT: case OP_ROTATE_REVERSE:
+        if (target < 1 || target > targets) return 1;
+        break;
+    case OP_GIVE_TO: case OP_TAKE_FROM:
+        if (target < 1 || target > targets) return 1;
+        if (item_index < 1 || item_index > RL3_ITEMS) return 1;
+        if (amount < 1 || amount > 3) return 1;
+        break;
+    case OP_MINE_TILE:
+        if (placement < 1 || placement > RL3_PLACEMENTS || !d.mineable[placement - 1]) return 1;
+        if (amount < 1 || amount > 3) return 1;
+        out->verb = V_MINE;
+        out->handle = d.mineable[placement - 1];
+        out->count = TRANSFER_AMOUNTS[amount - 1];
+        return 0;
+    default:
+        return 1;
+    }
+    /* A row out of reach or only remembered is masked, and refused here. */
+    if (op != OP_PLACE_AT && !d.row_legal[target - 1]) return 1;
+    int32_t item = item_index > 0 ? RL3_ITEM_IDS[item_index - 1] : IT_NONE;
+    if (op == OP_PLACE_AT || op == OP_GIVE_TO) {
+        if (item == IT_NONE || !d.held[item]) return 1;
+    } else if (op == OP_TAKE_FROM) {
+        if (item == IT_NONE || !d.source[item]) return 1;
+    }
+    switch (op) {
+    case OP_PLACE_AT:
+        out->verb = V_PLACE;
+        out->item = item;
+        out->direction = direction - 1;
+        out->position.x = d.placements[2 * (placement - 1)] * TILE + TILE / 2;
+        out->position.y = d.placements[2 * (placement - 1) + 1] * TILE + TILE / 2;
+        break;
+    case OP_MINE_AT:
+        out->verb = V_MINE;
+        out->handle = d.targets[target - 1];
+        out->count = 1;
+        break;
+    case OP_ROTATE_AT: case OP_ROTATE_REVERSE:
+        out->verb = V_ROTATE;
+        out->handle = d.targets[target - 1];
+        out->reverse = op == OP_ROTATE_REVERSE;
+        break;
+    case OP_GIVE_TO:
+        out->verb = V_TRANSFER;
+        out->from_handle = 0;
+        out->to_handle = d.targets[target - 1];
+        out->item = item;
+        out->count = TRANSFER_AMOUNTS[amount - 1];
+        break;
+    case OP_TAKE_FROM:
+        out->verb = V_TRANSFER;
+        out->from_handle = d.targets[target - 1];
+        out->to_handle = 0;
+        out->item = item;
+        out->count = TRANSFER_AMOUNTS[amount - 1];
+        break;
+    }
+    return 0;
+}
+
 /* ------------------------------------------------------------------ decode */
 
 int32_t fsim_rl_decode(fsim_rl *rl, const int32_t *v, fsim_action *out) {
     memset(out, 0, sizeof(*out));
     out->verb = V_WAIT;
     int32_t op = v[0];
-    if (op < 0 || op >= RL_OPERATIONS) return 1;
+    int32_t ops = rl->task.action_space == ACTION_SPACE_V3 ? RL3_OPERATIONS : RL_OPERATIONS;
+    if (op < 0 || op >= ops) return 1;
     if (op < 12) {
         out->verb = V_MOVE;
         out->direction = op % 4;
@@ -250,10 +456,11 @@ int32_t fsim_rl_decode(fsim_rl *rl, const int32_t *v, fsim_action *out) {
     }
     if (op == OP_WAIT) return 0;
     if (op == OP_SET_RECIPE || op == OP_CRAFT || op == OP_CANCEL) return 1;
+    if (rl->task.action_space == ACTION_SPACE_V3) return rl_decode3(rl, v, out);
 
     rl_domains d;
-    rl_domains_build(rl, &d);
     int v2 = rl->task.action_space == ACTION_SPACE_V2;
+    rl_domains_build(rl, &d, v2 ? ACTION_SPACE_V2 : ACTION_SPACE_V1);
     int32_t targets = d.target_count < RL_TARGETS ? d.target_count : RL_TARGETS;
     int32_t placements = d.placement_count < RL_PLACEMENTS ? d.placement_count : RL_PLACEMENTS;
     int32_t target = v[1], placement = v[2], direction = v[3], item_index = v[4], amount = v[5];
@@ -342,6 +549,7 @@ typedef struct {
     float *self_;
     float *inventory;
     float *goal;
+    int32_t v3;           /* the v3 layout (RL3_*): fsim_obs3 */
 } rl_fields;
 
 /* Round half to even, as `rint` does in the default rounding mode, without
@@ -372,6 +580,72 @@ static void rl_set_flag(uint8_t *flags, int32_t k, int32_t cell) {
 }
 
 static void rl_encode_into(fsim_rl *rl, rl_fields *obs);
+
+/* Features 16..31 of a v3 row (features 0..15 are v1's):
+ *   16, 17  lane 1, lane 2 item count, min(n, 8) / 8          belts
+ *   18, 19  a left turn, a right turn                          belts
+ *   20, 21  the hand holds an item; its (ITEMS_V3 index + 1) / 18   inserters
+ *   22..24  pickup offset from the entity / 2 (x, y), present  inserters
+ *   25..27  drop offset / 2 (x, y), present                    inserters, drills
+ *   28      the most plentiful contents item, (index + 1) / 18 (ties: lowest index)
+ *   29      power satisfaction: 0 (Stage 2); 30, 31 reserved
+ * A remembered row carries only 28: memory keeps contents, nothing else. */
+static void rl3_entity_features(const fsim_env *env, const rl_row *row, float *f) {
+    int32_t counts[IT_COUNT];
+    memset(counts, 0, sizeof(counts));
+    if (!row->remembered) {
+        const fsim_entity *e = &env->entities[env->seen[row->index].entity];
+        if (e->kind == K_BELT) {
+            int32_t n1 = e->lanes[0].count < 8 ? e->lanes[0].count : 8;
+            int32_t n2 = e->lanes[1].count < 8 ? e->lanes[1].count : 8;
+            f[16] = (float)((double)n1 / 8.0);
+            f[17] = (float)((double)n2 / 8.0);
+            f[18] = e->shape == BELT_LEFT ? 1.0f : 0.0f;
+            f[19] = e->shape == BELT_RIGHT ? 1.0f : 0.0f;
+        } else if (e->kind == K_INSERTER) {
+            if (e->held != IT_NONE) {
+                f[20] = 1.0f;
+                f[21] = (float)((double)rl3_item_slot(e->held) / (double)RL3_ITEMS);
+            }
+            fsim_pos pick = inserter_point(e, INSERTER_PICKUP);
+            fsim_pos drop = inserter_point(e, -INSERTER_DROP);
+            f[22] = (float)rl_clip(tiles(pick.x - e->pos.x) / 2.0, -1.0, 1.0);
+            f[23] = (float)rl_clip(tiles(pick.y - e->pos.y) / 2.0, -1.0, 1.0);
+            f[24] = 1.0f;
+            f[25] = (float)rl_clip(tiles(drop.x - e->pos.x) / 2.0, -1.0, 1.0);
+            f[26] = (float)rl_clip(tiles(drop.y - e->pos.y) / 2.0, -1.0, 1.0);
+            f[27] = 1.0f;
+        } else if (e->kind == K_DRILL) {
+            fsim_pos drop = drop_position(e);
+            f[25] = (float)rl_clip(tiles(drop.x - e->pos.x) / 2.0, -1.0, 1.0);
+            f[26] = (float)rl_clip(tiles(drop.y - e->pos.y) / 2.0, -1.0, 1.0);
+            f[27] = 1.0f;
+        }
+        if (e->kind == K_CHEST) {
+            for (int i = 0; i < FSIM_CHEST_SLOTS; i++)
+                if (e->chest[i].count > 0) counts[e->chest[i].item] += e->chest[i].count;
+        } else {
+            fsim_stack shown = shown_contents(e);
+            if (shown.count > 0) counts[shown.item] += shown.count;
+        }
+    } else {
+        const fsim_memory *m = &env->memory[row->index];
+        if (m->kind == K_CHEST) {
+            for (int32_t it = 0; it < IT_COUNT; it++) counts[it] = m->amounts[it];
+        } else if (m->contents.count > 0) {
+            counts[m->contents.item] += m->contents.count;
+        }
+    }
+    int32_t best = 0, best_count = 0;
+    for (int32_t k = 0; k < RL3_ITEMS; k++) {
+        int32_t item = RL3_ITEM_IDS[k];
+        if (item != IT_NONE && counts[item] > best_count) {
+            best = k + 1;
+            best_count = counts[item];
+        }
+    }
+    if (best) f[28] = (float)((double)best / (double)RL3_ITEMS);
+}
 
 void fsim_rl_encode(fsim_rl *rl, fsim_obs *obs) {
     memset(obs, 0, sizeof(*obs));
@@ -418,9 +692,10 @@ static void rl_encode_into(fsim_rl *rl, rl_fields *obs) {
 
     /* Rows: visible entities then remembered ones, stably by distance. */
     rl_row rows[FSIM_MAX_SWEEP + FSIM_MAX_MEMORY];
-    int32_t n = rl_rows(env, rows);
+    const int32_t stride = obs->v3 ? RL3_ENTITY_FEATURES : RL_ENTITY_FEATURES;
+    int32_t n = rl_rows(env, rows, obs->v3 ? RL3_MAX_ENTITIES : RL_MAX_ENTITIES);
     for (int32_t i = 0; i < n; i++) {
-        float *f = &obs->entities[i * RL_ENTITY_FEATURES];
+        float *f = &obs->entities[i * stride];
         int32_t kind, direction, status, working_known, working;
         int32_t contents = 0, fuel = 0, output = 0;
         double px, py, age = 0.0;
@@ -469,6 +744,7 @@ static void rl_encode_into(fsim_rl *rl, rl_fields *obs) {
         f[13] = working_known ? 1.0f : 0.0f;
         f[14] = (float)rl_log_count((double)fuel, 200.0);
         f[15] = (float)rl_log_count((double)output, 200.0);
+        if (obs->v3) rl3_entity_features(env, &rows[i], f);
         obs->entity_mask[i] = 1;
     }
 
@@ -497,12 +773,46 @@ static void rl_encode_into(fsim_rl *rl, rl_fields *obs) {
         }
         obs->self_[11] = (float)((double)refused / (double)env->event_count);
     }
-    for (int k = 0; k < RL_ITEMS; k++) {
-        int32_t item = RL_ITEM_IDS[k];
+    const int32_t *item_ids = obs->v3 ? RL3_ITEM_IDS : RL_ITEM_IDS;
+    const int32_t item_count = obs->v3 ? RL3_ITEMS : RL_ITEMS;
+    for (int k = 0; k < item_count; k++) {
+        int32_t item = item_ids[k];
         obs->inventory[k] = item == IT_NONE ? 0.0f
                           : (float)rl_log_count((double)count_main(env, item), 200.0);
     }
     rl_goal(rl, obs->goal);
+    if (obs->v3) {
+        /* The task's public markers after the v1 goal: (dx, dy, 1) each, over
+         * 128 tiles so a site across the map still has a direction. */
+        for (int32_t k = 0; k < rl->task.marker_count && k < RL3_MARKERS; k++) {
+            float *g = &obs->goal[RL_GOAL_FEATURES + 3 * k];
+            int32_t at = rl->task.marker_entity[k];
+            double mx, my;
+            if (at >= 0 && at < env->entity_count && env->entities[at].alive) {
+                mx = tiles(env->entities[at].pos.x);
+                my = tiles(env->entities[at].pos.y);
+            } else if (rl->task.marker_present[k]) {
+                mx = rl->task.marker_x[k];
+                my = rl->task.marker_y[k];
+            } else {
+                continue;
+            }
+            g[0] = (float)rl_clip((mx - ox) / 128.0, -1.0, 1.0);
+            g[1] = (float)rl_clip((my - oy) / 128.0, -1.0, 1.0);
+            g[2] = 1.0f;
+        }
+    }
+}
+
+void fsim_rl_encode3(fsim_rl *rl, fsim_obs3 *obs) {
+    /* Belt shapes are derived state, brought up to date by the next tick; an
+     * observation between ticks reads them as the engine reports them now, as
+     * the wire renderer does (Sim.hidden). */
+    fsim_refresh(rl->env);
+    memset(obs, 0, sizeof(*obs));
+    rl_fields fields = {obs->grid, NULL, NULL, obs->entities, obs->entity_mask, obs->self_,
+                        obs->inventory, obs->goal, 1};
+    rl_encode_into(rl, &fields);
 }
 
 /* ------------------------------------------------------------------ task */
@@ -809,6 +1119,7 @@ void fsim_rl_reset(fsim_rl *rl, const fsim_task *task, const fsim_scene *scene) 
     fsim_env *env = rl->env;
     memset((char *)rl + sizeof(rl->env), 0, sizeof(*rl) - sizeof(rl->env));
     rl->task = *task;
+    env->sweep_cap = task->entity_cap;   /* kept by fsim_reset; 0: local-v2's 48 */
     fsim_reset(env, scene);
     rl_window_record(rl);
     rl->high_water = (double)env->produced[IT_IRON_PLATE];
@@ -873,7 +1184,7 @@ void fsim_rl_step_range8(fsim_rl **rls, int32_t first, int32_t last, const int32
 
 int32_t fsim_rl_targets(fsim_rl *rl, int32_t *handles, int32_t cap) {
     rl_domains d;
-    rl_domains_build(rl, &d);
+    rl_domains_build(rl, &d, rl->task.action_space);
     int32_t n = d.target_count < cap ? d.target_count : cap;
     for (int32_t k = 0; k < n; k++) handles[k] = d.targets[k];
     return n;

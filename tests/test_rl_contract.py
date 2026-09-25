@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import lzma
 
 import numpy as np
 import pytest
@@ -97,4 +98,56 @@ def first_difference(name) -> tuple | None:
             where = "decode failure"
         if where is not None:
             return record["decision"], where
+    return None
+
+
+# ------------------------------------------------------------------ v3
+
+#: FactorioRL's v3 encoding of the same recorded observations: per scenario, the
+#: v3 tensor hashes and mask at each decision (`tools/v3_contract.py` there).
+#: The traces were recorded under local-v2, which carries no belt lanes, hands or
+#: pickup and drop points; FactorioRL fills those from each record's engine
+#: state the way the local-v3 sensor reports them.
+V3_GOLDEN = GOLDEN / "v3_contract.json.xz"
+V3 = json.loads(lzma.decompress(V3_GOLDEN.read_bytes())) if V3_GOLDEN.is_file() else None
+
+
+@pytest.mark.skipif(V3 is None, reason="no tests/golden/v3_contract.json.xz")
+@pytest.mark.parametrize("name", sorted((V3 or {}).get("scenarios", {})))
+def test_contract_v3(name):
+    assert first_difference_v3(name) is None
+
+
+def first_difference_v3(name) -> tuple | None:
+    """The first recorded decision whose v3 tensors or mask differ.
+
+    The run is the recorded v1 one -- its vectors decode as they did -- with
+    the sensor's entity cap at local-v3's 96, and each decision is also read
+    through `observe3`."""
+    header, records = read_trace(GOLDEN / f"{name}.jsonl.xz")
+    expected = {entry["decision"]: entry for entry in V3["scenarios"][name]}
+    env = RlEnv()
+    env.reset(
+        header["task"],
+        header["blueprint"],
+        decision_ticks=header["decision_ticks"],
+        max_steps=header["max_decision_steps"],
+        construction_tick_limit=header["construction_tick_limit"],
+        entity_cap=96,
+    )
+    for record in records:
+        if record["decision"] > 0:
+            env.step(record["transition"]["action"]["vector"])
+        want = expected.get(record["decision"])
+        if want is None:
+            continue
+        obs, mask = env.observe3()
+        hashes = tensor_hashes(obs)
+        for key, value in want["tensors"].items():
+            if hashes[key] != value:
+                return record["decision"], f"tensor {key}"
+        bits = "".join("1" if b else "0" for b in mask)
+        if bits != want["mask"]:
+            at = next(i for i, (a, b) in enumerate(zip(bits, want["mask"], strict=True)) if a != b)
+            return record["decision"], f"mask bit {at}"
     return None

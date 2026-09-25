@@ -110,7 +110,7 @@ def test_a_scene_holds_more_than_the_old_128_entities():
     sim = _walled(300)
     assert sim.env.entity_count == 300
     # The observation still publishes the engine's 48 nearest.
-    assert sim.env.seen_count == lib.FSIM_MAX_SWEEP
+    assert sim.env.seen_count == lib.FSIM_SWEEP_DEFAULT == 48
     sim.step("move_south", ticks=30)
     # 30 strides would reach y = 5; the first row (its box from y = 2.21) stops it.
     assert 256 < sim.env.char_pos.y < int(2.25 * 256)

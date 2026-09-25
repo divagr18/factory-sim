@@ -30,7 +30,7 @@ def load_environment(
     seed: int = 0,
     workers: int = 4,
     job_timeout_s: float = 30.0,
-    decision_budget: int = 600,
+    decision_budget: int | None = None,
     format_weight: float = 0.1,
     refusal_weight: float = 0.0,
     **kwargs,

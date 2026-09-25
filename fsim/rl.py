@@ -4,6 +4,11 @@
 space (`MultiDiscrete[22, 33, 122, 5, 15, 4]`) and its `local-v2` tensor
 observation, for `construct_smelting_line` and `build_line`. The arrays it
 returns are views over C memory, refreshed by `observe()`.
+
+`action_space="v3"` is `parameterized-v3` over `local-v3`: 96 entity rows of
+32 features, 18 items, a 30-slot goal (the v1 goal, then six public-marker
+triples) and `MultiDiscrete[23, 97, 226, 5, 19, 4]`. `observe3()` reads the v3
+tensors and mask whatever the action space, so a v1 run can be checked in v3.
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ import numpy as np
 from fsim import ffi, lib, scene_struct
 
 NVEC = (22, 33, 122, 5, 15, 4)
+NVEC3 = (23, 97, 226, 5, 19, 4)
 TASKS = {
     "construct_smelting_line": lib.TASK_CONSTRUCT_SMELTING_LINE,
     "build_line": lib.TASK_BUILD_LINE,
@@ -36,7 +42,9 @@ SHAPING = {
 }  # fmt: skip
 #: `action_space` values: FactorioRL's parameterized-v1, or the simulator's v2
 #: prototype (entity-table targets, a fixed placement grid).
-ACTION_SPACES = {"v1": lib.ACTION_SPACE_V1, "v2": lib.ACTION_SPACE_V2}
+ACTION_SPACES = {"v1": lib.ACTION_SPACE_V1, "v2": lib.ACTION_SPACE_V2, "v3": lib.ACTION_SPACE_V3}
+#: The sensor's entity cap per wire profile: local-v2 keeps 48, local-v3 96.
+ENTITY_CAP = {"v1": 48, "v2": 48, "v3": 96}
 #: The shaped terms, reported after whatever the task itself pays.
 SHAPED_COMPONENTS = {
     lib.SHAPING_POTENTIAL: ("line_potential",),
@@ -57,7 +65,7 @@ def component_names(task: str, mode: int) -> tuple[str, ...]:
 
 def task_struct(task: str, blueprint: dict, *, decision_ticks=30, max_steps=600,
                 construction_tick_limit=None, shaping=False, gamma=0.999,
-                action_space="v1"):  # fmt: skip
+                action_space="v1", entity_cap=None):  # fmt: skip
     t = ffi.new("fsim_task *")
     t.task = TASKS[task]
     t.decision_ticks = decision_ticks
@@ -70,9 +78,22 @@ def task_struct(task: str, blueprint: dict, *, decision_ticks=30, max_steps=600,
     # approach and fuel terms are exactly what commissioning asks for.
     t.shaping = SHAPING[shaping]
     t.action_space = ACTION_SPACES[action_space]
+    t.entity_cap = ENTITY_CAP[action_space] if entity_cap is None else int(entity_cap)
     t.gamma = gamma
     markers = blueprint.get("markers") or {}
     public = blueprint.get("public_markers") or []
+    # v3's goal slots 12..: slot k is public_markers[k] (six at most), whether
+    # or not it has a position. A marker a scene entity carries ("marker" on
+    # its blueprint entry) is that entity while it stands, as the mod
+    # publishes it; a scene marker of the same name is the fallback.
+    aliases = _marker_entities(blueprint)
+    t.marker_count = min(len(public), lib.RL3_MARKERS)
+    for k, name in enumerate(public[: lib.RL3_MARKERS]):
+        t.marker_entity[k] = aliases.get(name, -1)
+        point = markers.get(name)
+        t.marker_present[k] = int(point is not None)
+        if point is not None:
+            t.marker_x[k], t.marker_y[k] = float(point[0]), float(point[1])
     patch = markers.get("patch")
     if patch is not None and "patch" in public:
         t.has_patch = 1
@@ -83,6 +104,22 @@ def task_struct(task: str, blueprint: dict, *, decision_ticks=30, max_steps=600,
         t.has_target = 1
         t.target_x, t.target_y = float(target[0]), float(target[1])
     return t
+
+
+def _marker_entities(blueprint: dict) -> dict[str, int]:
+    """Marker name -> the simulator entity index of the scene entity carrying it.
+
+    `fsim_reset` creates the scene's walls first and then its other entities,
+    each in blueprint order, one entity slot each (`scene_struct`)."""
+    entities = blueprint.get("entities") or []
+    walls = [e for e in entities if e["name"] == "stone-wall"]
+    machines = [e for e in entities if e["name"] != "stone-wall"]
+    out = {}
+    for index, e in enumerate([*walls, *machines]):
+        name = e.get("marker")
+        if name and name not in out:
+            out[name] = index
+    return out
 
 
 class RlEnv:
@@ -106,6 +143,21 @@ class RlEnv:
             "goal": np.frombuffer(ffi.buffer(self.obs_c.goal), np.float32),
         }
         self.mask = np.frombuffer(ffi.buffer(self.mask_c, lib.RL_MASK_SIZE), np.uint8)
+        self.obs1, self.mask1 = self.obs, self.mask
+        self.obs3_c = ffi.new("fsim_obs3 *")
+        self.mask3_c = ffi.new("uint8_t[]", lib.RL3_MASK_SIZE)
+        self.obs3 = {
+            "grid": np.frombuffer(ffi.buffer(self.obs3_c.grid), np.float32).reshape(6, 65, 65),
+            "entities": np.frombuffer(ffi.buffer(self.obs3_c.entities), np.float32).reshape(
+                lib.RL3_MAX_ENTITIES, lib.RL3_ENTITY_FEATURES
+            ),
+            "entity_mask": np.frombuffer(ffi.buffer(self.obs3_c.entity_mask), np.int8),
+            "self": np.frombuffer(ffi.buffer(self.obs3_c.self_), np.float32),
+            "inventory": np.frombuffer(ffi.buffer(self.obs3_c.inventory), np.float32),
+            "goal": np.frombuffer(ffi.buffer(self.obs3_c.goal), np.float32),
+        }
+        self.mask3 = np.frombuffer(ffi.buffer(self.mask3_c, lib.RL3_MASK_SIZE), np.uint8)
+        self.v3 = False
 
     def _water_flat(self):
         env = self._water.env
@@ -126,13 +178,24 @@ class RlEnv:
         scene, keep = scene_struct(blueprint)
         t = task_struct(task, blueprint, **task_options)
         self._keep = (scene, keep, t)
+        # `obs` and `mask` are the v3 views under v3 and the v1 ones otherwise.
+        self.v3 = t.action_space == lib.ACTION_SPACE_V3
+        self.obs, self.mask = (self.obs3, self.mask3) if self.v3 else (self.obs1, self.mask1)
         lib.fsim_rl_reset(self.rl, t, scene)
         return self.observe()
 
     def observe(self) -> dict:
+        if self.v3:
+            return self.observe3()[0]
         lib.fsim_rl_encode(self.rl, self.obs_c)
         lib.fsim_rl_mask(self.rl, self.mask_c)
         return self.obs
+
+    def observe3(self) -> tuple[dict, np.ndarray]:
+        """The v3 tensors and mask of the current state, whatever the action space."""
+        lib.fsim_rl_encode3(self.rl, self.obs3_c)
+        lib.fsim_rl_mask3(self.rl, self.mask3_c)
+        return self.obs3, self.mask3
 
     def step(self, vector) -> tuple[dict, float, bool, bool, dict]:
         for i in range(6):

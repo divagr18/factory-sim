@@ -9,7 +9,7 @@ Everything that matters is factory-sim's own code:
 - scenes come from `fsim.scenes.sample`, over the same seed plan as
   `evolve.evaluate.scene_sets` (train seeds below `VAL_OFFSET`, validation
   seeds from `VAL_OFFSET` on, and the frozen FactorioRL holdout stream);
-- the prompt is `evolve.mutate.system_prompt(evolve.evaluate.api_reference())`;
+- the prompt is `evolve.mutate.system_prompt(evolve.evaluate.api_reference(task), task)`;
 - code is pulled out with `evolve.llm.extract_code`, gated by
   `evolve.sandbox.check`, and run by `evolve.evaluate.worker_job`, which calls
   `fsim.program_api.run_episode` once per scene;
@@ -36,9 +36,13 @@ from evolve import evaluate, mutate, sandbox
 from evolve.llm import extract_code
 from fsim import scenes
 
-#: Tasks with a prompt, a contract and pinned scene sets. `evolve.mutate.TASK`
-#: describes construct_smelting_line only, so that is the only one exposed.
-SUPPORTED_TASKS = (evaluate.TASK,)
+#: Tasks with a prompt (`evolve.mutate.TASK_TEXT`), a `World` and an entry in
+#: `evolve.evaluate.TASKS`. Only those whose scenes `fsim.scenes` can draw are
+#: exposed: `belt_smelting` has its prompt, its v3 `World` and its setup, and
+#: joins `SUPPORTED_TASKS` by itself once its generator is ported
+#: (`evaluate.scenes_ported`).
+KNOWN_TASKS = tuple(t for t in evaluate.TASKS if t in mutate.TASKS)
+SUPPORTED_TASKS = tuple(t for t in KNOWN_TASKS if evaluate.scenes_ported(t))
 SPLITS = ("train", "val", "holdout")
 MAX_SCENES = 64
 
@@ -53,6 +57,11 @@ class SceneRef:
 
 
 def _check_task(task: str) -> None:
+    if task in KNOWN_TASKS and task not in SUPPORTED_TASKS:
+        raise ValueError(
+            f"{task}: its scenes are not ported to fsim.scenes yet; "
+            f"supported now: {SUPPORTED_TASKS}"
+        )
     if task not in SUPPORTED_TASKS:
         raise ValueError(f"task must be one of {SUPPORTED_TASKS}, got {task!r}")
 
@@ -89,12 +98,27 @@ def blueprints(task: str, refs: list[SceneRef]) -> list[tuple[str, int, dict]]:
     return out
 
 
-def system_prompt(game_notes: bool = True) -> str:
+def system_prompt(game_notes: bool = True, task: str = evaluate.TASK) -> str:
     """Task, program contract, `world` API reference, optionally the game notes."""
-    text = mutate.system_prompt(evaluate.api_reference())
-    if not game_notes and mutate.GAME_NOTES:
-        text = text.replace("\n\n" + mutate.GAME_NOTES, "")
+    text = mutate.system_prompt(evaluate.api_reference(task), task)
+    notes = mutate.game_notes(task)
+    if not game_notes and notes:
+        text = text.replace("\n\n" + notes, "")
     return text
+
+
+#: What a scene's score means, per task, for the user message.
+SCORED_ON = {
+    evaluate.TASK: "the fraction of scenes where the smelting line verifies",
+    "belt_smelting": "the fraction of scenes where at least 60 iron plates reach the output "
+    "chest during the verification window",
+}
+#: What differs between one task's scenes, for the user message.
+SCENES_DIFFER = {
+    evaluate.TASK: "where the ore patch is, where the character starts and what stands in the way",
+    "belt_smelting": "where the iron patch, the coal patch and the output chest are, where the "
+    "character starts and what stands in the way",
+}
 
 
 def user_message(task: str, split: str, subset_id: str, refs: list[SceneRef]) -> str:
@@ -103,9 +127,8 @@ def user_message(task: str, split: str, subset_id: str, refs: list[SceneRef]) ->
         f"Write a builder program for {task}.\n"
         f"It will be run once on each of the {len(refs)} scenes of scene subset "
         f"{subset_id} (the {split} set, seeds {seeds}). The program never sees the seed; "
-        "scenes differ in where the ore patch is, where the character starts and what "
-        "stands in the way. Each scene is scored on its own, and your score is the "
-        "fraction of scenes where the smelting line verifies.\n\n" + mutate.OUTPUT_FORMAT
+        f"scenes differ in {SCENES_DIFFER[task]}. Each scene is scored on its own, and your "
+        f"score is {SCORED_ON[task]}.\n\n" + mutate.OUTPUT_FORMAT
     )
 
 
@@ -126,7 +149,8 @@ def rows(
         raise ValueError(f"n_scenes must be in 1..{MAX_SCENES}")
     if num_examples < 1:
         raise ValueError("num_examples must be >= 1")
-    system = system_prompt(game_notes)
+    _check_task(task)
+    system = system_prompt(game_notes, task)
     out = []
     for k in range(num_examples):
         start = seed + k * n_scenes
@@ -207,19 +231,29 @@ def run_program(
     *,
     workers: int = 4,
     timeout_s: float = 30.0,
-    decision_budget: int = 600,
+    decision_budget: int | None = None,
+    task: str = evaluate.TASK,
 ) -> list[dict]:
-    """Per-scene result dicts (`worker_job`'s shape). Blocking: call it off the event loop."""
+    """Per-scene result dicts (`worker_job`'s shape). Blocking: call it off the event loop.
+
+    `decision_budget` None is the task's own (`evaluate.TASKS`)."""
+    if decision_budget is None:
+        decision_budget = evaluate.task_setup(task).decision_budget
+
+    def payload(scenes: list) -> dict:
+        body = {"source": source, "scenes": scenes, "decision_budget": decision_budget}
+        if task != evaluate.TASK:
+            body["task"] = task
+        return body
+
     if workers <= 0:
-        res = evaluate.worker_job(
-            {"source": source, "scenes": triples, "decision_budget": decision_budget}
-        )
+        res = evaluate.worker_job(payload(triples))
         if res.get("error"):
             return [evaluate._failed(f, s, res["error"]) for f, s, _ in triples]
         return res["results"]
     size = max(1, math.ceil(len(triples) / workers))
     parts = [triples[k : k + size] for k in range(0, len(triples), size)]
-    payloads = [{"source": source, "scenes": p, "decision_budget": decision_budget} for p in parts]
+    payloads = [payload(p) for p in parts]
     with _borrow_pool(workers, timeout_s) as pool:
         answers = pool.map(payloads)
     out: list[dict] = []
@@ -244,7 +278,7 @@ def score_completion(
     *,
     workers: int = 4,
     timeout_s: float = 30.0,
-    decision_budget: int = 600,
+    decision_budget: int | None = None,
 ) -> dict:
     """Extract, check and run the program in `text` on `scene_list`.
 
@@ -283,6 +317,7 @@ def score_completion(
         workers=workers,
         timeout_s=timeout_s,
         decision_budget=decision_budget,
+        task=task,
     )
     agg = evaluate.aggregate(results, traces=False)
     n = max(1, len(results))

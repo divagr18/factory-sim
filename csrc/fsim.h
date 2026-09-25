@@ -32,7 +32,10 @@
 #define FSIM_MAX_INFLIGHT 16
 #define FSIM_EVENT_LIMIT 256
 #define FSIM_MAX_SUPERSEDED 4
-#define FSIM_MAX_SWEEP 48
+#define FSIM_MAX_SWEEP 96
+/* The sweep's cap unless an env sets its own (`sweep_cap`): local-v2's
+ * entity_cap. local-v3 raises it to 96. */
+#define FSIM_SWEEP_DEFAULT 48
 #define FSIM_MAX_TILES 512
 #define FSIM_MAX_MEMORY 2048
 #define FSIM_MAX_BLOCKED 4225
@@ -417,7 +420,7 @@ typedef struct {
 
     /* last observation */
     int32_t seen_count;
-    fsim_seen seen[48];
+    fsim_seen seen[96];         /* FSIM_MAX_SWEEP; the first sweep_cap are used */
     int32_t tile_count;
     fsim_seen_tile tiles[512];
     int32_t blocked_count;
@@ -478,6 +481,12 @@ typedef struct {
     int32_t belt_delay_missing;
     int32_t belt_delay_missing_x;
     int32_t belt_delay_missing_y;
+    /* The observation's entity cap (the profile's entity_cap), at most
+     * FSIM_MAX_SWEEP; 0 means FSIM_SWEEP_DEFAULT. Kept across fsim_reset. */
+    int32_t sweep_cap;
+    /* Hand-mining picked an entity up while mining stays asked for: nothing
+     * is selected again until mining stops (fsim.c, update_character). */
+    int32_t mining_stalled;
 } fsim_env;
 
 typedef struct {
@@ -594,6 +603,21 @@ double fsim_kind_mining_time(int32_t kind);
 #define RL_MASK_SIZE 201
 #define RL_WINDOW_SAMPLES 512
 
+/* v3 (FactorioRL parameterized-v3 / local-v3): 96 rows of 32 features, the
+ * items grown by the Stage-2 four, 6 public-marker triples after the goal,
+ * and a 15x15 placement window. MultiDiscrete[23, 97, 226, 5, 19, 4]. */
+#define RL3_MAX_ENTITIES 96
+#define RL3_ENTITY_FEATURES 32
+#define RL3_ITEMS 18
+#define RL3_GOAL_FEATURES 30
+#define RL3_MARKERS 6
+#define RL3_TARGETS 96
+#define RL3_PLACEMENTS 225
+#define RL3_PLACEMENT_RADIUS 7
+/* v3's catalog is parameterized-v1's 22 operations and `mine_tile` (22). */
+#define RL3_OPERATIONS 23
+#define RL3_MASK_SIZE 374
+
 #define TASK_CONSTRUCT_SMELTING_LINE 1
 #define TASK_BUILD_LINE 2
 /* Commissioning rather than construction: the line is already down and both
@@ -602,6 +626,7 @@ double fsim_kind_mining_time(int32_t kind);
 
 #define ACTION_SPACE_V1 0
 #define ACTION_SPACE_V2 2
+#define ACTION_SPACE_V3 3
 
 #define SHAPING_NONE 0
 #define SHAPING_POTENTIAL 1
@@ -616,6 +641,16 @@ typedef struct {
     float inventory[14];
     float goal[12];
 } fsim_obs;
+
+/* The v3 observation (RL3_*). */
+typedef struct {
+    float grid[25350];          /* 6 x 65 x 65 */
+    float entities[3072];       /* 96 x 32 */
+    int8_t entity_mask[96];
+    float self_[12];
+    float inventory[18];
+    float goal[30];
+} fsim_obs3;
 
 /* The same observation, packed: what a trainer copies to the GPU every
  * decision, a third of the size. Grid planes 0-3 (resources) and 5 (blocked)
@@ -666,8 +701,28 @@ typedef struct {
      * ACTION_SPACE_V2: a simulator prototype with the same vector shape, where
      *   `target` k names row k-1 of the encoded entity table and `placement` p
      *   names the fixed tile ((p-1) / 11 - 5, (p-1) % 11 - 5) from the
-     *   character's tile, masked when occupied instead of skipped. */
+     *   character's tile, masked when occupied instead of skipped.
+     * ACTION_SPACE_V3: v2's meanings over the v3 sizes, MultiDiscrete[23, 97,
+     *   226, 5, 19, 4]: target k is row k-1 of the 96-row table (masked, and
+     *   refused, unless visible and in reach), placement p the tile
+     *   ((p-1) / 15 - 7, (p-1) % 15 - 7) (masked unless free and within build
+     *   distance, or a resource tile within resource reach for op 22,
+     *   `mine_tile`). */
     int32_t action_space;
+    /* The observation's entity cap (env->sweep_cap): 0 keeps local-v2's 48;
+     * local-v3 is 96. */
+    int32_t entity_cap;
+    /* v3: goal slots 12.. hold public_markers[k] for k < marker_count (at
+     * most RL3_MARKERS), each slot its own marker. Slot k is published at
+     * entity `marker_entity[k]` while that entity is alive (a marker that
+     * names a scene entity: the mod publishes its live position and drops it
+     * once the entity is gone), else at (marker_x, marker_y) when
+     * `marker_present[k]` (a scene marker), else not at all. */
+    int32_t marker_count;
+    double marker_x[6];
+    double marker_y[6];
+    int32_t marker_present[6];
+    int32_t marker_entity[6];   /* entity index, or -1 */
 } fsim_task;
 
 typedef struct {
@@ -721,6 +776,10 @@ void fsim_rl_step_range(fsim_rl **rls, int32_t first, int32_t last, const int32_
                         fsim_obs *obs, uint8_t *masks, double *rewards, uint8_t *flags,
                         double *verified);
 void fsim_rl_encode8(fsim_rl *rl, fsim_obs8 *obs);
+/* The v3 tensors and mask, whatever the env's action space: a v1 run can be
+ * read in v3 too (the contract test does). */
+void fsim_rl_encode3(fsim_rl *rl, fsim_obs3 *obs);
+void fsim_rl_mask3(fsim_rl *rl, uint8_t *mask);
 /* The target argument's domain, in order: handle of target k+1. Returns the
  * count (at most `cap`). */
 int32_t fsim_rl_targets(fsim_rl *rl, int32_t *handles, int32_t cap);

@@ -141,6 +141,19 @@ double fsim_capacity(int32_t kind) {
 
 static double entity_mining_time(int32_t kind) { return kind_of(kind)->mining_time; }
 
+/* Selection-box half-size, 1/256 tiles, as the prototypes report it
+ * (FactorioRL tools/probe_handmine.py --family reach, `selection_box`). */
+static int32_t selection_half(int32_t kind) {
+    switch (kind) {
+    case K_DRILL: return 256;       /* 1 */
+    case K_FURNACE: return 204;     /* 0.796875 */
+    case K_WALL: case K_CHEST: case K_BELT: return 128;
+    case K_INSERTER: return 102;    /* 0.3984375 */
+    case K_PILE: return 43;         /* 0.16796875 */
+    default: return 0;
+    }
+}
+
 static int32_t entity_item(int32_t kind) { return kind_of(kind)->item; }
 
 static int32_t box_of(int32_t kind) { return kind_of(kind)->box; }
@@ -3505,16 +3518,32 @@ static void update_character(fsim_env *env) {
         return;
     }
     face(env, env->mining_pos);
+    /* Seconds accumulate and progress is seconds / mining time, as the
+     * engine prints it; an item comes once progress passes 1, strictly
+     * (FactorioRL tools/probe_handmine.py: a pile, 0.025 s, reads exactly 1
+     * on its third tick and is taken on the fourth). */
     env->mining_seconds += CHAR_MINING_SPEED / 60.0;
     env->mining_progress = env->mining_seconds / duration;
-    if (env->mining_progress < 1.0) return;
+    if (env->mining_progress <= 1.0) return;
     /* A finished item starts the next from nothing. */
     env->mining_progress = 0;
     env->mining_seconds = 0;
     if (env->mining_target_resource >= 0) {
         fsim_resource *r = &env->resources[env->mining_target_resource];
-        insert_main(env, item, 1);
+        /* No room for it (FactorioRL tools/probe_handmine.py, `full_*`): the
+         * ore lands on the ground at the resource, one item, and still counts
+         * as produced; the pile then covers the tile (`start_mining`). */
+        if (main_room(env, item) >= 1) {
+            insert_main(env, item, 1);
+        } else {
+            int32_t p = new_entity(env, K_PILE, resource_pos(r), 0, 1);
+            if (p >= 0) {
+                env->entities[p].pile.item = item;
+                env->entities[p].pile.count = 1;
+            }
+        }
         env->produced[item] += 1;
+        r = &env->resources[env->mining_target_resource];
         r->amount -= 1;
         if (r->amount <= 0) {
             r->alive = 0;
@@ -3522,7 +3551,16 @@ static void update_character(fsim_env *env) {
                 env->selected_kind = 0;
         }
     } else {
+        const fsim_entity *e = &env->entities[env->mining_target_entity];
+        /* A pile the inventory has no room for at all stays where it is and
+         * is mined again, every four ticks (`full_mine_pile`, `full_no_room`).
+         * Partial room is not measured. */
+        if (e->kind == K_PILE && main_room(env, e->pile.item) == 0) return;
         pick_up(env, env->mining_target_entity);
+        /* Mining still asked for, nothing is selected again until it stops
+         * (`cover_*`: the tile under the entity is not mined; `cover_then_retry`:
+         * it is, once mining stops and starts). */
+        env->mining_stalled = 1;
     }
 }
 
@@ -3613,13 +3651,46 @@ static void finish(fsim_env *env, int32_t slot) {
 /* Stopping keeps the progress: mining the same target again resumes it. */
 static void stop_mining(fsim_env *env) {
     env->mining = 0;
+    env->mining_stalled = 0;
     env->mining_pos.x = 0;
     env->mining_pos.y = 0;
     env->mining_target_entity = -1;
     env->mining_target_resource = -1;
 }
 
+/* The entity whose selection box holds `p`, or -1. The mod mines a resource
+ * by selecting at its position, and selection prefers any entity there
+ * (FactorioRL tools/probe_handmine.py, `cover_*`: a belt, chest, inserter,
+ * wall, furnace, drill or pile over the ore is mined instead; a pile 0.203
+ * off the tile centre is not over it; the character never is). */
+static int32_t cover_at(const fsim_env *env, fsim_pos p) {
+    for (int32_t i = 0; i < env->entity_count; i++) {
+        const fsim_entity *e = &env->entities[i];
+        if (!e->alive) continue;
+        int32_t half = selection_half(e->kind);
+        if (abs(e->pos.x - p.x) < half && abs(e->pos.y - p.y) < half) return i;
+    }
+    return -1;
+}
+
 static void start_mining(fsim_env *env, int32_t kind, int32_t index, fsim_pos position) {
+    if (env->mining_stalled) {
+        env->selected_kind = 0;
+        env->mining = 1;
+        env->mining_pos = position;
+        env->mining_target_resource = -1;
+        env->mining_target_entity = -1;
+        return;
+    }
+    if (kind == 2) {
+        int32_t cover = cover_at(env, position);
+        if (cover >= 0) {
+            kind = 1;
+            index = cover;
+            env->selected_kind = 1;
+            env->selected_index = cover;
+        }
+    }
     if (kind != env->mined_kind || index != env->mined_index) {
         env->mining_seconds = 0;
         env->mining_progress = 0;
@@ -4160,7 +4231,9 @@ void fsim_observe(fsim_env *env) {
         n++;
     }
     qsort(items, (size_t)n, sizeof(items[0]), sweep_cmp);
-    if (n > FSIM_MAX_SWEEP) n = FSIM_MAX_SWEEP;
+    int32_t cap = env->sweep_cap > 0 ? env->sweep_cap : FSIM_SWEEP_DEFAULT;
+    if (cap > FSIM_MAX_SWEEP) cap = FSIM_MAX_SWEEP;
+    if (n > cap) n = cap;
     env->seen_count = n;
     for (int32_t k = 0; k < n; k++) {
         int32_t i = items[k].index;
@@ -4286,11 +4359,13 @@ void fsim_after_load(fsim_env *env) {
 void fsim_reset(fsim_env *env, const fsim_scene *scene) {
     /* Everything but the map's water, which outlives episodes. */
     int32_t water_count = env->water_count;
+    int32_t sweep_cap = env->sweep_cap;
     size_t start = offsetof(fsim_env, water);
     size_t end = start + sizeof(env->water);
     memset(env, 0, start);
     memset((char *)env + end, 0, sizeof(*env) - end);
     env->water_count = water_count;
+    env->sweep_cap = sweep_cap;
     env->next_handle = 1;
     env->slot_move = env->slot_mine = env->slot_advance = -1;
     env->mining_target_entity = env->mining_target_resource = -1;

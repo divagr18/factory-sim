@@ -212,6 +212,9 @@ class VecEnv:
         #: translation of a demonstration can reach -- the one axis along which
         #: the builder can be more varied rather than merely re-posed.
         self.demo_variants: int = 1
+        if action_space not in ("v1", "v2"):
+            # The batched buffers are the v1 layout; v3 runs through RlEnv only.
+            raise ValueError(f"the vectorised env speaks v1 and v2, not {action_space!r}")
         self.action_space = action_space
         #: Where a resetting environment gets its scene. None draws from the
         #: task's own families, which is every run that is not a UED run.

@@ -26,17 +26,69 @@ import inspect
 import json
 import math
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from evolve import sandbox
 from fsim import scenes
-from fsim.program_api import Entity, World, run_episode
+from fsim.program_api import Entity, run_episode
 
 # 4: the sandbox accepts lambda, :=, _names and set/str methods (3: train-only traces)
 EVALUATOR_VERSION = 4
+#: The default task: what every function here evaluates when not told otherwise.
 TASK = "construct_smelting_line"
 FAMILIES_TRAIN = ("open_patch", "offset_patch", "varied_patch", "cluttered_patch")
 FAMILIES_HOLDOUT = ("obstructed_patch",)
+
+
+@dataclass(frozen=True)
+class TaskSetup:
+    """What evaluating a builder program on one task needs.
+
+    `families_*` restate FactorioRL's layout families (train, then the test ones
+    the holdout draws); `decision_budget` is the task's `max_decision_steps`.
+    The action space and `World` follow from `program_api.TASK_PROFILES`.
+    """
+
+    name: str
+    families_train: tuple[str, ...]
+    families_holdout: tuple[str, ...]
+    decision_budget: int
+
+
+TASKS: dict[str, TaskSetup] = {
+    TASK: TaskSetup(TASK, FAMILIES_TRAIN, FAMILIES_HOLDOUT, 600),
+    # FactorioRL `tasks/families/belt_smelting.py` 1.0.0.
+    "belt_smelting": TaskSetup(
+        "belt_smelting", ("open", "walled", "split_patch"), ("obstructed", "far_chest"), 2500
+    ),
+}
+
+
+def task_setup(task: str) -> TaskSetup:
+    if task not in TASKS:
+        raise ValueError(f"unknown task {task!r}; known: {', '.join(TASKS)}")
+    return TASKS[task]
+
+
+def scenes_ported(task: str) -> bool:
+    """Whether `fsim.scenes` can draw this task's scenes (and the simulator run it)."""
+    from fsim.rl import TASKS as SIM_TASKS
+
+    return task in scenes.GENERATORS and task in SIM_TASKS
+
+
+def require_scenes(task: str) -> TaskSetup:
+    """The task's setup, or an error naming what is missing for it to run here."""
+    setup = task_setup(task)
+    if not scenes_ported(task):
+        raise NotImplementedError(
+            f"{task}: its scene generator is not ported to fsim.scenes (and the simulator "
+            "has no task for it) yet, so there are no scenes to evaluate on"
+        )
+    return setup
+
+
 VAL_OFFSET = 100_000
 #: The first train scenes, which every candidate runs before anything else. A
 #: program that raises on all of them is not worth the rest of the set.
@@ -62,7 +114,13 @@ HOLDOUT_FILE = Path(
     )
 )
 
-SHORT = {"burner-mining-drill": "D", "stone-furnace": "F"}
+SHORT = {
+    "burner-mining-drill": "D",
+    "stone-furnace": "F",
+    "transport-belt": "B",
+    "burner-inserter": "I",
+    "wooden-chest": "C",
+}
 
 
 # ------------------------------------------------------------------ scene sets
@@ -85,17 +143,19 @@ def scene_digest(blueprint: dict) -> str:
 
 
 def scene_sets(
-    train_n=128, val_n=256, holdout_n=100, holdout_start=0
+    train_n=128, val_n=256, holdout_n=100, holdout_start=0, task: str = TASK
 ) -> dict[str, list[tuple[str, int, dict]]]:
     """{"train", "val", "holdout"}: lists of (family, seed, blueprint), deterministic.
 
     Holdout indices past the frozen 100 continue the same seed stream; they are
     unseen, but no FactorioRL result was measured on them. `holdout_start` skips
     into the stream: a method changed after its holdout results were seen has to
-    be reported on scenes no run or analysis has touched."""
+    be reported on scenes no run or analysis has touched. Every task draws its
+    holdout from the same frozen seed stream, as FactorioRL freezes them."""
+    require_scenes(task)
 
     def draw(split, seeds):
-        return [(*scenes.sample(TASK, split, s), s) for s in seeds]
+        return [(*scenes.sample(task, split, s), s) for s in seeds]
 
     holdout_seeds = [
         holdout_seed(HOLDOUT_START_INDEX + holdout_start + k) for k in range(holdout_n)
@@ -123,7 +183,9 @@ def set_digests(sets: dict) -> dict[str, str]:
     return out
 
 
-def verify_holdout(sets: dict, path: Path | str | None = None, start: int = 0) -> dict:
+def verify_holdout(
+    sets: dict, path: Path | str | None = None, start: int = 0, task: str = TASK
+) -> dict:
     """Compare the holdout set with FactorioRL's frozen file (read only).
 
     Returns {"file", "frozen", "compared", "matched", "mismatched": [index]};
@@ -133,7 +195,10 @@ def verify_holdout(sets: dict, path: Path | str | None = None, start: int = 0) -
         return {"file": None, "frozen": 0, "compared": 0, "matched": 0, "mismatched": []}
     with open(path, encoding="utf-8") as f:
         doc = json.load(f)
-    episodes = doc["holdout"]["tasks"][TASK]["episodes"]
+    frozen_tasks = doc["holdout"]["tasks"]
+    if task not in frozen_tasks:
+        return {"file": str(path), "frozen": 0, "compared": 0, "matched": 0, "mismatched": []}
+    episodes = frozen_tasks[task]["episodes"]
     frozen = {e["episode_index"]: e for e in episodes}
     matched, mismatched = 0, []
     for k, (family, _, bp) in enumerate(sets["holdout"]):
@@ -159,10 +224,21 @@ COUNTERS = {"refusals", "failures"}
 UNDOCUMENTED = {"decisions_left": "Decisions the program may still spend before it is stopped."}
 
 
-def api_methods() -> list[str]:
-    """World's methods a program may call, in source order."""
-    names = [n for n in vars(World) if n in sandbox.WORLD_API and n not in COUNTERS]
-    return [n for n in names if callable(getattr(World, n))]
+def _world_class(task: str):
+    from fsim.program_api import world_class
+
+    return world_class(task)
+
+
+def api_methods(task: str = TASK) -> list[str]:
+    """World's methods a program may call, in source order (a subclass's own after)."""
+    cls = _world_class(task)
+    names: list[str] = []
+    for klass in reversed(cls.__mro__):
+        for n in vars(klass):
+            if n in sandbox.WORLD_API and n not in COUNTERS and n not in names:
+                names.append(n)
+    return [n for n in names if callable(getattr(cls, n))]
 
 
 def _first_paragraph(doc: str | None) -> str:
@@ -171,28 +247,31 @@ def _first_paragraph(doc: str | None) -> str:
     return " ".join(inspect.cleandoc(doc).split("\n\n")[0].split())
 
 
-def api_reference() -> str:
+def api_reference(task: str = TASK) -> str:
     """The `world` API as the prompt shows it: signatures and one line each."""
+    cls = _world_class(task)
     lines = ["world (the only object a program holds):"]
-    for name in api_methods():
-        sig = str(inspect.signature(getattr(World, name), eval_str=True)).replace(
-            "fsim.obsview.", ""
-        )
+    for name in api_methods(task):
+        sig = str(inspect.signature(getattr(cls, name), eval_str=True)).replace("fsim.obsview.", "")
         sig = sig.replace("(self, ", "(").replace("(self)", "()")
-        doc = _first_paragraph(getattr(World, name).__doc__) or UNDOCUMENTED.get(name, "")
+        doc = _first_paragraph(getattr(cls, name).__doc__) or UNDOCUMENTED.get(name, "")
         lines.append(f"  world.{name}{sig}" + (f"  # {doc}" if doc else ""))
     lines.append(
         "  world.refusals, world.failures  # int counters: refused intents, failed actions"
     )
+    entity = cls._ENTITY
     fields = ", ".join(
         f"{f.name}: {getattr(f.type, '__name__', f.type)}"
-        for f in Entity.__dataclass_fields__.values()
+        for f in entity.__dataclass_fields__.values()
     )
-    lines.append(f"Entity (from world.entities()): {fields}")
-    lines.append(
-        '  kind is "furnace" | "mining-drill" | "container" | "wall" | "item-entity" | "other"; '
-        "facing is N/E/S/W for drills, None otherwise"
-    )
+    lines.append(f"{entity.__name__} (from world.entities()): {fields}")
+    if entity is Entity:
+        lines.append(
+            '  kind is "furnace" | "mining-drill" | "container" | "wall" | "item-entity" | '
+            '"other"; facing is N/E/S/W for drills, None otherwise'
+        )
+    else:
+        lines.extend(cls._ENTITY_NOTES)
     return "\n".join(lines)
 
 
@@ -249,7 +328,8 @@ def worker_job(payload: dict) -> dict:
         build = sandbox.load(payload["source"])
     except sandbox.SandboxError as e:
         return {"results": [], "error": f"sandbox: {e}"}
-    budget = payload.get("decision_budget", 600)
+    task = payload.get("task", TASK)
+    budget = payload.get("decision_budget", task_setup(task).decision_budget)
     limit = payload.get("time_limit_s", PROGRAM_TIME_LIMIT_S)
     results = []
     hits = 0
@@ -266,7 +346,7 @@ def worker_job(payload: dict) -> dict:
             r = run_episode(
                 _with_facings(build, facings),
                 blueprint,
-                task=TASK,
+                task=task,
                 decision_budget=budget,
                 env=_ENV,
                 time_limit_s=limit,
@@ -389,10 +469,22 @@ def _zero(families, error: str, n: int = 0) -> dict:
 class Evaluator:
     """Scores sources on the pinned sets through an `EvalPool` of `worker_job`s."""
 
-    def __init__(self, pool, sets: dict, *, decision_budget: int = 600, chunk: int = CHUNK):
+    def __init__(
+        self,
+        pool,
+        sets: dict,
+        *,
+        decision_budget: int | None = None,
+        chunk: int = CHUNK,
+        task: str = TASK,
+    ):
         self.pool = pool
         self.sets = sets
-        self.decision_budget = decision_budget
+        self.task = task
+        self.setup = task_setup(task)
+        self.decision_budget = (
+            decision_budget if decision_budget is not None else self.setup.decision_budget
+        )
         self.chunk = chunk
 
     # --- running ---
@@ -406,9 +498,16 @@ class Evaluator:
         for i, sc in jobs:
             for k in range(0, len(sc), size):
                 part = sc[k : k + size]
-                payloads.append(
-                    {"source": sources[i], "scenes": part, "decision_budget": self.decision_budget}
-                )
+                payload = {
+                    "source": sources[i],
+                    "scenes": part,
+                    "decision_budget": self.decision_budget,
+                }
+                # Only a task other than the default rides in the payload, so a
+                # construct_smelting_line job is the dict it always was.
+                if self.task != TASK:
+                    payload["task"] = self.task
+                payloads.append(payload)
                 owners.append((i, part))
         out: dict[int, list[dict]] = {i: [] for i, _ in jobs}
         for (i, part), res in zip(owners, self.pool.map(payloads) if payloads else [], strict=True):
@@ -456,7 +555,8 @@ class Evaluator:
         return state
 
     def _families(self, split: str):
-        return FAMILIES_HOLDOUT if split == "holdout" else FAMILIES_TRAIN
+        setup = self.setup
+        return setup.families_holdout if split == "holdout" else setup.families_train
 
     def _summarise(self, st: dict, split: str) -> dict:
         fams = self._families(split)

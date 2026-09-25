@@ -25,6 +25,15 @@ The program never can: it holds only a `World`.
 members (`obs`, `steps_left`, `done`, `legal`, `step`, plus `plate_tick` and
 `finish` for the evaluator). FactorioGym's `tools/program_transfer.py` supplies
 one over the real game, and `play` runs a program on either.
+
+A task on the v3 profile (`TASK_PROFILES`; `belt_smelting`) gets `WorldV3`
+instead: the same verbs and queries over v3's tensors and action vector (a
+15x15 placement window, 96 entity rows, `ITEMS_V3`), plus `rotate`, the task's
+named public markers (`marker`) and belt lanes (`belt_lanes`), and `EntityV3`
+rows that carry what the v3 layout adds. Deliberately no pathfinding and no
+belt-routing helper: which tiles a line runs over is the problem the program
+has to solve, so the API offers the observation and one-decision actions and
+nothing that plans.
 """
 
 from __future__ import annotations
@@ -36,22 +45,36 @@ from collections import deque
 from dataclasses import dataclass
 
 from fsim import ffi, lib
-from fsim.obsview import FACINGS, ITEMS, Entity, ObsView
+from fsim.obsview import FACINGS, ITEMS, ITEMS_V3, Entity, EntityV3, ObsView
 from fsim.rl import RlEnv
 
 __all__ = [
     "BudgetExhausted",
     "Entity",
+    "EntityV3",
     "EpisodeResult",
     "SimBackend",
+    "TASK_PROFILES",
     "World",
+    "WorldV3",
     "play",
     "run_episode",
+    "world_class",
 ]
 
 TILE = 256
 PLACEMENT_RADIUS = 5
+PLACEMENT_RADIUS_V3 = 7
 OP_PLACE, OP_MINE, OP_GIVE, OP_TAKE, OP_WAIT = 12, 13, 16, 17, 21
+OP_ROTATE, OP_ROTATE_REVERSE = 14, 15
+OP_MINE_TILE = 22  # v3 only
+#: The action space each task's programs run under; unlisted tasks are v2.
+TASK_PROFILES = {
+    "construct_smelting_line": "v2",
+    "build_line": "v2",
+    "plate_line": "v2",
+    "belt_smelting": "v3",
+}
 STRIDES = {"long": 0, "step": 4, "nudge": 8}  # ops: base + direction
 MOVES = {"N": 0, "E": 1, "S": 2, "W": 3}
 AMOUNTS = {1: 1, 5: 2, 20: 3}
@@ -135,8 +158,8 @@ class EpisodeResult:
 
 
 class SimBackend:
-    """A reset `RlEnv` under v2, as `World` drives it: the published observation,
-    `fsim_rl_decode` for legality, and one `fsim_rl_step` per decision."""
+    """A reset `RlEnv` under v2 (or v3), as `World` drives it: the published
+    observation, `fsim_rl_decode` for legality, and one `fsim_rl_step` per decision."""
 
     def __init__(self, env: RlEnv) -> None:
         self.env = env
@@ -168,7 +191,10 @@ class SimBackend:
         env = self.rl.env
         before = env.char_pos.x, env.char_pos.y
         lib.fsim_rl_step(self.rl, self._vector)
-        lib.fsim_rl_encode(self.rl, self.env.obs_c)
+        if self.env.v3:
+            lib.fsim_rl_encode3(self.rl, self.env.obs3_c)
+        else:
+            lib.fsim_rl_encode(self.rl, self.env.obs_c)
         return math.hypot(env.char_pos.x - before[0], env.char_pos.y - before[1]) / TILE
 
     def plate_tick(self) -> int | None:
@@ -191,6 +217,13 @@ class SimBackend:
 
 class World:
     """What a builder program holds: observation queries and one-decision actions."""
+
+    #: What `entities()` returns, the item vocabulary (argument = index + 1) and
+    #: the placement window's radius: v2's. `WorldV3` overrides all three.
+    _ENTITY = Entity
+    _ITEM_NAMES = ITEMS
+    _RADIUS = PLACEMENT_RADIUS
+    _PLACE_ILLEGAL = "tile occupied, or it is the character's own tile"
 
     def __init__(self, env, decision_budget: int = 600) -> None:
         """`env` is a reset `RlEnv`, or any backend with `SimBackend`'s members."""
@@ -267,7 +300,7 @@ class World:
         """Place `item` on tile (x, y); a 2x2 machine covers x..x+1, y..y+1."""
         intent = f"place {item} ({x},{y}) {facing}"
         tx, ty = _whole(x), _whole(y)
-        if item not in ITEMS:
+        if item not in self._ITEM_NAMES:
             return self._refuse(intent, "unknown item")
         if facing not in FACINGS:
             return self._refuse(intent, "facing must be N/E/S/W")
@@ -275,14 +308,16 @@ class World:
             return self._refuse(intent, "tile coordinates must be whole numbers")
         here_x, here_y = self._obs().char_tile
         dx, dy = tx - here_x, ty - here_y
-        if abs(dx) > PLACEMENT_RADIUS or abs(dy) > PLACEMENT_RADIUS:
-            return self._refuse(intent, f"more than {PLACEMENT_RADIUS} tiles from tile()")
+        radius = self._RADIUS
+        if abs(dx) > radius or abs(dy) > radius:
+            return self._refuse(intent, f"more than {radius} tiles from tile()")
         if self.inventory()[item] <= 0:
             return self._refuse(intent, "not in inventory")
-        side = 2 * PLACEMENT_RADIUS + 1
-        slot = (dx + PLACEMENT_RADIUS) * side + dy + PLACEMENT_RADIUS + 1
-        vector = (OP_PLACE, 0, slot, FACINGS.index(facing) + 1, ITEMS.index(item) + 1, 0)
-        ok = self._act(intent, vector, "tile occupied, or it is the character's own tile")
+        side = 2 * radius + 1
+        slot = (dx + radius) * side + dy + radius + 1
+        item_arg = self._ITEM_NAMES.index(item) + 1
+        vector = (OP_PLACE, 0, slot, FACINGS.index(facing) + 1, item_arg, 0)
+        ok = self._act(intent, vector, self._PLACE_ILLEGAL)
         if ok and not self.last_refused():
             self._built.append((item, tx, ty))
         return ok
@@ -311,7 +346,7 @@ class World:
 
     def _transfer(self, op: int, verb: str, entity, item: str, amount: int) -> bool:
         intent = f"{verb} {_describe(entity)} {item} x{amount}"
-        if item not in ITEMS:
+        if item not in self._ITEM_NAMES:
             return self._refuse(intent, "unknown item")
         if amount not in AMOUNTS or isinstance(amount, bool):
             return self._refuse(intent, "amount must be 1, 5 or 20")
@@ -320,7 +355,7 @@ class World:
             return self._refuse(intent, "no such entity in the table")
         if op == OP_GIVE and self.inventory()[item] <= 0:
             return self._refuse(intent, "not in inventory")
-        vector = (op, row + 1, 0, 0, ITEMS.index(item) + 1, AMOUNTS[amount])
+        vector = (op, row + 1, 0, 0, self._ITEM_NAMES.index(item) + 1, AMOUNTS[amount])
         reason = "not held" if op == OP_GIVE else "no visible entity holds that item"
         return self._act(intent, vector, reason)
 
@@ -369,6 +404,107 @@ class World:
             self._first_plate_tick = self._backend.plate_tick()
 
 
+class WorldV3(World):
+    """`World` on the v3 profile, for belt and inserter logistics."""
+
+    _ENTITY = EntityV3
+    _ITEM_NAMES = ITEMS_V3
+    _RADIUS = PLACEMENT_RADIUS_V3
+    _PLACE_ILLEGAL = "tile occupied, the character's own tile, or more than 10 tiles from me()"
+    #: What the API reference says about `EntityV3`'s fields.
+    _ENTITY_NOTES = (
+        '  kind is "furnace" | "mining-drill" | "container" | "transport-belt" | "inserter" | '
+        '"wall" | "item-entity" | "other"; facing is N/E/S/W for drills, belts (the way they '
+        "carry) and inserters (toward their pickup), None otherwise",
+        "  lanes: items on a belt's lane 1 (left of travel) and lane 2; shape: a belt's "
+        '"straight" | "left" | "right" (None if not a belt); held: the item in an inserter\'s '
+        "hand or None; pickup, drop: where an inserter takes from and puts to, and a drill's "
+        "drop point, as world (x, y) or None; item: what it holds most of (chest, furnace "
+        "input, ground pile) or None",
+    )
+
+    def __init__(self, env, decision_budget: int = 2500, markers=()) -> None:
+        """`markers`: the task's public marker names, in its declared order."""
+        super().__init__(env, decision_budget)
+        self._marker_names = tuple(markers)
+
+    def entities(self) -> list[EntityV3]:
+        """The entity table (96 rows), nearest first. Rows renumber as the character moves."""
+        return self._obs().entities()
+
+    def patch(self) -> tuple[float, float] | None:
+        """The task's focus marker (its first public one), or None; clipped at 32 tiles."""
+        return self._obs().patch()
+
+    def place(self, item: str, x: int, y: int, facing: str) -> bool:
+        """Place `item` on tile (x, y) facing N/E/S/W; a 2x2 machine covers x..x+1, y..y+1.
+
+        A belt carries toward its facing; an inserter faces its pickup and drops
+        on the opposite side; a drill drops ahead of its facing.
+        """
+        return super().place(item, x, y, facing)
+
+    def mine_resource(self, x: int, y: int, amount: int = 1) -> bool:
+        """Hand-mine `amount` (1, 5 or 20) ore, coal or stone from the resource tile (x, y).
+
+        The tile's centre must be within 2.7 tiles of me(). The mining runs on,
+        one item every 2 s, until that many have arrived or a move stops it. If
+        an entity stands on the tile, that entity is mined instead and then
+        nothing more until a move; with no room left, a mined item drops on the
+        ground at the tile.
+        """
+        intent = f"mine_resource ({x},{y}) x{amount}"
+        tx, ty = _whole(x), _whole(y)
+        if tx is None or ty is None:
+            return self._refuse(intent, "tile coordinates must be whole numbers")
+        if amount not in AMOUNTS or isinstance(amount, bool):
+            return self._refuse(intent, "amount must be 1, 5 or 20")
+        here_x, here_y = self._obs().char_tile
+        dx, dy = tx - here_x, ty - here_y
+        radius = self._RADIUS
+        if abs(dx) > radius or abs(dy) > radius:
+            return self._refuse(intent, f"more than {radius} tiles from tile()")
+        side = 2 * radius + 1
+        slot = (dx + radius) * side + dy + radius + 1
+        vector = (OP_MINE_TILE, 0, slot, 0, 0, AMOUNTS[amount])
+        return self._act(intent, vector, "no visible resource on that tile within 2.7 tiles")
+
+    def rotate(self, entity, reverse: bool = False) -> bool:
+        """Turn a belt, inserter or drill a quarter turn clockwise (anticlockwise if reverse)."""
+        intent = f"rotate {_describe(entity)}{' reverse' if reverse else ''}"
+        row = self._row(entity)
+        if row is None:
+            return self._refuse(intent, "no such entity in the table")
+        op = OP_ROTATE_REVERSE if reverse is True else OP_ROTATE
+        return self._act(intent, (op, row + 1, 0, 0, 0, 0), "not visible, or out of reach")
+
+    def marker(self, name: str) -> tuple[float, float] | None:
+        """A public marker's position (this task: "iron", "coal", "output"), or None.
+
+        Exact within 128 tiles of the character on each axis; clipped beyond.
+        """
+        if name not in self._marker_names:
+            return None
+        slots = self._obs().markers()
+        index = self._marker_names.index(name)
+        return slots[index] if index < len(slots) else None
+
+    def belt_lanes(self, entity) -> tuple[int, int] | None:
+        """Items on a belt's lane 1 (left of travel) and lane 2, or None if not a belt."""
+        row = self._row(entity)
+        if row is None:
+            return None
+        for e in self.entities():
+            if e.row == row:
+                return e.lanes if e.kind == "transport-belt" else None
+        return None
+
+
+def world_class(task: str) -> type[World]:
+    """The `World` a program on `task` holds."""
+    return WorldV3 if TASK_PROFILES.get(task, "v2") == "v3" else World
+
+
 def _whole(v) -> int | None:
     if isinstance(v, bool):
         return None
@@ -394,7 +530,7 @@ def run_episode(
     env: RlEnv | None = None,
     time_limit_s: float | None = None,
 ) -> EpisodeResult:
-    """Reset to `scene` under v2, run `build(world)`, then wait out the episode.
+    """Reset to `scene` under the task's profile, run `build(world)`, then wait out the episode.
 
     `time_limit_s` bounds the program's wall-clock time; past it the program is
     stopped, recorded as an error, and the episode still runs to its end.
@@ -404,6 +540,19 @@ def run_episode(
     runs and scores what was built.
     """
     env = env if env is not None else RlEnv()
+    profile = TASK_PROFILES.get(task, "v2")
+    if profile == "v3":
+        env.reset(task, scene, action_space="v3")
+        if env.rl.task.action_space != lib.ACTION_SPACE_V3:
+            raise RuntimeError("the environment did not reset into the v3 action space")
+        return play(
+            build,
+            SimBackend(env),
+            decision_budget=decision_budget,
+            time_limit_s=time_limit_s,
+            world_cls=WorldV3,
+            markers=tuple(scene.get("public_markers") or ()),
+        )
     env.reset(task, scene, action_space="v2")
     if env.rl.task.action_space != lib.ACTION_SPACE_V2:
         raise RuntimeError("the environment did not reset into the v2 action space")
@@ -411,10 +560,22 @@ def run_episode(
 
 
 def play(
-    build, backend, *, decision_budget: int = 600, time_limit_s: float | None = None
+    build,
+    backend,
+    *,
+    decision_budget: int = 600,
+    time_limit_s: float | None = None,
+    world_cls: type[World] = World,
+    markers=(),
 ) -> EpisodeResult:
-    """Run `build(world)` on a reset backend, then wait out the episode and score it."""
-    world = World(backend, decision_budget)
+    """Run `build(world)` on a reset backend, then wait out the episode and score it.
+
+    `world_cls` is `World` for a v2 backend and `WorldV3` for a v3 one, which
+    also takes the task's public marker names (`markers`) in declared order."""
+    if world_cls is World:
+        world = World(backend, decision_budget)
+    else:
+        world = world_cls(backend, decision_budget, markers=markers)
     error = None
     try:
         with _Watchdog(time_limit_s):

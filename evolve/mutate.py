@@ -53,6 +53,109 @@ tile, never the tile the character stands on, and never an occupied or blocked t
 - Both machines need fuel (coal) to run.
 - A drill only mines if its footprint is on ore."""
 
+#: `belt_smelting` (FactorioRL `tasks/families/belt_smelting.py` 1.0.0). The
+#: numbers restate that module's constants: starting inventory, the 60-plate
+#: target, the 36,000-tick window, the 2,500-decision budget, site spacing.
+TASK_BELT_SMELTING = """\
+Task: belt_smelting.
+The scene has an iron ore patch, a coal patch and a wooden chest, each more than 20 tiles \
+from the other two, so no single standing tile reaches two of them. `world.marker("iron")`, \
+`world.marker("coal")` and `world.marker("output")` give their centres. The character starts \
+holding 4 burner mining drills, 4 stone furnaces, 40 transport belts, 8 burner inserters and \
+20 coal. Build a line that mines iron ore, smelts it and delivers the plates into the output \
+chest: at least 60 iron plates must arrive in that chest during a 36,000-tick (ten-minute) \
+verification window that starts after the build phase, with no actions allowed during it. \
+Plates smelted from hand-mined ore do not count. Coal is short: 20 is enough only if it is \
+not wasted before the window. Some scenes have walls."""
+
+#: Mechanics for `belt_smelting`, measured on the engine (FactorioRL
+#: `docs/sim-logistics.md`). Setting `GAME_NOTES` to "" leaves every task's out.
+GAME_NOTES_BELT_SMELTING = """\
+Game notes:
+- Every action is one decision of about 30 ticks (60 ticks = 1 s).
+- The build phase has a 2,500-decision budget; running out ends it.
+- `place` only reaches tiles within 7 tiles (Chebyshev distance) of the character's own \
+tile whose centre is also within 10 tiles (straight line) of `me()`, never the tile the \
+character stands on, and never an occupied or blocked tile. The sites are 20 to 40 tiles \
+apart, so the character has to walk between them.
+- `give`, `take`, `mine` and `rotate` need the entity within 10 tiles of `me()`, measured \
+to the edge of the entity's box; `mine_resource` needs the tile's centre within 2.7 tiles.
+- Hand-mining takes 2 s per item for ore, coal and stone, and keeps going until the asked \
+amount has arrived; a `move` stops it. If an entity stands on the tile, `mine_resource` \
+mines that entity instead and then nothing more until you move. With no room left in the \
+inventory, a mined item drops on the ground. A `mine_resource` with no free inventory slot \
+at all is refused.
+- A 2x2 machine placed at (x, y) covers tiles x..x+1, y..y+1; its centre is (x+1, y+1).
+- A belt carries items toward its facing, 1.875 tiles per second. Each belt tile has two \
+lanes (lane 1 on the left of travel, lane 2 on the right), each holding at most 4 items. A \
+belt whose end meets another belt's side feeds the lane on the side it comes from; a belt \
+that feeds straight into the back of another belt continues the line, turning if the next \
+belt faces a different way.
+- A burner mining drill facing S drops its ore at about (cx+0.5, cy+1.3) from its centre \
+(cx, cy); rotating the facing rotates that point about the centre. It mines 0.25 ore/s if its \
+footprint is on ore and it has fuel. Onto a belt, the ore lands on the lane nearest the drill.
+- A burner inserter faces its pickup: facing N it takes from the tile north of it and drops \
+onto the tile south of it (and likewise for the other facings). Onto a belt it drops on the \
+far lane (the one away from the inserter). It takes from belts, chests, furnace output and \
+the ground, and puts into belts, chests, and machine fuel or input slots.
+- An inserter fills a stone furnace to at most 2 ore and at most 5 fuel, and waits instead of \
+overfilling. It keeps its own fuel slot stocked from any fuel it moves; a newly placed burner \
+inserter already has a little fuel of its own.
+- A stone furnace makes one iron plate from one iron ore every 3.2 s while fuelled.
+- Drills, furnaces and inserters all burn coal; `world.give` puts coal into a machine's fuel \
+slot.
+- `world.entities()` reports each belt's lane counts and turn, each inserter's held item, \
+pickup and drop points, and each drill's drop point."""
+
+HINTS_BELT_SMELTING = [
+    "Put the drills on the iron patch facing a belt, and route the belt to furnaces placed "
+    "near the chest, with inserters from the belt into the furnaces and from the furnaces "
+    "into the chest.",
+    "Smelt next to the ore instead: drills drop straight into furnaces, inserters take the "
+    "plates out onto a belt, and the belt runs to an inserter that feeds the chest.",
+    "Count belt tiles before building: plan the route as a list of tiles and facings, and "
+    "check it fits in the belts you hold before placing the first one.",
+    "Place each belt facing the next tile of the route, and turn only at corners.",
+    "Check each inserter's pickup and drop points in entities() after placing it.",
+    "Walk to each site with long strides and finish with steps or nudges.",
+    "Spend coal only on machines that will run during the window, and give each just enough.",
+    "Route belts around blocked tiles instead of through them.",
+    "Watch decisions_left() and finish a working line before adding a second one.",
+]
+
+DEFAULT_TASK = "construct_smelting_line"
+#: Per-task prompt text. `construct_smelting_line` reads the module globals
+#: (`TASK`, `GAME_NOTES`, `HINTS`), so its prompts are exactly what they were;
+#: `GAME_NOTES = ""` switches every task's notes off.
+TASK_TEXT = {"belt_smelting": TASK_BELT_SMELTING}
+TASK_NOTES = {"belt_smelting": GAME_NOTES_BELT_SMELTING}
+TASK_HINTS = {"belt_smelting": HINTS_BELT_SMELTING}
+TASKS = (DEFAULT_TASK, *TASK_TEXT)
+
+
+def _known(task: str | None) -> str:
+    task = task or DEFAULT_TASK
+    if task not in TASKS:
+        raise ValueError(f"no prompt for task {task!r}; known: {', '.join(TASKS)}")
+    return task
+
+
+def task_text(task: str | None = None) -> str:
+    return TASK_TEXT.get(_known(task), TASK)
+
+
+def game_notes(task: str | None = None) -> str:
+    """The task's game notes, or "" once `GAME_NOTES` is switched off."""
+    task = _known(task)
+    if not GAME_NOTES:
+        return ""
+    return TASK_NOTES.get(task, GAME_NOTES)
+
+
+def hints(task: str | None = None) -> list[str]:
+    return TASK_HINTS.get(_known(task), HINTS)
+
+
 OUTPUT_FORMAT = """\
 Output format: first a brief plan of at most 5 lines, then exactly one ```python fenced \
 block containing the complete program. Nothing after the block."""
@@ -81,16 +184,17 @@ HINTS = [
 ]
 
 
-def system_prompt(api_reference: str) -> str:
+def system_prompt(api_reference: str, task: str | None = None) -> str:
     parts = [
         "You write and improve short Python programs that build factories in a Factorio-like "
         "simulator. A program is run once per scene; it acts only through the `world` API.",
-        TASK,
+        task_text(task),
         CONTRACT,
         "API reference:\n" + api_reference.strip(),
     ]
-    if GAME_NOTES:
-        parts.append(GAME_NOTES)
+    notes = game_notes(task)
+    if notes:
+        parts.append(notes)
     parts.append(OUTPUT_FORMAT)
     return "\n\n".join(parts)
 
@@ -143,33 +247,35 @@ def _render(parent: dict, name: str = "Program") -> str:
     return "\n\n".join(parts)
 
 
-def _messages(api_reference: str, user: str) -> list[dict]:
+def _messages(api_reference: str, user: str, task: str | None = None) -> list[dict]:
     return [
-        {"role": "system", "content": system_prompt(api_reference)},
+        {"role": "system", "content": system_prompt(api_reference, task)},
         {"role": "user", "content": user.strip() + "\n\n" + OUTPUT_FORMAT},
     ]
 
 
-def prompt_fix(api_reference: str, parent: dict) -> list[dict]:
+def prompt_fix(api_reference: str, parent: dict, task: str | None = None) -> list[dict]:
     user = (
         _render(parent)
         + "\n\nFind the most likely cause of the failures shown in the scores and traces, "
         "and make a targeted fix. Keep what already works; change as little as needed."
     )
-    return _messages(api_reference, user)
+    return _messages(api_reference, user, task)
 
 
-def prompt_rewrite(api_reference: str, parent: dict, hint: str) -> list[dict]:
+def prompt_rewrite(
+    api_reference: str, parent: dict, hint: str, task: str | None = None
+) -> list[dict]:
     user = (
         _render(parent)
         + "\n\nRewrite this program, following this strategy hint:\n"
         + hint.strip()
         + "\nYou may restructure freely, but the result must still satisfy the contract."
     )
-    return _messages(api_reference, user)
+    return _messages(api_reference, user, task)
 
 
-def prompt_crossover(api_reference: str, a: dict, b: dict) -> list[dict]:
+def prompt_crossover(api_reference: str, a: dict, b: dict, task: str | None = None) -> list[dict]:
     user = (
         _render(a, "Program A")
         + "\n\n"
@@ -177,17 +283,17 @@ def prompt_crossover(api_reference: str, a: dict, b: dict) -> list[dict]:
         + "\n\nWrite one program that combines the strengths of A and B: take from each "
         "the parts that make it succeed on the families where it scores higher."
     )
-    return _messages(api_reference, user)
+    return _messages(api_reference, user, task)
 
 
-def prompt_simplify(api_reference: str, parent: dict) -> list[dict]:
+def prompt_simplify(api_reference: str, parent: dict, task: str | None = None) -> list[dict]:
     user = (
         _render(parent)
         + "\n\nSimplify this program: fewer lines, clearer names, no dead code. It must "
         "behave exactly the same, issuing the same actions in the same order on every "
         "scene. Do not change behaviour, even to fix a failure."
     )
-    return _messages(api_reference, user)
+    return _messages(api_reference, user, task)
 
 
 OPERATORS = {

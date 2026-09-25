@@ -44,7 +44,9 @@ SAFE_BUILTINS = {name: getattr(builtins, name) for name in SAFE_BUILTIN_NAMES}
 #: builtin type a program can reach.
 WORLD_API = frozenset(
     "me tile patch inventory ore_tiles blocked_tiles entities decisions_left last_refused "
-    "move place give take mine wait refusals failures".split()
+    "move place give take mine wait refusals failures "
+    # `WorldV3` (the v3 profile: belt_smelting)
+    "rotate marker belt_lanes mine_resource".split()
 )
 
 #: Attributes allowed on any value: `Entity` fields, then list, dict, set and str
@@ -53,6 +55,8 @@ WORLD_API = frozenset(
 SAFE_ATTRS = (
     frozenset(
         "x y row kind facing fuel contents output working remembered "
+        # `EntityV3`
+        "lanes shape held pickup drop item "
         # list and dict
         "append extend insert pop remove index count sort reverse copy clear "
         "get items keys values update setdefault "
