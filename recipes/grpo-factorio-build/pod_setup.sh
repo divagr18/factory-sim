@@ -48,9 +48,19 @@ step "uv sync (the slow part: torch, vLLM, flash-attn)"
 uv sync --all-extras
 
 step "factory-sim + factorio-build"
-# prime-rl's pyproject sets `exclude-newer = "7 days"`, which hides a factory-sim
-# release newer than a week; pin past it explicitly.
-uv pip install --exclude-newer "$(date -u -d tomorrow +%Y-%m-%dT00:00:00Z)" "factory-sim>=0.1.2"
+if [ -n "${FSIM_SRC:-}" ]; then
+    # A source archive of the same commit the factorio-build wheel was built from
+    # (deploy.sh makes both): the env imports parts of factory-sim that are newer
+    # than the last PyPI release. It is a git archive, not an sdist, so unpack it
+    # and install the tree; the C extension is compiled here.
+    rm -rf "$ROOT/factory-sim-src" && mkdir -p "$ROOT/factory-sim-src"
+    tar -xzf "$FSIM_SRC" -C "$ROOT/factory-sim-src"
+    uv pip install --force-reinstall "$ROOT/factory-sim-src/factory-sim"
+else
+    # prime-rl's pyproject sets `exclude-newer = "7 days"`, which hides a factory-sim
+    # release newer than a week; pin past it explicitly.
+    uv pip install --exclude-newer "$(date -u -d tomorrow +%Y-%m-%dT00:00:00Z)" "factory-sim>=0.1.2"
+fi
 if [ -n "$WHEEL" ]; then
     # --no-deps: the wheel pins verifiers>=0.3.1, the workspace verifiers is a dev build.
     uv pip install --no-deps --force-reinstall "$WHEEL"
@@ -59,7 +69,7 @@ else
 fi
 # For the SFT warm start; prime-rl itself never imports these.
 uv pip install --no-deps peft accelerate
-.venv/bin/python -c "import factorio_build, fsim, peft; assert factorio_build.V1_IMPORT_ERROR is None; print('envs ok')"
+.venv/bin/python -c "import factorio_build, fsim, peft; from factorio_build import core; assert factorio_build.V1_IMPORT_ERROR is None; print('envs ok')"
 
 step "models"
 for m in $MODELS; do
