@@ -9,13 +9,17 @@ fast path (tensors, masks) arrives in M4.
 
 from __future__ import annotations
 
+import array
+import hashlib
 import json
+import lzma
 import math
+import sys
 from pathlib import Path
 
 from fsim._fsim import ffi, lib
 
-__all__ = ["Sim", "action_struct", "ffi", "lib", "scene_struct"]
+__all__ = ["BeltDelayMissing", "Sim", "action_struct", "ffi", "lib", "scene_struct"]
 
 ROOT = Path(__file__).resolve().parents[1]
 #: Shipped inside the package, so an installed copy has the map without a checkout.
@@ -174,6 +178,48 @@ def water_tiles() -> list[tuple[int, int]]:
         + ", ".join(str(c) for c in candidates)
         + ". Ship it with the simulator, or pass water=[] for a deliberately dry map."
     )
+
+
+class BeltDelayMissing(RuntimeError):
+    """A belt was built on a tile the measured merge-delay table does not cover.
+
+    A belt's lanes merge into segments a per-tile delay after it is built
+    (csrc/fsim.c, "segments"), and the delay is measured, not computed: the
+    table covers the scene area around the origin and FactorioRL's rig areas
+    (fsim/data/belt-delay.json). Outside it the simulator cannot say when the
+    belt's lanes merge, so it stops rather than guess.
+    """
+
+
+def _load_belt_delay() -> dict:
+    """Hand the measured merge-delay table to the C core, once per process."""
+    meta = json.loads((PACKAGE_DATA / "belt-delay.json").read_text(encoding="utf-8"))
+    raw = lzma.decompress((PACKAGE_DATA / "belt-delay.u16.xz").read_bytes())
+    if hashlib.sha256(raw).hexdigest() != meta["sha256"]:
+        raise RuntimeError("fsim/data/belt-delay.u16.xz does not match belt-delay.json's sha256")
+    values = array.array("H")
+    values.frombytes(raw)
+    if sys.byteorder == "big":
+        values.byteswap()
+    rects = [v for r in meta["rects"] for v in r["rect"]]
+    if lib.fsim_set_belt_delay(len(meta["rects"]), ffi.new("int32_t[]", rects),
+                               ffi.from_buffer("uint16_t[]", values)) != 0:  # fmt: skip
+        raise MemoryError("belt delay table")
+    return meta
+
+
+#: The measured belt merge delays, loaded into the C core on import.
+BELT_DELAY = _load_belt_delay()
+
+
+def check_belt_delay(env) -> None:
+    """Raise BeltDelayMissing if env has a belt the delay table does not cover."""
+    if env.belt_delay_missing:
+        raise BeltDelayMissing(
+            f"{env.belt_delay_missing} belt(s) built outside the measured merge-delay table, "
+            f"the first on tile ({env.belt_delay_missing_x}, {env.belt_delay_missing_y}); "
+            f"covered: {[r['rect'] for r in BELT_DELAY['rects']]} (x0, y0, x1, y1, half-open)"
+        )
 
 
 def _handle(value) -> int:
@@ -426,6 +472,7 @@ class Sim:
         self.steps = 0
         scene, self._scene_arrays = scene_struct(blueprint)
         lib.fsim_reset(self.env, scene)
+        check_belt_delay(self.env)
 
     # ------------------------------------------------------------- stepping
     def action(self, key: str, arguments: dict | None = None):
@@ -434,6 +481,7 @@ class Sim:
     def step(self, key: str, arguments: dict | None = None, ticks: int = 30) -> None:
         lib.fsim_step(self.env, self.action(key, arguments), ticks)
         self.steps += 1
+        check_belt_delay(self.env)
 
     @property
     def tick(self) -> int:

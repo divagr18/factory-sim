@@ -220,10 +220,17 @@ typedef struct {
     int32_t lift;                 /* the drawn lift in use: 0 none, 1 a swing, 2 to itself, -1 unknown */
     int32_t lift_step;            /* ticks into that move */
     int32_t hand_x, hand_y;       /* held_stack_position less the position, 1/256 */
-    int32_t belt_asleep;          /* asleep on its pickup belt's line (rule 6) */
-    int64_t woke_tick;            /* the tick an item on that line woke it */
+    int32_t belt_asleep;          /* asleep on its pickup belt's segment (rule 6) */
+    int64_t woke_tick;            /* the tick an item on that segment woke it */
     /* belt */
     fsim_lane lanes[2];           /* lane 1 (left of travel), lane 2 */
+    /* Belt-line segments (fsim.c, "segments"): when it was built, each lane's
+     * merge delay from the measured table (-1: the table has no entry), and
+     * the tick each lane's merge timer runs out, or 0 when none is running. */
+    int64_t built_tick;
+    int64_t merge_at[2];
+    int32_t delay[2];
+    int32_t seg_new;              /* built since the last rebuild_logistics */
     /* Derived from the neighbours, rebuilt whenever entities change
      * (fsim.c, rebuild_logistics); a hidden-state load rebuilds them too. */
     int32_t shape;                /* BELT_* */
@@ -426,8 +433,33 @@ typedef struct {
     int32_t chain_size[1024];   /* its lanes; negative for a closed loop */
     int32_t chain_lanes[1024];  /* lane refs, each chain front (downstream) first */
     int32_t lane_chain[1024];   /* the chain a lane ref is in, or -1 */
-    int32_t belt_sleepers;      /* inserters asleep on a belt line */
+    int32_t belt_sleepers;      /* inserters asleep on a belt segment */
     int32_t next_item_id;
+    /* Belt-line segments (fsim.c, "segments"), by lane ref (entity * 2 + lane).
+     * A segment is named by its head, its downstream-most lane; the arrays
+     * marked "by head" mean something only at a head. */
+    int32_t lane_pos[1024];     /* a lane's index in its chain, the front 0 */
+    int32_t seg_head[1024];     /* the head of the segment a lane is in, -1 on a loop */
+    int32_t seg_join[1024];     /* the lane downstream it is merged with, or -1 */
+    uint8_t seg_cut[1024];      /* a boundary lies between it and the lane downstream */
+    uint8_t lane_dirty[1024];   /* an entity has put an item on it or taken one off */
+    uint8_t seg_listed[1024];   /* by head: in seg_order (awake) */
+    uint8_t seg_sleep[1024];    /* by head: holds items, none of which could move */
+    int32_t side_first[1024];   /* the first chain front that sideloads into a lane, or -1 */
+    int32_t side_link[1024];    /* the next one after a front, or -1 */
+    int32_t belts_changed;      /* a belt was built, removed or turned since the last rebuild */
+    int64_t seg_moved[1024];    /* by head: the tick it last moved */
+    int64_t seg_split_at[1024]; /* by head: the tick it splits at its boundaries, or 0 */
+    int32_t seg_count;          /* entries in seg_order */
+    int32_t seg_order[2048];    /* awake segments, by head, oldest activation first; -1 gone */
+    int64_t seg_next_timer;     /* the earliest merge or split due, or 0 */
+    int32_t belt_phase;         /* the belts are moving (update_belts) */
+    /* Belts built on a tile the merge-delay table does not cover: counted,
+     * and the first such tile kept. Their lanes never merge; the Python layer
+     * refuses to go on (fsim.BeltDelayMissing). */
+    int32_t belt_delay_missing;
+    int32_t belt_delay_missing_x;
+    int32_t belt_delay_missing_y;
 } fsim_env;
 
 typedef struct {
@@ -491,6 +523,9 @@ int32_t fsim_entity_insert(fsim_env *env, int32_t index, int32_t item, int32_t c
 int32_t fsim_belt_insert(fsim_env *env, int32_t index, int32_t lane, int32_t position,
                          int32_t item);
 int32_t fsim_belt_insert_back(fsim_env *env, int32_t index, int32_t lane, int32_t item);
+/* A script takes item `at` (0: the front) off belt `index`'s lane (0-based):
+ * 1 when there was one. Its segment wakes, as after an inserter's pickup. */
+int32_t fsim_belt_remove(fsim_env *env, int32_t index, int32_t lane, int32_t at);
 /* LuaEntity.remove_item on a chest (slot 1 first); returns what came out. */
 int32_t fsim_entity_remove(fsim_env *env, int32_t index, int32_t item, int32_t count);
 /* Put inserter `index` `step` ticks into move `phase` (INS_*) from where that
@@ -508,6 +543,16 @@ void fsim_remove_pile(fsim_env *env, int32_t index);
 void fsim_refresh(fsim_env *env);
 /* Run `ticks` world ticks with no request in flight. */
 void fsim_advance(fsim_env *env, int32_t ticks);
+/* The measured belt merge delay, shared by every env: `count` rectangles, each
+ * x0, y0, x1, y1 (tiles, half-open) in `rects`, and `values` holding, rectangle
+ * by rectangle, lane 1's delays then lane 2's, row by row (y, then x). The
+ * table is copied. Returns 0, or -1 when out of memory. */
+int32_t fsim_set_belt_delay(int32_t count, const int32_t *rects, const uint16_t *values);
+/* The delay of tile (tx, ty), lane 0 or 1, or -1 where the table has none. */
+int32_t fsim_belt_delay(int32_t tx, int32_t ty, int32_t lane);
+/* The segment belt `index`'s lane (0 or 1) is in, named by its head's lane
+ * ref, or -1 (not a belt, or on a closed loop). */
+int32_t fsim_belt_segment(fsim_env *env, int32_t index, int32_t lane);
 /* KF_* flags of an entity kind, and the seconds the character takes to mine one. */
 int32_t fsim_kind_flags(int32_t kind);
 double fsim_kind_mining_time(int32_t kind);

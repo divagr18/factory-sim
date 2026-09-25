@@ -244,6 +244,61 @@ class Rigs2:
             for lane in (1, 2):
                 self.feeder(r, r.belts[4], lane, 3, "iron-plate")
                 self.feeder(r, r.belts[6], lane, 3, "copper-plate")
+        # simultaneous sideloads (`sim_*`): main of three east belts; a feed of
+        # F belts into the side of the middle one, index 1 next to the main;
+        # items {lane, feed belt, position} in insertion order
+        sims = {
+            "sim_l1first": {"items": [(1, 1, 128), (2, 1, 128)]},
+            "sim_l2first": {"items": [(2, 1, 128), (1, 1, 128)]},
+            "sim_f4_l1first": {"F": 4, "items": [(1, 4, 128), (2, 4, 128)]},
+            "sim_f4_l2first": {"F": 4, "items": [(2, 4, 128), (1, 4, 128)]},
+            "sim_l1only": {"items": [(1, 1, 128)]},
+            "sim_l2only": {"items": [(2, 1, 128)]},
+            "sim_l1early": {"items": [(1, 1, 120), (2, 1, 128)]},
+            "sim_l2early": {"items": [(1, 1, 128), (2, 1, 120)]},
+            "sim_feedfirst_l1": {"feed_first": True, "items": [(1, 1, 128), (2, 1, 128)]},
+            "sim_feedfirst_l2": {"feed_first": True, "items": [(2, 1, 128), (1, 1, 128)]},
+            "sim_active_l1": {"items": [(1, 1, 128), (2, 1, 128)], "main_items": [(2, 1, 250)]},
+            "sim_active_l2": {"items": [(2, 1, 128), (1, 1, 128)], "main_items": [(2, 1, 250)]},
+            "sim_other_l1": {"items": [(1, 1, 128), (2, 1, 128)], "main_items": [(1, 1, 250)]},
+            "sim_mainfirst_l1": {"items": [(1, 1, 128), (2, 1, 128)], "main_items": [(2, 3, 200)]},
+            "sim_n_l1first": {"side": "N", "items": [(1, 1, 128), (2, 1, 128)]},
+            "sim_n_l2first": {"side": "N", "items": [(2, 1, 128), (1, 1, 128)]},
+            "sim_k3_l1first": {"items": [(1, 1, 131), (2, 1, 131)]},
+            "sim_k3_l2first": {"items": [(2, 1, 131), (1, 1, 131)]},
+            "sim_three_l1first": {"F": 4, "feeders": [(1, 3), (2, 3)]},
+            "sim_three_l2first": {"F": 4, "feeders": [(2, 3), (1, 3)]},
+            "sim_pairs_l1": {"F": 2, "items": [(1, 1, 128), (1, 1, 200), (2, 1, 128), (2, 1, 200)]},
+            "sim_pairs_l2": {"F": 2, "items": [(2, 1, 128), (2, 1, 200), (1, 1, 128), (1, 1, 200)]},
+        }  # fmt: skip
+        for name, spec in sims.items():
+            f = spec.get("F", 1)
+            if not (r := self.rig(name, 3, f + 1)):
+                continue
+            south = spec.get("side", "S") == "S"
+            my = 0 if south else f
+            main: list[int] = []
+            feed: list[int] = []
+
+            def build_main(r=r, my=my, main=main):
+                main.extend(self.belt(r, i, my, E) for i in range(3))
+
+            def build_feed(r=r, my=my, feed=feed, f=f, south=south):
+                feed.extend(self.belt(r, 1, my + k, N) if south else self.belt(r, 1, my - k, S)
+                            for k in range(1, f + 1))  # fmt: skip
+
+            if spec.get("feed_first"):
+                build_feed()
+                build_main()
+            else:
+                build_main()
+                build_feed()
+            for lane, k, pos in spec.get("main_items", []):
+                self.put(main[k - 1], lane, pos, "iron-plate")
+            for lane, k, pos in spec.get("items", []):
+                self.put(feed[k - 1], lane, pos, "copper-plate")
+            for lane, count in spec.get("feeders", []):
+                self.feeder(r, feed[f - 1], lane, count, "copper-plate")
         # drops and drill outputs onto turns
         for tag, facing in (("r", S), ("l", N)):
             for side, size in (("n", (4, 5)), ("e", (4, 5)), ("s", (4, 5))):

@@ -32,12 +32,13 @@ EVIDENCE = json.loads(lzma.decompress(GOLDEN.read_bytes()))
 TICKS = EVIDENCE["ticks"]
 
 #: (rig, field path or "" for all of it, first tick, last tick): readings
-#: known not to match.
-GAPS = {
-    # Both feed lanes reach the main belt on t=128, and the engine moves the
-    # lane-1 item 8/256 further; it catches up by t=138 (update_belts).
-    "first sideload arrival": ("side_main", "", 128, 137),
-}
+#: known not to match. None now: the first sideload arrival in `side_main`
+#: (both feed lanes reach the main belt on t=128 and the engine moves the
+#: lane-1 item 8/256 further) and the rigs whose inserter picks from young
+#: belts (`bend`, `bend_belt`, `bend_furnace`, `flow2`, `tick_ins`, once
+#: compared from t=300 only) agree on every tick since belt-line segments
+#: (csrc/fsim.c, "segments").
+GAPS: dict = {}
 
 
 def _expand(series: list) -> list:
@@ -94,18 +95,6 @@ def _excused(key: str, path: str, t: int) -> bool:
     return False
 
 
-#: Rigs whose belts were built on tick 0 and whose inserter takes from them
-#: while they are young. Accepted on 2026-09-24 (docs/sim-logistics.md,
-#: "Inserter belt pickup", rule 6): for about the first 300 ticks after belts
-#: are built the engine wakes an inserter asleep on them late, by an amount it
-#: does not let us predict, and items on them do not keep it awake; the
-#: simulator does not model that. These rigs are compared from t=300 on, the
-#: fuel left in the inserter's burner up to the constant offset the young
-#: period leaves (its first moves were paid from a different buffer).
-YOUNG_BELT_RIGS = {"bend", "bend_belt", "bend_furnace", "flow2", "tick_ins"}
-YOUNG_BELT_TICKS = 300
-
-
 def _unmark_hand_y(engine: dict, ours: dict) -> None:
     """Hand y is not compared where the simulator does not know the lift
     (fsim.trace.relax_hand_y)."""
@@ -118,20 +107,9 @@ def _unmark_hand_y(engine: dict, ours: dict) -> None:
 
 def mismatches(sim, key: str) -> list:
     out = []
-    young = key in YOUNG_BELT_RIGS
-    offsets: dict = {}
     for t in range(TICKS + 1):
         engine, ours = flatten(ENGINE[key][t]), flatten(sim[t][key])
         _unmark_hand_y(engine, ours)
-        if young and t < YOUNG_BELT_TICKS:
-            continue
-        if young:
-            for path in [p for p in engine if p.endswith("remaining")]:
-                a, b = _number(engine[path]), _number(ours.get(path))
-                if a is None or b is None:
-                    continue
-                offsets.setdefault(path, b - a)
-                engine[path] = repr(a + offsets[path])
         for path in sorted(set(engine) | set(ours)):
             a, b = engine.get(path), ours.get(path)
             if not same(a, b) and not _excused(key, path, t):

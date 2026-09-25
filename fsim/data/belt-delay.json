@@ -1,0 +1,46 @@
+{
+ "what": "belt merge delay d (ticks) of every tile and lane: a belt's lane line merges with its neighbours' d ticks after it is built",
+ "engine": {
+  "version": "2.0.60",
+  "build": 83512
+ },
+ "method": "each tile measured twice, facing north and facing east: a belt at the tile, its downstream neighbour destroyed and rebuilt every tick, the first on_tick t (from the build command) at which their lines are equal; where the two differ, the one reading 1 had a neighbour whose own d is 1 and the other stands",
+ "methods": [
+  "belt facing 4 per tile, downstream neighbour at (x+1, y) rebuilt every tick; first on_tick t (from the build command) at which line_equals",
+  "north-facing belt per tile, neighbour at (x, y-1) rebuilt every tick; first on_tick t (from the build command) at which line_equals"
+ ],
+ "corrected": {
+  "north_read_1": 459,
+  "east_read_1": 456
+ },
+ "probe": "FactorioRL tools/probe_logistics4.py --family delaymap --rect x0,y0,x1,y1 [--facing 4]",
+ "layout": "uint16 little-endian; per rectangle lane 1 then lane 2, rows y0..y1-1, each x0..x1-1; rectangles in this order, the first containing a tile wins",
+ "rects": [
+  {
+   "rect": [
+    -128,
+    -128,
+    128,
+    128
+   ]
+  },
+  {
+   "rect": [
+    96,
+    96,
+    352,
+    352
+   ]
+  },
+  {
+   "rect": [
+    296,
+    456,
+    340,
+    480
+   ]
+  }
+ ],
+ "values": 264256,
+ "sha256": "e07d43985f0ea5f367344973dcfe3d2f0b8326a98902993ede4ddf66b4155adc"
+}

@@ -18,7 +18,7 @@ build-backend = "setuptools.build_meta"
 include = ["fsim*", "evolve*"]
 
 [tool.setuptools.package-data]
-fsim = ["data/*.json"]
+fsim = ["data/*.json", "data/*.xz"]
 
 [project.optional-dependencies]
 # Gymnasium adapters: fsim/gym_env.py.

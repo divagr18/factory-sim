@@ -22,13 +22,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEST = ROOT / "tests" / "golden" / "sim-mechanics-m4-logistics2.json.xz"
 
-#: Rig name prefixes the tests compare. Left out: `sim_*` (simultaneous
-#: sideload arrivals, not reproduced), `char_*` and `mine` (read through
-#: `character`).
+#: Rig name prefixes the tests compare. Left out: `char_*` and `mine` (read
+#: through `character`).
 PREFIXES = (
     "turn_", "sl_left_", "side_", "tdrop_", "tdrill_", "ground_", "gpair_", "full_", "fill_",
     "mix_", "order", "wake3", "chain_", "woken_", "rot_", "stat_", "dstat_", "spick_", "tpick_",
-    "pe_", "sr_", "seg_", "win_",
+    "pe_", "sr_", "seg_", "win_", "sim_",
 )  # fmt: skip
 
 

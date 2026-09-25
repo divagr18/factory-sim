@@ -33,11 +33,6 @@ NOT_COMPARED = {
     # Stone into a furnace makes stone bricks, which the simulator has no item
     # for: the engine's inserter keeps 4 stone in the furnace.
     "fill_stone_furnace": "stone bricks",
-    # Both lanes of each feeder reach the turned belt's lane on the same tick,
-    # and the engine moves one of the two items 8/256 further: the order the
-    # engine updates belt lines in, not reproduced (update_belts).
-    "side_both": "simultaneous sideload arrival",
-    "side_turn_two": "simultaneous sideload arrival",
     # A script takes the front item off the drill's belt; no action can.
     "dstat_take_belt": "belt item removed by script",
     # Pickups from items stopped on a turn by an inserter on the side opposite

@@ -38,23 +38,11 @@ LOGISTICS = {name for name, entry in INDEX.items() if entry.get("requires") == "
 #: Where each logistics trace first departs from the simulator: the decision
 #: (free-running and sync alike), the start of the differing path, the first
 #: differing tick of the per-tick trace, and why.
-KNOWN_GAPS = {
-    # The inserter at the end of the ore line comes back to rest at t=776 with
-    # an ore five belts upstream, and the engine lets it fall asleep (keeping
-    # 1,910 J) where the simulator keeps it awake, refilled; it wakes when the
-    # ore crosses onto the belt before the turn (t=803). The engine's inserter
-    # watches its belt-line segment, and the drill split the ore lane's
-    # segment after belt 4 at t=734 (its first output, t=242, plus that
-    # lane's merge delay on the last belt, 492): FactorioRL
-    # docs/sim-logistics.md, "Third probe". Not modelled: segments.
-    "logistics_smelting_chain": (26, ".remaining_burning_fuel", 776, "belt-line sleep"),
-    # Both feed lanes reach the main belt on the same tick for the first time
-    # and the engine moves one of the two items 8/256 further: lines update
-    # in activation order, per belt while the belts are young, and the second
-    # item into an empty target moves it (update_belts; FactorioRL
-    # docs/sim-logistics.md, "Third probe"). Not modelled: segments.
-    "logistics_sideload_merge": (5, ".entities[8].lanes", 127, "first sideload arrival"),
-}  # fmt: skip
+#: None now: `logistics_smelting_chain` (an inserter watching its belt-line
+#: segment falls asleep with ore on the other side of a split) and
+#: `logistics_sideload_merge` (two sideloads onto one empty lane in one tick)
+#: agree exactly since csrc/fsim.c models segments ("segments").
+KNOWN_GAPS: dict = {}
 
 
 def _strict(name: str) -> None:
@@ -114,11 +102,13 @@ def test_known_gaps_are_logistics_scenarios():
     # change shape re-place their items (rebuild_logistics); logistics_belt_pickup
     # and logistics_inserter_fuel_exhaustion since the arm model (arm_step,
     # inserter_chase) -- the hand's y compared only where its lift is known
-    # (fsim.trace.relax_hand_y).
+    # (fsim.trace.relax_hand_y); logistics_smelting_chain and
+    # logistics_sideload_merge since belt-line segments.
     assert set(KNOWN_GAPS) <= LOGISTICS
     assert LOGISTICS - set(KNOWN_GAPS) == {
         "logistics_belt_rotate_and_mine", "logistics_belt_pickup",
-        "logistics_inserter_fuel_exhaustion"}  # fmt: skip
+        "logistics_inserter_fuel_exhaustion", "logistics_smelting_chain",
+        "logistics_sideload_merge"}  # fmt: skip
 
 
 @pytest.mark.parametrize("name", ["construct_smelting_line_reference", "masked_random_rollout"])
