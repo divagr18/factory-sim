@@ -33,6 +33,183 @@ uv run --no-sync eval @ /root/recipe/configs/eval.toml --model /root/models/sft
 Evaluate at temperature 0.6 with thinking off. Use `split = "holdout"` only for
 final numbers.
 
+## Warm start in the model's own voice
+
+The SFT-800 warm start above, followed by GRPO, took Qwen3.5-9B from 1.6% to
+84.0% on the holdout. It also cost the model its general planning: PlanBench
+Blocksworld fell from 53% to 3% with thinking off, and replies shrank from
+~2,000 tokens to ~60. SFT caused the whole drop. The targets were bare
+programs written by another model. Training on targets in the model's own
+voice forgets less (STaR's rationalisation, self-distillation fine-tuning,
+RL's Razor), and one round of self-SFT still forgets unless it is iterated
+(Retaining by Doing). These scripts rebuild the SFT data that way.
+
+| File | What it does |
+|---|---|
+| `rationalize.py` | Base Qwen writes each target: the env's prompt, plus one message holding the evolved program, becomes an explanation and a program. Only replies whose program scores at least as well as the evolved one are kept. The SFT row is the prompt without the hint. |
+| `make_replay.py` | Base Qwen's own answers to general prompts, mixed into SFT as replay. |
+| `sft_lora.py` | New flags: `--empty-think`, `--replay`, `--replay-frac`. A local `--model` starts a second round. |
+| `sft_data.py` | Examples, loss masks and the replay mix for `sft_lora.py`. It needs no torch, so the tests use it. |
+| `gen_common.py` | The async client for vLLM and the resumable JSONL store that both generators use. |
+
+### What these scripts decide
+
+- **Hint** (`HINT_TEMPLATE`, version `hint-v1`, written to `run.json` and `stats.json`).
+  The request is the env's system and user messages unchanged, then one more
+  user message:
+
+  ````text
+  A reference program that solves this task:
+
+  ```python
+  {program}```
+
+  Explain the approach step by step in your own words, as your own solution, without mentioning the reference. Then give the complete program in one ```python fenced block, with nothing after it. You may adapt or improve the reference program.
+  ````
+
+  "Without mentioning the reference" is there because the target is trained
+  against the prompt without the hint. The env's own output format asks for a
+  plan of at most 5 lines. The hint asks for step-by-step prose on purpose, since
+  that prose is the habit SFT removed.
+- **Prompts are the env's.** Each example's scenes are rebuilt from the subset
+  id in its prompt. `core.rows` must reproduce its system and user messages
+  byte for byte, or the run stops before sending any request. Only train
+  scenes are accepted. All 800 SFT-800 rows match the current env.
+- **Scoring is the env's.** `evolve.llm.extract_code` extracts the program and
+  `factorio_build.core.score_completion` scores it, on the example's own scenes,
+  with the env's defaults (4 workers, 30 s timeout, the task's decision budget).
+- **Keep rule**, per sample. The request succeeded, the reply finished, and it
+  holds a sandbox-valid program. Its success on the example's scenes is at least
+  the reference program's, and above zero. The reply does not mention the hint,
+  holds one program block, and has at least 30 words of prose before it. Of the
+  samples that pass, the best one per example is kept: higher success first,
+  then the shortest prose. `--rebuild` re-applies other keep settings
+  (`--keep-per-example`, `--min-reasoning-words`, `--max-programs`,
+  `--allow-zero-success`) without regenerating.
+- **Empty think block.** With `enable_thinking=False`, Qwen3.5's generation
+  prompt ends with `<think>\n\n</think>\n\n`: four tokens, `<think>`, `\n\n`,
+  `</think>`, `\n\n`. The old `sft_lora.py` already kept them out of the loss,
+  because it tokenized that generation prompt as the prompt. So the SFT-800
+  drop did not come from training on the empty block. `--empty-think mask`,
+  the default, keeps those labels exactly as before. `--empty-think train`
+  puts the four tokens in the loss, as trainers that take the loss over the
+  whole rendered assistant turn do. That is the ablation.
+- **Replay sources and licences.** OpenAssistant/oasst2 (Apache-2.0): English
+  first turns only, excluding deleted, synthetic, spam, PII and inappropriate
+  prompts. openai/gsm8k (MIT): the train split. The default mix is 75/25, 1,000
+  prompts, and 20% of them are answered with thinking on, keeping the
+  reasoning. Planning look-alikes (Blocksworld, stacking blocks, PDDL,
+  PlanBench's phrasing) are dropped, and the counts land in `selection.json`.
+  Replay always comes from base, in every round.
+- **Replay share.** `--replay-frac 0.2` makes replay 20% of each epoch: 200
+  replay rows next to 800 task rows. Replay is drawn without replacement across
+  epochs. Without `--replay`, the example order is the old one.
+
+### Runbook
+
+Before you start, check the pod's env imports. `deploy.sh` builds the
+factorio-build wheel from this checkout, and `pod_setup.sh` installs
+factory-sim 0.1.2 from PyPI. The working tree's `core.py` (since the v3
+commit) needs `evolve.evaluate.TASKS`, which 0.1.2 lacks, so the check below
+fails until factory-sim is released again or the pod gets factory-sim from the
+same checkout:
+
+```bash
+ssh rp 'cd /root/prime-rl && .venv/bin/python -c "from factorio_build import core; print(core.SUPPORTED_TASKS)"'
+```
+
+```bash
+# laptop: pod up, recipe and wheel uploaded, SFT-800 data built (see Steps)
+MODELS="Qwen/Qwen3.5-9B" bash recipes/grpo-factorio-build/deploy.sh <ip> <port>
+uv run python recipes/grpo-factorio-build/build_sft_data.py \
+    --archives "runs/*/genealogy.sqlite" --target 800 --out sft.jsonl
+scp sft.jsonl rp:/root/recipe/
+
+# pod: 1. serve BASE on GPU 0 (thinking is switched per request)
+cd /root/prime-rl
+export HF_HOME=/root/hf
+/root/serve.sh Qwen/Qwen3.5-9B 0                                     # prints "ready"
+
+# 2. rationalise: an 8-example smoke test, then all 800 (the same --out-dir resumes)
+uv run --no-sync python /root/recipe/rationalize.py \
+    --data /root/recipe/sft.jsonl --out-dir /root/rat_r1 --limit 8
+cat /root/rat_r1/stats.json            # kept rate, reject reasons, lengths
+setsid nohup uv run --no-sync python /root/recipe/rationalize.py \
+    --data /root/recipe/sft.jsonl --out-dir /root/rat_r1 \
+    > /root/rat_r1.log 2>&1 < /dev/null &
+tail -f /root/rat_r1.log               # rerun the same command after any drop
+
+# 3. replay from base, on the same server
+setsid nohup uv run --no-sync python /root/recipe/make_replay.py \
+    --out-dir /root/replay --n-prompts 1000 --think-frac 0.2 \
+    > /root/replay.log 2>&1 < /dev/null &
+/root/stop_rl.sh                       # when both logs end with "kept ..."
+
+# 4. SFT (sft_lora.py merges the LoRA into /root/models/sft itself)
+CUDA_VISIBLE_DEVICES=0 uv run --no-sync python /root/recipe/sft_lora.py \
+    --data /root/rat_r1/sft.jsonl --replay /root/replay/replay.jsonl --replay-frac 0.2 \
+    --out /root/models/sft
+
+# 5. eval before RL, as in Steps
+/root/serve.sh /root/models/sft
+uv run --no-sync eval @ /root/recipe/configs/eval.toml --model /root/models/sft
+/root/stop_rl.sh
+
+# 6. GRPO, then merge the adapter you keep into a full checkpoint
+/root/start_rl.sh /root/recipe/configs/rl.toml
+uv run --no-sync python /root/recipe/merge_lora.py --base /root/models/sft \
+    --adapter outputs/<run>/broadcasts/step_20 --out /root/models/grpo
+```
+
+Check `stats.json` after the smoke test:
+- `replies_with_reasoning_content` must be 0. Otherwise the server's
+  reasoning parser is moving reply text out of `content`; serve without one.
+- `reject_reasons` shows why samples fail. `truncated` means `--max-tokens` is
+  too low, and `hint_leak` means the replies talk about the hint.
+- `kept_vs_hint` gives the share of kept programs identical to the hint
+  (exactly, or up to names and comments) and the share that differ.
+
+**Second round (Iterative-SFT).** Regenerate from the current checkpoint
+instead of base, then train on from it. `--hint-mode fallback` samples each
+example without the hint first. It adds hinted samples only where no unhinted
+one passes, which is STaR's order. The replay stays from base.
+
+```bash
+/root/serve.sh /root/models/sft 0
+setsid nohup uv run --no-sync python /root/recipe/rationalize.py \
+    --data /root/recipe/sft.jsonl --out-dir /root/rat_r2 --round 2 --hint-mode fallback \
+    > /root/rat_r2.log 2>&1 < /dev/null &
+/root/stop_rl.sh                       # when the log ends with "kept ..."
+CUDA_VISIBLE_DEVICES=0 uv run --no-sync python /root/recipe/sft_lora.py --model /root/models/sft \
+    --data /root/rat_r2/sft.jsonl --replay /root/replay/replay.jsonl --replay-frac 0.2 \
+    --epochs 1 --out /root/models/sft_r2
+/root/start_rl.sh /root/recipe/configs/rl.toml --model.name /root/models/sft_r2
+```
+
+### Time and cost of the generation stage (1× A100 80GB, $1.59/hr)
+
+These are estimates, not measurements. The token counts are measured with the
+Qwen3.5 tokenizer on the SFT-800 file: 2,960 prompt tokens with the hint, and
+1,550 for the program alone. The reply length is assumed: the program plus
+500-2,000 tokens of prose. Throughput is assumed to be 3,000-5,000 generated
+tokens/s with 256 sequences in flight (64 requests x 4 samples). For
+comparison, the GRPO numbers above work out to at least ~3,800 generated
+tokens/s: 128 rollouts of ~4k tokens (~1.3k of them prompt), generated and
+scored in ~1.5 min on the one inference A100, with a LoRA adapter.
+
+| Stage | Work | Time | Cost |
+|---|---|---|---|
+| vLLM start | load, CUDA graphs | ~5 min | $0.13 |
+| `rationalize.py`, round 1 | 800 requests x 4 samples, 6-11M generated tokens; 2.4M prompt tokens, prefilled once per request | 25-65 min | $0.65-1.75 |
+| scoring | 3,200 programs x 8 scenes, ~0.2 s CPU each, overlapped with generation | ~0 extra | - |
+| `make_replay.py` | 1,000 prompts, ~1-3M tokens; the longest thinking-on replies set the end | 10-20 min | $0.25-0.55 |
+| **generation total** | | **~40-90 min** | **~$1.05-2.40** |
+| `sft_lora.py` (for scale) | if ~700 rows are kept: ~1.3-1.7x the old rows' length, plus 20% replay; scaled from the 10 min per 100 programs x 2 epochs above | ~1.5-2.5 h | ~$2.40-4.00 |
+
+A second round with `--hint-mode fallback` sends one unhinted request per
+example, plus a hinted one for each example the checkpoint fails unhinted. It
+costs between round 1 and twice round 1.
+
 ## What broke, and what the scripts do about it
 
 | Symptom | Cause | Fix (where) |
