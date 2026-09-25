@@ -433,10 +433,14 @@ static int32_t find_resource_at(const fsim_env *env, int32_t tx, int32_t ty) {
     return -1;
 }
 
+/* The pile a tile handle resolves to: as the mod's `handles.resolve`
+ * (`find_entities_filtered` round the tile centre, radius 0.5, limit 1), the
+ * newest pile whose position lies within half a tile of the centre, 0.5
+ * included (FactorioRL probe_handmine2 `resolve`). */
 static int32_t find_pile_near_tile(const fsim_env *env, int32_t tx, int32_t ty) {
     int64_t cx = (int64_t)tx * TILE + TILE / 2;
     int64_t cy = (int64_t)ty * TILE + TILE / 2;
-    for (int32_t i = 0; i < env->entity_count; i++) {
+    for (int32_t i = env->entity_count - 1; i >= 0; i--) {
         const fsim_entity *e = &env->entities[i];
         if (!e->alive || e->kind != K_PILE) continue;
         int64_t dx = e->pos.x - cx, dy = e->pos.y - cy;
@@ -1335,17 +1339,22 @@ static int lane_insert_from(fsim_env *env, int32_t ref, int32_t from, int32_t ta
 }
 
 /* `pickup`: a belt just built taking an item that lay on its tile (FactorioRL
- * probe_handmine2 `beltpick*`): the item may land up to 64 behind its point,
- * 64 included, and past the lane's upstream end, where it waits unseen (the
- * engine reads it back at the lane's last position) until it moves on. */
+ * probe_handmine2 `beltpick`..`beltpick6`, `beltnext`: 291 and 17 rigs). The
+ * new belt is a line of its own: the belts it feeds and is fed by are not
+ * looked at, and an item within 8 of its edge stays on it. The item lands
+ * behind whatever lies within 64 ahead of it, item by item, but less than 64
+ * behind its point; if that took it past two items or more, only onto the
+ * lane's back end -- with any item behind it, it is refused. It may land
+ * past the lane's upstream end, where it waits unseen (the engine reads it
+ * back at the lane's last position) until it moves on. */
 static int lane_insert_core(fsim_env *env, int32_t ref, int32_t from, int32_t target, int32_t item,
                             int32_t id, int exact, int pickup) {
     fsim_lane *lane = lane_of(env, ref);
     int32_t length = lane_length_of(env, ref);
-    int32_t next = env->entities[ref >> 1].lane_next[ref & 1];
+    int32_t next = pickup ? -1 : env->entities[ref >> 1].lane_next[ref & 1];
     /* The nearest item ahead, in this lane's coordinates: the back of the
      * lane it runs into, then this lane's own items up to the insertion. */
-    int32_t q = from, ahead = INT32_MIN;
+    int32_t q = from, ahead = INT32_MIN, pushes = 0;
     if (next >= 0) {
         const fsim_lane *down = lane_of(env, next);
         if (down->count > 0) {
@@ -1358,9 +1367,13 @@ static int lane_insert_core(fsim_env *env, int32_t ref, int32_t from, int32_t ta
         int32_t p = lane->items[at].pos;
         if (p > q) break;
         ahead = p;
-        if (p + BELT_GAP > q) q = p + BELT_GAP;
+        if (p + BELT_GAP > q) {
+            q = p + BELT_GAP;
+            pushes++;
+        }
     }
-    if (q - from >= BELT_GAP + (pickup ? 1 : 0)) return 0;
+    if (q - from >= BELT_GAP) return 0;
+    if (pickup && pushes >= 2 && at < lane->count) return 0;
     if (q < target) q = target;
     if (exact && q != target) return 0;
     if (lane->count >= FSIM_LANE_ITEMS) return 0;
@@ -3471,11 +3484,11 @@ static void update_furnace(fsim_env *env, int32_t index) {
 }
 
 /* Where an item the character cannot hold lands (FactorioRL
- * tools/probe_handmine2.py, `spill`, `entity`, `cover`): on a grid of 88/256
- * round `origin`, ring by ring -- the origin, then each ring clockwise from its
- * top-left corner -- at the first point where its box (a pile's collision box)
- * overlaps no other pile and no colliding entity. The character does not
- * block it; water was not measured. One item a pile. */
+ * tools/probe_handmine2.py, `spill`, `entity`, `cover`, `water`): on a grid of
+ * 88/256 round `origin`, ring by ring -- the origin, then each ring clockwise
+ * from its top-left corner -- at the first point where its box (a pile's
+ * collision box) overlaps no other pile, no colliding entity and no water
+ * tile. The character does not block it. One item a pile. */
 #define SPILL_STEP 88
 #define SPILL_RINGS 16
 
@@ -3491,6 +3504,11 @@ static void spill_offset(int32_t k, int32_t i, int32_t *dx, int32_t *dy) {
 }
 
 static int spill_blocked(const fsim_env *env, fsim_pos p) {
+    /* Water under any part of the pile's box (probe_handmine2 `water`: a
+     * point whose box reaches 3/256 into a water tile is passed over). */
+    for (int64_t ty = floordiv(p.y - PILE_BOX, TILE); ty <= floordiv(p.y + PILE_BOX - 1, TILE); ty++)
+        for (int64_t tx = floordiv(p.x - PILE_BOX, TILE); tx <= floordiv(p.x + PILE_BOX - 1, TILE); tx++)
+            if (water_at(env, (int32_t)tx, (int32_t)ty)) return 1;
     for (int32_t i = 0; i < env->entity_count; i++) {
         const fsim_entity *e = &env->entities[i];
         if (!e->alive) continue;
@@ -3601,11 +3619,10 @@ static int mine_out(fsim_env *env, int32_t index) {
 
 /* A belt just built takes the piles lying on its tile onto its lanes, the
  * newest first, each where a drop at its position would go and behind what
- * is already ahead of it; one that would land more than 64 behind its point
- * is dropped round the belt instead (FactorioRL probe_handmine2 `beltpick`,
- * `beltpick2`, `beltpick3`, `extra`: 48 of 52 rigs; with nine piles, five or
- * six onto one lane, the engine refused one more item than this in 4 of the 5
- * `bp_ring9_*`, not reduced to a rule). */
+ * is already ahead of it on its own lane (`lane_insert_core`, `pickup`); one
+ * it cannot take is dropped round the belt instead (FactorioRL
+ * probe_handmine2 `beltpick`..`beltpick6`, `extra`, `beltnext`: all 308
+ * rigs). */
 static void belt_take_piles(fsim_env *env, int32_t belt) {
     int32_t tx = (int32_t)floordiv(env->entities[belt].pos.x, TILE);
     int32_t ty = (int32_t)floordiv(env->entities[belt].pos.y, TILE);

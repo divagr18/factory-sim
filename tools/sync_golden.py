@@ -67,8 +67,14 @@ def main() -> int:
     # sweep the v3 mask is checked against (tools/probe_handmine.py), and the
     # inventory facts the per-operation masks rest on (tools/probe_inventory.py).
     docs = args.source / "docs" / "evidence"
+    # And the second hand-mining probe's families the simulator is replayed
+    # against rig by rig (tests/test_handmine2_rules.py).
+    handmine2 = [f"handmine2-{f}.json.xz" for f in (
+        "beltpick", "beltpick2", "beltpick3", "beltpick4", "beltpick5", "beltpick6", "extra",
+        "beltnext", "resolve", "water")]  # fmt: skip
     for name, where in (("v3_contract.json.xz", evidence), ("handmine-reach.json.xz", docs),
-                        ("inventory-prototypes.json.xz", docs)):  # fmt: skip
+                        ("inventory-prototypes.json.xz", docs),
+                        *((h, docs) for h in handmine2)):  # fmt: skip
         if (where / name).exists():
             shutil.copyfile(where / name, DEST / name)
             print(f"ok {name}")
