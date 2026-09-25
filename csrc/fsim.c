@@ -1042,12 +1042,14 @@ static void lane_take(fsim_lane *lane, int32_t at) {
  *   A boundary in force on a loop parts it at the seam as well, and so does
  *   breaking the loop open.
  *
- * Not measured: the place in seg_order of a segment a hidden-state load
- * gives items the simulator did not have (it moves last, like a merge). The
- * engine's order cannot be read (LuaTransportLine exposes nothing of it), and
- * no check reaches this: a load changes belt contents only after they have
- * differed from the recording (FactorioRL docs/sim-logistics.md, "A loaded
- * state and the activation order"). What to do with it is open.
+ * A segment that holds items and is neither in seg_order nor asleep when
+ * the chains are rebuilt moves last. Only lanes written directly, as a
+ * hidden-state load does, leave one so. The engine's place for such a
+ * segment is not known: its order cannot be read (LuaTransportLine exposes
+ * nothing of it). So fsim.Sim.load_hidden refuses a load that would change
+ * the items of a segment that still holds items afterwards
+ * (fsim.BeltOrderUnknown; decision 2026-09-25, FactorioRL
+ * docs/sim-logistics.md, "A loaded state and the activation order").
  */
 
 static int32_t DELAY_COUNT = 0;

@@ -19,7 +19,8 @@ from pathlib import Path
 
 from fsim._fsim import ffi, lib
 
-__all__ = ["BeltDelayMissing", "Sim", "action_struct", "ffi", "lib", "scene_struct"]
+__all__ = ["BeltDelayMissing", "BeltOrderUnknown", "Sim", "action_struct", "ffi", "lib",
+           "scene_struct"]  # fmt: skip
 
 ROOT = Path(__file__).resolve().parents[1]
 #: Shipped inside the package, so an installed copy has the map without a checkout.
@@ -198,6 +199,21 @@ class BeltDelayMissing(RuntimeError):
     table covers the scene area around the origin and FactorioRL's rig areas
     (fsim/data/belt-delay.json). Outside it the simulator cannot say when the
     belt's lanes merge, so it stops rather than guess.
+    """
+
+
+class BeltOrderUnknown(RuntimeError):
+    """A hidden-state load would change what a belt-line segment holds.
+
+    Segments move in the engine's activation order (csrc/fsim.c, "segments"),
+    which follows the history of items arriving on empty segments. The engine
+    does not export it (FactorioRL docs/sim-logistics.md, "A loaded state and
+    the activation order"). So a load that changes a segment's contents, and
+    leaves it holding items, would need the simulator to place that segment in
+    the order without knowing where the engine has it. It stops rather than
+    guess. A load that leaves the simulator's belt contents as they are, as in
+    every one-step sync of the golden traces, or that empties a segment,
+    places nothing.
     """
 
 
@@ -978,11 +994,14 @@ class Sim:
         whether it has delivered to its target before, whether a furnace has
         consumed its current ingredient, which belt items moved last tick,
         belt-line segments (membership, timers, boundaries set off, sleep and
-        activation order) -- stays the simulator's.
+        activation order) -- stays the simulator's. A load that would change
+        the items of a segment that still holds items afterwards raises
+        BeltOrderUnknown before anything is loaded.
         Entities are matched by name and position; a world whose entities
         differ is not the same world, and the comparison after the step says
         so.
         """
+        self._check_belt_order(hidden)
         env = self.env
         env.tick = hidden["tick"]
         c = hidden["character"]
@@ -1082,6 +1101,50 @@ class Sim:
             e = env.entities[i]
             if e.alive and e.kind == lib.K_PILE and (e.pos.x, e.pos.y) in piles:
                 e.pile.count = piles[(e.pos.x, e.pos.y)]["count"]
+
+    def _check_belt_order(self, hidden: dict) -> None:
+        """Raise BeltOrderUnknown if loading `hidden` would change the items
+        of a belt-line segment that holds items after the load. Items are
+        compared by name and position; their ids are only names."""
+        env = self.env
+        belts = {}
+        for i in range(env.entity_count):
+            e = env.entities[i]
+            if e.alive and e.kind == lib.K_BELT:
+                belts[(e.pos.x, e.pos.y)] = i
+
+        def ours(i: int, lane: int) -> list:
+            ln = env.entities[i].lanes[lane]
+            return [(ln.items[k].item, ln.items[k].pos) for k in range(ln.count)]
+
+        after, changed = {}, []
+        for record in hidden["entities"]:
+            if record["name"] != "transport-belt":
+                continue
+            i = belts.get((record["position"][0], record["position"][1]))
+            if i is None:
+                continue
+            for lane, items in enumerate(record.get("lanes") or [[], []]):
+                new = sorted((ITEM_IDS[name], position) for name, position, *_ in items or [])
+                after[(i, lane)] = new
+                if new != sorted(ours(i, lane)):
+                    changed.append((i, lane))
+        if not changed:
+            return
+        # The segments, as the simulator has them, of every belt lane.
+        heads = {(i, lane): lib.fsim_belt_segment(env, i, lane) for i in belts.values()
+                 for lane in (0, 1)}  # fmt: skip
+        for i, lane in changed:
+            head = heads[(i, lane)]
+            members = [k for k, h in heads.items() if h == head] if head >= 0 else [(i, lane)]
+            if any(after.get(k, ours(*k)) for k in members):
+                e = env.entities[i]
+                raise BeltOrderUnknown(
+                    f"tick {hidden['tick']}: the load changes the items on lane {lane + 1} of the "
+                    f"belt at ({e.pos.x / 256}, {e.pos.y / 256}), and its belt-line segment "
+                    "holds items after it; where the engine has that segment in its "
+                    "activation order is not recorded, so the simulator stops rather than guess"
+                )
 
     def action_outcome(self) -> tuple[str | None, str | None]:
         act = self.env.act
