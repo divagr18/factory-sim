@@ -33,6 +33,26 @@ uv run --no-sync eval @ /root/recipe/configs/eval.toml --model /root/models/sft
 Evaluate at temperature 0.6 with thinking off. Use `split = "holdout"` only for
 final numbers.
 
+## Results
+
+Qwen3.5-9B on `construct_smelting_line`, scored in the simulator: 16 rows x 4
+samples x 8 scenes per split, temperature 0.6, thinking off. PlanBench is
+Blocksworld plan generation (task 1) and plan execution (task 7), 500
+instances each, thinking off.
+
+| Qwen3.5-9B | `val` | `holdout` | PlanBench generation | PlanBench execution |
+|---|---|---|---|---|
+| base | 2.1% | 1.6% | 53.2 | 39.8 |
+| SFT-800 + GRPO (Steps above) | 85.9% | 84.0% | 2.8 | 3.0 |
+| Evolve & Reinforce, round 1 (below) | 85.6% | 71.9% | 46.4 | 27.8 |
+
+Evolve & Reinforce is the self-voiced warm start below (`rationalize.py`),
+with replay (`make_replay.py`), then GRPO. Models:
+[`qwen3.5-9b-factorio-build-er-r1`](https://huggingface.co/divagr1925/qwen3.5-9b-factorio-build-er-r1)
+and its warm start
+[`qwen3.5-9b-factorio-build-er-r1-sft`](https://huggingface.co/divagr1925/qwen3.5-9b-factorio-build-er-r1-sft).
+All models: [models collection].
+
 ## Warm start in the model's own voice
 
 The SFT-800 warm start above, followed by GRPO, took Qwen3.5-9B from 1.6% to
@@ -68,9 +88,10 @@ RL's Razor), and one round of self-SFT still forgets unless it is iterated
   ````
 
   "Without mentioning the reference" is there because the target is trained
-  against the prompt without the hint. The env's own output format asks for a
-  plan of at most 5 lines. The hint asks for step-by-step prose on purpose, since
-  that prose is the habit SFT removed.
+  against the prompt without the hint. The examples are asked and trained
+  with the env's `prompt_version` v2, which also asks for step-by-step prose
+  before the program, so a reply that reasons does not contradict its prompt
+  (v1 asks for a plan of at most 5 lines). That prose is the habit SFT removed.
 - **Prompts are the env's.** Each example's scenes are rebuilt from the subset
   id in its prompt. `core.rows` must reproduce its system and user messages
   byte for byte, or the run stops before sending any request. Only train
@@ -83,7 +104,7 @@ RL's Razor), and one round of self-SFT still forgets unless it is iterated
   the reference program's, and above zero. The reply does not mention the hint,
   holds one program block, and has at least 30 words of prose before it. Of the
   samples that pass, the best one per example is kept: higher success first,
-  then the shortest prose. `--rebuild` re-applies other keep settings
+  then the prose closest to the median length. `--rebuild` re-applies other keep settings
   (`--keep-per-example`, `--min-reasoning-words`, `--max-programs`,
   `--allow-zero-success`) without regenerating.
 - **Empty think block.** With `enable_thinking=False`, Qwen3.5's generation
@@ -107,12 +128,10 @@ RL's Razor), and one round of self-SFT still forgets unless it is iterated
 
 ### Runbook
 
-Before you start, check the pod's env imports. `deploy.sh` builds the
-factorio-build wheel from this checkout, and `pod_setup.sh` installs
-factory-sim 0.1.2 from PyPI. The working tree's `core.py` (since the v3
-commit) needs `evolve.evaluate.TASKS`, which 0.1.2 lacks, so the check below
-fails until factory-sim is released again or the pod gets factory-sim from the
-same checkout:
+Before you start, check the pod's env imports. `deploy.sh` packs factory-sim
+and builds the factorio-build wheel from the same committed HEAD, and
+`pod_setup.sh` installs both; without `FSIM_SRC` it falls back to
+`factory-sim>=0.2.0` from PyPI. Uncommitted changes are not deployed.
 
 ```bash
 ssh rp 'cd /root/prime-rl && .venv/bin/python -c "from factorio_build import core; print(core.SUPPORTED_TASKS)"'

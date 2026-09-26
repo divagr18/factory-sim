@@ -22,12 +22,15 @@ jobs:
           # numpy 2 ships no wheels for manylinux2014, so the test step would
           # compile it from source there and fail.
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
-          # The installed wheel must find its map and run a scene, away from the checkout.
+          # The installed wheel must find its map and its belt-delay table and run
+          # a scene of each profile, away from the checkout.
           CIBW_TEST_COMMAND: >-
-            python -c "import fsim; from fsim import scenes; from fsim.rl import RlEnv;
+            python -c "import fsim; from fsim import scenes, belt_expert; from fsim.rl import RlEnv;
             assert len(fsim.water_tiles()) > 0;
             f, bp = scenes.sample('construct_smelting_line', 'train', 0);
-            RlEnv().reset('construct_smelting_line', bp, action_space='v2')"
+            RlEnv().reset('construct_smelting_line', bp, action_space='v2');
+            f, bp = scenes.sample('belt_smelting', 'train', 0);
+            assert belt_expert.run(RlEnv(), bp)['success']"
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}

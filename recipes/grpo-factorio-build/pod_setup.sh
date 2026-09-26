@@ -59,7 +59,7 @@ if [ -n "${FSIM_SRC:-}" ]; then
 else
     # prime-rl's pyproject sets `exclude-newer = "7 days"`, which hides a factory-sim
     # release newer than a week; pin past it explicitly.
-    uv pip install --exclude-newer "$(date -u -d tomorrow +%Y-%m-%dT00:00:00Z)" "factory-sim>=0.1.2"
+    uv pip install --exclude-newer "$(date -u -d tomorrow +%Y-%m-%dT00:00:00Z)" "factory-sim>=0.2.0"
 fi
 if [ -n "$WHEEL" ]; then
     # --no-deps: the wheel pins verifiers>=0.3.1, the workspace verifiers is a dev build.

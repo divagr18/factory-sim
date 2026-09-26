@@ -168,7 +168,7 @@ Each is its own package with a Hub-style README. They reuse
 `fsim.program_api`, `evolve.sandbox`, `evolve.evaluate`, `evolve.mutate` and
 `fsim.scenes`, and nothing in them is a second implementation.
 
-- **`factorio_build`** (single turn): the prompt is the evolution loop's system prompt (task, contract, `World` API, optional game notes) plus a user message naming a scene subset. The reply's program is sandbox-checked and run on that subset's 8 to 16 scenes in an `EvalPool`. The rewards are `success_rate` (1.0), `format` (0.1: +1 valid, −1 refused by the sandbox, 0 no code) and an opt-in `refusal_penalty`. The package exports a native v1 `FactorioBuildTaskset` and also a v0 `load_environment()` (a `SingleTurnEnv` with a `Rubric`). Both score through the same function.
+- **`factorio_build`** (single turn; `construct_smelting_line` or `belt_smelting`): the prompt is the evolution loop's system prompt (task, contract, `World` API, optional game notes) plus a user message naming a scene subset. The reply's program is sandbox-checked and run on that subset's 8 to 16 scenes in an `EvalPool`. The rewards are `success_rate` (1.0), `format` (0.1: +1 valid, −1 refused by the sandbox, 0 no code) and an opt-in `refusal_penalty`. The package exports a native v1 `FactorioBuildTaskset` and also a v0 `load_environment()` (a `SingleTurnEnv` with a `Rubric`). Both score through the same function.
 - **`factorio_play`** (multi-turn, v1 only): one scene per rollout. The `World` methods are MCP tools, backed by an unmodified `run_episode` running on a thread, plus `finish`. The reward is verified success.
 
 ```bash
@@ -178,10 +178,9 @@ vf-eval factorio-build -m <model> -n 8 -a '{"split": "val"}'      # v0
 
 `split="holdout"` (the frozen FactorioRL holdout) is built only when asked
 for, and it is for evaluation only. `verifiers.v1` does not import on Windows
-(it needs `fcntl`), so there only the v0 entry point works. Neither package
-has been published. Publishing needs factory-sim to become pip-installable
-first, with its C extension built by the build backend and shipped as wheels
-(or as a git dependency that compiles at install time). See
+(it needs `fcntl`), so there only the v0 entry point works. Both packages are
+on the Environments Hub, as `divagr/factorio-build` and `divagr/factorio-play`,
+and install factory-sim's prebuilt wheels from PyPI. See
 `integrations/verifiers/factorio_build/README.md`. The tests are in
 `tests/test_verifiers_integration.py`, and they are skipped without
 `verifiers`.

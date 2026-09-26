@@ -1,6 +1,6 @@
 [project]
 name = "factory-sim"
-version = "0.1.2"
+version = "0.2.0"
 description = "A fast, tick-exact simulator of an early-game factory, checked against recorded traces of the real game."
 readme = "README.md"
 license = "Apache-2.0"

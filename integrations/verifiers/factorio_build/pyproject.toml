@@ -1,7 +1,7 @@
 [project]
 name = "factorio-build"
-version = "0.1.1"
-description = "Write one program that builds a working Factorio smelting line, scored in a tick-exact simulator on scenes it has not seen."
+version = "0.2.0"
+description = "Write one program that builds a working Factorio factory, a smelting line or a belt-fed line to a chest, scored in a tick-exact simulator on scenes it has not seen."
 tags = [
     "single-turn", "train", "eval", "v1", "game", "factorio", "coding", "python", "reasoning",
     "rl", "rlvr", "planning", "program-synthesis", "alphaevolve", "evolutionary-search", "simulation",
@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
     "verifiers>=0.3.1",
     "datasets",
-    "factory-sim>=0.1.2",
+    "factory-sim>=0.2.0",
 ]
 
 [build-system]

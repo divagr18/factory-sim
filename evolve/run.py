@@ -893,8 +893,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--task",
         choices=mutate.TASKS,
         default="construct_smelting_line",
-        help="the task programs are written and scored for; belt_smelting runs on the v3 "
-        "World once its scenes are ported to fsim.scenes",
+        help="the task programs are written and scored for; belt_smelting runs on the v3 World",
     )
     p.add_argument(
         "--seed-program",
