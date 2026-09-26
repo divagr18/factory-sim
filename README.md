@@ -89,7 +89,7 @@ of 160 episodes on the real game, again in agreement with the simulator on
 every episode. Models:
 [`qwen3.5-9b-factorio-build-er-r1`](https://huggingface.co/divagr1925/qwen3.5-9b-factorio-build-er-r1)
 and [`-er-r1-sft`](https://huggingface.co/divagr1925/qwen3.5-9b-factorio-build-er-r1-sft);
-all of them in the [models collection].
+all of them in the [models collection](https://huggingface.co/collections/divagr1925/factoriogym-models-wip).
 
 ## Use it
 

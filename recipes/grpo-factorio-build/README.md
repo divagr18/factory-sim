@@ -51,7 +51,7 @@ with replay (`make_replay.py`), then GRPO. Models:
 [`qwen3.5-9b-factorio-build-er-r1`](https://huggingface.co/divagr1925/qwen3.5-9b-factorio-build-er-r1)
 and its warm start
 [`qwen3.5-9b-factorio-build-er-r1-sft`](https://huggingface.co/divagr1925/qwen3.5-9b-factorio-build-er-r1-sft).
-All models: [models collection].
+All models: [models collection](https://huggingface.co/collections/divagr1925/factoriogym-models-wip).
 
 ## Warm start in the model's own voice
 

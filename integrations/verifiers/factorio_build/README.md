@@ -165,7 +165,7 @@ lower.
 Models: [`qwen3.5-9b-factorio-build-er-r1`](https://huggingface.co/divagr1925/qwen3.5-9b-factorio-build-er-r1)
 (Evolve & Reinforce, round 1) and its warm start
 [`qwen3.5-9b-factorio-build-er-r1-sft`](https://huggingface.co/divagr1925/qwen3.5-9b-factorio-build-er-r1-sft).
-All models: [models collection].
+All models: [models collection](https://huggingface.co/collections/divagr1925/factoriogym-models-wip).
 
 **On the real game.** A random 16 of the SFT-800 + GRPO model's holdout
 programs, each on 10 holdout scenes, succeed in 136 of 160 episodes on
