@@ -44,18 +44,22 @@ def load_environment(
 
     rows = core.rows(task, split, n_scenes, num_examples, seed, game_notes, prompt_version)
     system = rows[0]["system_prompt"]
+    # No "task" column: verifiers 0.3.1 reads it as a JSON task payload and
+    # refuses a plain string there; the environment is named by `env_id`.
     dataset = Dataset.from_list(
         [
             {
                 "question": r["prompt"],
                 "answer": "",
-                "task": ENV_ID,
                 "info": {
                     "subset_id": r["subset_id"],
                     "split": r["split"],
                     "sim_task": r["task"],
+                    # Seeds as strings: holdout seeds are 64-bit hashes, and
+                    # Arrow's int64 cannot hold those at or above 2**63.
                     "scenes": [
-                        {"family": f, "seed": s, "sample_split": ss} for f, s, ss in r["scenes"]
+                        {"family": f, "seed": str(s), "sample_split": ss}
+                        for f, s, ss in r["scenes"]
                     ],
                 },
             }
@@ -69,7 +73,7 @@ def load_environment(
         # computes and the rest read the cached, JSON-serialisable result.
         cached = state.get("factorio_build")
         if cached is None:
-            scenes = [(s["family"], s["seed"], s["sample_split"]) for s in info["scenes"]]
+            scenes = [(s["family"], int(s["seed"]), s["sample_split"]) for s in info["scenes"]]
             cached = core.score_completion(
                 _text(parser, completion),
                 info["sim_task"],

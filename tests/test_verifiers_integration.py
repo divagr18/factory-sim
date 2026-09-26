@@ -88,6 +88,17 @@ def test_load_environment_dataset():
     assert row["prompt"][0]["content"] == core.system_prompt(True)
     assert row["info"]["subset_id"] == f"{TASK}/train/0-7"
     assert len(row["info"]["scenes"]) == 8
+    # verifiers 0.3.1 reads a "task" column as a JSON task payload, and a plain
+    # string there fails every rollout before the model is called.
+    assert "task" not in ds.column_names
+
+
+def test_v0_holdout_keeps_64_bit_seeds():
+    """Holdout seeds are 64-bit hashes; half are past Arrow's int64 range."""
+    env = factorio_build.load_environment(split="holdout", num_examples=1, n_scenes=16, workers=0)
+    seeds = [int(s["seed"]) for s in env.dataset[0]["info"]["scenes"]]
+    assert max(seeds) >= 2**63
+    assert seeds == [s for _, s, _ in core.rows(TASK, "holdout", 16, 1)[0]["scenes"]]
 
 
 def test_game_notes_toggle():
@@ -110,6 +121,14 @@ def test_belt_smelting_is_supported():
     text = core.system_prompt(True, "belt_smelting")
     assert "world.belt_lanes" in text and mutate.GAME_NOTES_BELT_SMELTING in text
     assert mutate.GAME_NOTES_BELT_SMELTING not in core.system_prompt(False, "belt_smelting")
+
+
+def test_belt_smelting_rows_are_solvable():
+    """The reference builder, which `validate` plays, solves a train and a holdout row."""
+    for split in ("train", "holdout"):
+        row = core.rows("belt_smelting", split, 2, 1)[0]
+        assert core.belt_reference_success(row["scenes"]) == 1.0
+    assert core.belt_reference_success([]) == 0.0
 
 
 # ------------------------------------------------------------------ holdout
@@ -146,7 +165,6 @@ def _score_v0(env, text: str) -> dict:
         "completion": [{"role": "assistant", "content": text}],
         "answer": "",
         "info": row["info"],
-        "task": row["task"],
         "trajectory": [],
     }
     asyncio.run(env.rubric.score_rollout(state))
@@ -361,6 +379,21 @@ def test_v1_validate_and_default_harness(v1_task):
 
     assert asyncio.run(v1_task.validate())
     assert default_agent_harness("factorio-build").id == "factorio-build"
+
+
+@needs_v1
+def test_v1_validate_belt_smelting():
+    """belt_smelting has no seed program; validate plays the reference builder."""
+    from factorio_build.taskset import FactorioBuildConfig, FactorioBuildTaskConfig
+
+    cfg = FactorioBuildConfig(
+        sim_task="belt_smelting",
+        num_examples=1,
+        n_scenes=2,
+        task=FactorioBuildTaskConfig(workers=0),
+    )
+    (task,) = list(factorio_build.FactorioBuildTaskset(cfg))
+    assert asyncio.run(task.validate())
 
 
 @needs_v1

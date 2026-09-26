@@ -96,7 +96,11 @@ class FactorioBuildTask(vf.Task[FactorioBuildData, vf.State, FactorioBuildTaskCo
         return -float(trace.metrics.get("refusal_rate") or 0.0)
 
     async def validate(self, runtime: vf.Runtime | None = None) -> bool:
-        """Model-free check: the seed builder program solves at least one scene."""
+        """Model-free check: the seed builder program solves at least one scene.
+        belt_smelting has no seed program; its reference builder is used instead."""
+        if self.data.sim_task == "belt_smelting":
+            rate = await asyncio.to_thread(core.belt_reference_success, self.data.scenes)
+            return rate > 0
         from evolve.seeds import builder
 
         text = f"```python\n{builder.SOURCE}\n```"

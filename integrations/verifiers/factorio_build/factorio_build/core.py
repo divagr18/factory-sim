@@ -351,6 +351,25 @@ def score_completion(
     return out
 
 
+def belt_reference_success(scene_list: list) -> float:
+    """The fraction of `scene_list` (belt_smelting scenes) that the task's
+    reference builder solves: a model-free check that a row can be solved.
+
+    belt_smelting has no seed program, so this plays `fsim.belt_expert`, the
+    port of FactorioRL's reference solver, on each scene directly, on the v3
+    action space a program's `world` also uses."""
+    from fsim import belt_expert
+    from fsim.rl import RlEnv
+
+    refs = [SceneRef(*s) if not isinstance(s, SceneRef) else s for s in scene_list]
+    if not refs:
+        return 0.0
+    env = RlEnv()
+    triples = blueprints("belt_smelting", refs)
+    wins = sum(bool(belt_expert.run(env, bp)["success"]) for _, _, bp in triples)
+    return wins / len(refs)
+
+
 def format_score(metrics: dict) -> float:
     """+1 for a sandbox-valid program, -1 for a program the sandbox refuses, 0 for none."""
     if metrics.get("sandbox_valid"):
