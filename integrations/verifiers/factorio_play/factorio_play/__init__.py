@@ -1,5 +1,7 @@
 """factorio-play: the factory-sim `world` API as tools, one scene per rollout.
 
+construct_smelting_line on factory-sim's `World`, belt_smelting on its `WorldV3`.
+
 A native verifiers v1 taskset only. verifiers.v1 needs `fcntl`, so on Windows
 the taskset is not exported; `factorio_play.session` still imports.
 """

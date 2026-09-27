@@ -1,16 +1,16 @@
 [project]
 name = "factorio-play"
-version = "0.1.1"
-description = "Build a working Factorio smelting line one tool call at a time, in a tick-exact simulator; the reward is the line's verified output."
+version = "0.2.0"
+description = "Build a working Factorio factory one tool call at a time, a smelting line or a belt-fed line to a chest, in a tick-exact simulator; the reward is its verified output."
 tags = [
     "multi-turn", "tool-use", "agent", "agentic", "train", "eval", "v1", "game", "factorio",
-    "planning", "reasoning", "rl", "rlvr", "simulation",
+    "planning", "reasoning", "rl", "rlvr", "simulation", "long-horizon",
 ]
 license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
     "verifiers>=0.3.1",
-    "factory-sim>=0.1.2",
+    "factory-sim>=0.2.0",
 ]
 
 [build-system]

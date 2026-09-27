@@ -6,7 +6,7 @@ There are two packages, one environment each, in the Environments Hub layout
 | Package | Kind | Entry points |
 | --- | --- | --- |
 | [`factorio_build/`](factorio_build/README.md) | single-turn program synthesis; `construct_smelting_line` and `belt_smelting` | v1 `FactorioBuildTaskset`, v0 `load_environment()` |
-| [`factorio_play/`](factorio_play/README.md) | multi-turn tool use, one scene per rollout; `construct_smelting_line` | v1 `FactorioPlayTaskset` |
+| [`factorio_play/`](factorio_play/README.md) | multi-turn tool use, one scene per rollout; `construct_smelting_line` and `belt_smelting` | v1 `FactorioPlayTaskset` |
 
 Both reuse factory-sim's evaluation code (`fsim.program_api`,
 `evolve.sandbox`, `evolve.evaluate`, `evolve.mutate`, `fsim.scenes`).
@@ -15,7 +15,8 @@ Both are on the Environments Hub, as `divagr/factorio-build` and
 
 Tests: `tests/test_verifiers_integration.py`. They are skipped when
 `verifiers` is not installed, and the v1 cases are also skipped on Windows,
-where `verifiers.v1` cannot import.
+where `verifiers.v1` cannot import. `tests/test_factorio_play.py` tests
+`factorio_play`'s sessions, tools and prompts without `verifiers`.
 
 ```bash
 uv venv --python 3.13 .venv-verifiers

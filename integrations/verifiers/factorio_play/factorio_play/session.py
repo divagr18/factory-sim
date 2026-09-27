@@ -9,6 +9,12 @@ returns from `build`, after which `run_episode` waits out the episode and
 verifies it exactly as it does for a program. Nothing about the episode,
 its budget or its scoring is reimplemented here.
 
+A belt_smelting session holds factory-sim's `WorldV3` (the task's profile in
+`TASK_PROFILES`) and also answers its queries and actions. `run` executes a
+function on the episode thread with the world in hand, so a tool that takes
+several world actions (see `belt_tools`) runs them back to back, each one
+counted by the world exactly as for a program.
+
 No `verifiers` import: the tool server wraps this, and tests drive it directly.
 """
 
@@ -19,13 +25,16 @@ import queue
 import threading
 
 from fsim.obsview import Entity
-from fsim.program_api import EpisodeResult, run_episode
+from fsim.program_api import TASK_PROFILES, EpisodeResult, run_episode
 
 #: `World` methods exposed as tools, and whether each spends a decision.
 QUERIES = (
     "me tile inventory ore_tiles blocked_tiles entities patch decisions_left last_refused"
 ).split()
 ACTIONS = "move place give take mine wait".split()
+#: What a v3 (`WorldV3`) session answers besides those.
+QUERIES_V3 = ["marker", "belt_lanes"]
+ACTIONS_V3 = "rotate mine_resource take_fuel".split()
 
 _FINISH = object()
 
@@ -77,6 +86,7 @@ class WorldSession:
         self._lock = threading.Lock()
         self._timeout = call_timeout_s
         self._world = None
+        self.v3 = TASK_PROFILES.get(task, "v2") == "v3"
         self.result: EpisodeResult | None = None
         self.harness_error: str | None = None
         self._thread = threading.Thread(
@@ -107,7 +117,7 @@ class WorldSession:
             name, args = item
             before = len(world._trace)
             try:
-                value = getattr(world, name)(*args)
+                value = name(world, *args) if callable(name) else getattr(world, name)(*args)
             except Exception as e:
                 # BudgetExhausted, or the refusal cap: the program's episode is over,
                 # exactly as when a program raises. run_episode records and scores it.
@@ -117,7 +127,7 @@ class WorldSession:
             # records why an intent was refused, or that the game refused a legal
             # action (which still cost a decision); pass that back.
             note = None
-            if name in ACTIONS and len(world._trace) > before:
+            if (name in ACTIONS or name in ACTIONS_V3) and len(world._trace) > before:
                 last = world._trace[-1]
                 if "-> refused" in last:
                     note = last.split("-> refused", 1)[1].strip()
@@ -141,7 +151,10 @@ class WorldSession:
 
     def call(self, name: str, *args) -> dict:
         """{"ok": True, "result": ...} or {"ok": False, "error": ...}; never raises."""
-        if name not in QUERIES and name not in ACTIONS:
+        known = name in QUERIES or name in ACTIONS
+        if self.v3:
+            known = known or name in QUERIES_V3 or name in ACTIONS_V3
+        if not known:
             return {"ok": False, "error": f"unknown method {name!r}"}
         with self._lock:
             if self.finished:
@@ -157,6 +170,24 @@ class WorldSession:
                 if note:
                     reply["refused" if value is False else "note"] = note
                 return reply
+            self._wait_done()
+            return {"ok": False, "error": f"episode ended ({value}); it has been scored"}
+
+    def run(self, fn, *args):
+        """`fn(world, *args)` on the episode thread, and what it returns; never raises.
+
+        If `fn` ends the episode (the budget runs out, or the refusal cap), the
+        episode is scored, as for a plain call, and the reply is an error."""
+        with self._lock:
+            if self.finished:
+                return {"ok": False, "error": "the episode is over; nothing more can be done"}
+            self._calls.put((fn, args))
+            try:
+                kind, value = self._replies.get(timeout=self._timeout)
+            except queue.Empty:
+                return {"ok": False, "error": "the simulator did not answer in time"}
+            if kind == "ok":
+                return value[0]
             self._wait_done()
             return {"ok": False, "error": f"episode ended ({value}); it has been scored"}
 

@@ -1,0 +1,472 @@
+{
+ "about": "factorio-play 0.1.1, construct_smelting_line: the MCP tools (name, description, input and output schema, under mcp 1.30.0) and the prompts. 0.2.0 must keep them.",
+ "tools": [
+  {
+   "name": "blocked_tiles",
+   "description": "Tiles nothing can stand or be built on (water), sorted. Costs no decision.",
+   "inputSchema": {
+    "properties": {},
+    "title": "blocked_tilesArguments",
+    "type": "object"
+   },
+   "outputSchema": {
+    "properties": {
+     "result": {
+      "additionalProperties": true,
+      "title": "Result",
+      "type": "object"
+     }
+    },
+    "required": [
+     "result"
+    ],
+    "title": "blocked_tilesOutput",
+    "type": "object"
+   }
+  },
+  {
+   "name": "decisions_left",
+   "description": "Decisions the build phase still allows.",
+   "inputSchema": {
+    "properties": {},
+    "title": "decisions_leftArguments",
+    "type": "object"
+   },
+   "outputSchema": {
+    "properties": {
+     "result": {
+      "additionalProperties": true,
+      "title": "Result",
+      "type": "object"
+     }
+    },
+    "required": [
+     "result"
+    ],
+    "title": "decisions_leftOutput",
+    "type": "object"
+   }
+  },
+  {
+   "name": "entities",
+   "description": "The entity table, nearest first: row, kind, x, y, facing, fuel, contents,\n        output, working, remembered. Rows renumber as the character moves, so read it\n        again before give/take/mine. Costs no decision.",
+   "inputSchema": {
+    "properties": {},
+    "title": "entitiesArguments",
+    "type": "object"
+   },
+   "outputSchema": {
+    "properties": {
+     "result": {
+      "additionalProperties": true,
+      "title": "Result",
+      "type": "object"
+     }
+    },
+    "required": [
+     "result"
+    ],
+    "title": "entitiesOutput",
+    "type": "object"
+   }
+  },
+  {
+   "name": "finish",
+   "description": "End the build phase. The episode then runs its verification window and is\n        scored; call this once the line is built and fuelled. Nothing can be done after.",
+   "inputSchema": {
+    "properties": {},
+    "title": "finishArguments",
+    "type": "object"
+   },
+   "outputSchema": {
+    "properties": {
+     "result": {
+      "additionalProperties": true,
+      "title": "Result",
+      "type": "object"
+     }
+    },
+    "required": [
+     "result"
+    ],
+    "title": "finishOutput",
+    "type": "object"
+   }
+  },
+  {
+   "name": "give",
+   "description": "Move `amount` (1, 5 or 20) of `item` from the inventory into entity `row`.",
+   "inputSchema": {
+    "properties": {
+     "row": {
+      "title": "Row",
+      "type": "integer"
+     },
+     "item": {
+      "title": "Item",
+      "type": "string"
+     },
+     "amount": {
+      "title": "Amount",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "row",
+     "item",
+     "amount"
+    ],
+    "title": "giveArguments",
+    "type": "object"
+   },
+   "outputSchema": {
+    "properties": {
+     "result": {
+      "additionalProperties": true,
+      "title": "Result",
+      "type": "object"
+     }
+    },
+    "required": [
+     "result"
+    ],
+    "title": "giveOutput",
+    "type": "object"
+   }
+  },
+  {
+   "name": "inventory",
+   "description": "Every item name -> count held. Costs no decision.",
+   "inputSchema": {
+    "properties": {},
+    "title": "inventoryArguments",
+    "type": "object"
+   },
+   "outputSchema": {
+    "properties": {
+     "result": {
+      "additionalProperties": true,
+      "title": "Result",
+      "type": "object"
+     }
+    },
+    "required": [
+     "result"
+    ],
+    "title": "inventoryOutput",
+    "type": "object"
+   }
+  },
+  {
+   "name": "last_refused",
+   "description": "Whether the game refused the last action (a legal intent that failed).",
+   "inputSchema": {
+    "properties": {},
+    "title": "last_refusedArguments",
+    "type": "object"
+   },
+   "outputSchema": {
+    "properties": {
+     "result": {
+      "additionalProperties": true,
+      "title": "Result",
+      "type": "object"
+     }
+    },
+    "required": [
+     "result"
+    ],
+    "title": "last_refusedOutput",
+    "type": "object"
+   }
+  },
+  {
+   "name": "me",
+   "description": "The character's position in tiles, [x, y]. Costs no decision.",
+   "inputSchema": {
+    "properties": {},
+    "title": "meArguments",
+    "type": "object"
+   },
+   "outputSchema": {
+    "properties": {
+     "result": {
+      "additionalProperties": true,
+      "title": "Result",
+      "type": "object"
+     }
+    },
+    "required": [
+     "result"
+    ],
+    "title": "meOutput",
+    "type": "object"
+   }
+  },
+  {
+   "name": "mine",
+   "description": "Mine (pick up) entity `row`.",
+   "inputSchema": {
+    "properties": {
+     "row": {
+      "title": "Row",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "row"
+    ],
+    "title": "mineArguments",
+    "type": "object"
+   },
+   "outputSchema": {
+    "properties": {
+     "result": {
+      "additionalProperties": true,
+      "title": "Result",
+      "type": "object"
+     }
+    },
+    "required": [
+     "result"
+    ],
+    "title": "mineOutput",
+    "type": "object"
+   }
+  },
+  {
+   "name": "move",
+   "description": "Walk one decision in `direction` (N/E/S/W, or north/east/south/west) with\n        stride \"long\" (~4.5 tiles), \"step\" (~1) or \"nudge\" (~0.3). If it is refused,\n        the result says why.",
+   "inputSchema": {
+    "properties": {
+     "direction": {
+      "title": "Direction",
+      "type": "string"
+     },
+     "stride": {
+      "default": "long",
+      "title": "Stride",
+      "type": "string"
+     }
+    },
+    "required": [
+     "direction"
+    ],
+    "title": "moveArguments",
+    "type": "object"
+   },
+   "outputSchema": {
+    "properties": {
+     "result": {
+      "additionalProperties": true,
+      "title": "Result",
+      "type": "object"
+     }
+    },
+    "required": [
+     "result"
+    ],
+    "title": "moveOutput",
+    "type": "object"
+   }
+  },
+  {
+   "name": "ore_tiles",
+   "description": "Resource tiles of `kind` within 12 tiles, sorted. Costs no decision.",
+   "inputSchema": {
+    "properties": {
+     "kind": {
+      "default": "iron-ore",
+      "title": "Kind",
+      "type": "string"
+     }
+    },
+    "title": "ore_tilesArguments",
+    "type": "object"
+   },
+   "outputSchema": {
+    "properties": {
+     "result": {
+      "additionalProperties": true,
+      "title": "Result",
+      "type": "object"
+     }
+    },
+    "required": [
+     "result"
+    ],
+    "title": "ore_tilesOutput",
+    "type": "object"
+   }
+  },
+  {
+   "name": "patch",
+   "description": "The ore patch's centre [x, y] (the task's public marker), or null.",
+   "inputSchema": {
+    "properties": {},
+    "title": "patchArguments",
+    "type": "object"
+   },
+   "outputSchema": {
+    "properties": {
+     "result": {
+      "additionalProperties": true,
+      "title": "Result",
+      "type": "object"
+     }
+    },
+    "required": [
+     "result"
+    ],
+    "title": "patchOutput",
+    "type": "object"
+   }
+  },
+  {
+   "name": "place",
+   "description": "Place `item` on tile (x, y) facing N/E/S/W (or north/east/south/west); a\n        2x2 machine covers x..x+1, y..y+1. Reaches 5 tiles from tile(), never the\n        character's own tile. If it is refused, the result says why.",
+   "inputSchema": {
+    "properties": {
+     "item": {
+      "title": "Item",
+      "type": "string"
+     },
+     "x": {
+      "title": "X",
+      "type": "integer"
+     },
+     "y": {
+      "title": "Y",
+      "type": "integer"
+     },
+     "facing": {
+      "title": "Facing",
+      "type": "string"
+     }
+    },
+    "required": [
+     "item",
+     "x",
+     "y",
+     "facing"
+    ],
+    "title": "placeArguments",
+    "type": "object"
+   },
+   "outputSchema": {
+    "properties": {
+     "result": {
+      "additionalProperties": true,
+      "title": "Result",
+      "type": "object"
+     }
+    },
+    "required": [
+     "result"
+    ],
+    "title": "placeOutput",
+    "type": "object"
+   }
+  },
+  {
+   "name": "take",
+   "description": "Move `amount` (1, 5 or 20) of `item` out of entity `row` into the inventory.",
+   "inputSchema": {
+    "properties": {
+     "row": {
+      "title": "Row",
+      "type": "integer"
+     },
+     "item": {
+      "title": "Item",
+      "type": "string"
+     },
+     "amount": {
+      "title": "Amount",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "row",
+     "item",
+     "amount"
+    ],
+    "title": "takeArguments",
+    "type": "object"
+   },
+   "outputSchema": {
+    "properties": {
+     "result": {
+      "additionalProperties": true,
+      "title": "Result",
+      "type": "object"
+     }
+    },
+    "required": [
+     "result"
+    ],
+    "title": "takeOutput",
+    "type": "object"
+   }
+  },
+  {
+   "name": "tile",
+   "description": "The tile the character stands on, [x, y] (floor of me). Costs no decision.",
+   "inputSchema": {
+    "properties": {},
+    "title": "tileArguments",
+    "type": "object"
+   },
+   "outputSchema": {
+    "properties": {
+     "result": {
+      "additionalProperties": true,
+      "title": "Result",
+      "type": "object"
+     }
+    },
+    "required": [
+     "result"
+    ],
+    "title": "tileOutput",
+    "type": "object"
+   }
+  },
+  {
+   "name": "wait",
+   "description": "Let `count` decisions (30 ticks each, at most 100) pass.",
+   "inputSchema": {
+    "properties": {
+     "count": {
+      "default": 1,
+      "title": "Count",
+      "type": "integer"
+     }
+    },
+    "title": "waitArguments",
+    "type": "object"
+   },
+   "outputSchema": {
+    "properties": {
+     "result": {
+      "additionalProperties": true,
+      "title": "Result",
+      "type": "object"
+     }
+    },
+    "required": [
+     "result"
+    ],
+    "title": "waitOutput",
+    "type": "object"
+   }
+  }
+ ],
+ "system_prompt": "You build factories in a Factorio-like simulator by calling tools.\n\nTask: construct_smelting_line.\nThe scene has an iron ore patch. The character starts holding 2 burner mining drills, 2 stone furnaces and 60 coal. Build a working smelting line: a burner mining drill on ore whose output drops into a stone furnace, with both machines fuelled, so that at least 10 iron plates are machine-made during a verification window after the build phase. Some scenes have walls; walking straight into a wall wastes decisions.\n\nYou act through tools that mirror the `world` API one to one: queries (me, tile, inventory, ore_tiles, blocked_tiles, entities, patch, decisions_left, last_refused) cost nothing; actions (move, place, give, take, mine, wait) each spend a decision. give/take/mine name an entity by its current `row` in entities(). Every tool returns {\"ok\": ..., \"result\": ...} or an error. Call finish() once the line is built and fuelled: the episode is scored only after finish().\n\nGame notes:\n- Every action is one decision of about 30 ticks.\n- The build phase has a 600-decision budget; running out ends it.\n- `place` only reaches tiles within 5 tiles (Chebyshev distance) of the character's own tile, never the tile the character stands on, and never an occupied or blocked tile.\n- A 2x2 machine placed at (x, y) covers tiles x..x+1, y..y+1; its centre is (x+1, y+1).\n- A burner mining drill facing S drops its ore at about (cx+0.5, cy+1.3) from its centre (cx, cy); rotating the facing rotates that point about the centre.\n- A furnace catches the ore if its 2x2 footprint contains the drop point.\n- Both machines need fuel (coal) to run.\n- A drill only mines if its footprint is on ore.",
+ "system_prompt_no_notes": "You build factories in a Factorio-like simulator by calling tools.\n\nTask: construct_smelting_line.\nThe scene has an iron ore patch. The character starts holding 2 burner mining drills, 2 stone furnaces and 60 coal. Build a working smelting line: a burner mining drill on ore whose output drops into a stone furnace, with both machines fuelled, so that at least 10 iron plates are machine-made during a verification window after the build phase. Some scenes have walls; walking straight into a wall wastes decisions.\n\nYou act through tools that mirror the `world` API one to one: queries (me, tile, inventory, ore_tiles, blocked_tiles, entities, patch, decisions_left, last_refused) cost nothing; actions (move, place, give, take, mine, wait) each spend a decision. give/take/mine name an entity by its current `row` in entities(). Every tool returns {\"ok\": ..., \"result\": ...} or an error. Call finish() once the line is built and fuelled: the episode is scored only after finish().",
+ "prompt": "Build the smelting line in this scene with the tools, then call finish().",
+ "names": [
+  "construct_smelting_line/train/0",
+  "construct_smelting_line/train/1"
+ ]
+}

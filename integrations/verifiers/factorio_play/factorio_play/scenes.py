@@ -12,7 +12,9 @@ from dataclasses import dataclass
 from evolve import evaluate
 from fsim import scenes
 
-SUPPORTED_TASKS = (evaluate.TASK,)
+#: The tasks this package has tools for: construct_smelting_line on factory-sim's
+#: `World`, belt_smelting on its `WorldV3` (`fsim.program_api.TASK_PROFILES`).
+SUPPORTED_TASKS = (evaluate.TASK, "belt_smelting")
 SPLITS = ("train", "val", "holdout")
 
 

@@ -169,7 +169,7 @@ Each is its own package with a Hub-style README. They reuse
 `fsim.scenes`, and nothing in them is a second implementation.
 
 - **`factorio_build`** (single turn; `construct_smelting_line` or `belt_smelting`): the prompt is the evolution loop's system prompt (task, contract, `World` API, optional game notes) plus a user message naming a scene subset. The reply's program is sandbox-checked and run on that subset's 8 to 16 scenes in an `EvalPool`. The rewards are `success_rate` (1.0), `format` (0.1: +1 valid, −1 refused by the sandbox, 0 no code) and an opt-in `refusal_penalty`. The package exports a native v1 `FactorioBuildTaskset` and also a v0 `load_environment()` (a `SingleTurnEnv` with a `Rubric`). Both score through the same function.
-- **`factorio_play`** (multi-turn, v1 only): one scene per rollout. The `World` methods are MCP tools, backed by an unmodified `run_episode` running on a thread, plus `finish`. The reward is verified success.
+- **`factorio_play`** (multi-turn, v1 only; `construct_smelting_line` or `belt_smelting`): one scene per rollout. The `World` methods (`WorldV3`'s for `belt_smelting`) are MCP tools, backed by an unmodified `run_episode` running on a thread, plus `finish`. On `belt_smelting`, a tool that takes a count or an amount runs several world actions per call. The reward is verified success, and on `belt_smelting` factory-sim's score, min(1, plates / 150).
 
 ```bash
 eval factorio-build -m <model> -n 8 --env.taskset.split val      # v1

@@ -1,9 +1,15 @@
-"""factorio-play: build a smelting line through `world.*` tool calls, one scene per rollout.
+"""factorio-play: build a factory through `world.*` tool calls, one scene per rollout.
 
-Each tool call is one `World` method call on a live factory-sim episode (see
-`servers/world.py` and `session.py`). The model calls `finish` when done; the
-episode then runs its verification window, and the reward is whether it
-verified. A rollout that never calls `finish` scores 0: its build phase never
+Two tasks. `construct_smelting_line` (the default): each tool call is one
+`World` method call on a live factory-sim episode (`servers/world.py`,
+`session.py`), and the reward is whether the line verified. `belt_smelting`:
+the tools are factory-sim's `WorldV3` (`servers/belt_world.py`,
+`belt_tools.py`), where a tool that takes a count or an amount can run several
+world actions, and the reward is factory-sim's own score for the task,
+min(1, plates delivered / 150), which is 1 exactly when it succeeds.
+
+The model calls `finish` when done; the episode then runs its verification
+window. A rollout that never calls `finish` scores 0: its build phase never
 ended, so nothing was verified.
 """
 
@@ -15,34 +21,18 @@ from pathlib import Path
 from typing import Literal
 
 import verifiers.v1 as vf
-from pydantic import Field
+from pydantic import Field, model_validator
 from verifiers.v1.dialects.chat import message_to_wire
 from verifiers.v1.harnesses.null import NullHarness
 
-from evolve import mutate
+from evolve import evaluate
+from factorio_play import belt_tools, prompts
 from factorio_play import scenes as scene_plan
+from factorio_play.servers.belt_world import BeltToolsetConfig, BeltWorldToolset
 from factorio_play.servers.world import WorldState, WorldToolset, WorldToolsetConfig
+from fsim.program_api import TASK_PROFILES
 
 logger = logging.getLogger(__name__)
-
-TOOLS_NOTE = """\
-You act through tools that mirror the `world` API one to one: queries (me, tile, \
-inventory, ore_tiles, blocked_tiles, entities, patch, decisions_left, last_refused) \
-cost nothing; actions (move, place, give, take, mine, wait) each spend a decision. \
-give/take/mine name an entity by its current `row` in entities(). Every tool returns \
-{"ok": ..., "result": ...} or an error. Call finish() once the line is built and \
-fuelled: the episode is scored only after finish()."""
-
-
-def system_prompt(game_notes: bool = True) -> str:
-    parts = [
-        "You build factories in a Factorio-like simulator by calling tools.",
-        mutate.TASK,
-        TOOLS_NOTE,
-    ]
-    if game_notes and mutate.GAME_NOTES:
-        parts.append(mutate.GAME_NOTES)
-    return "\n\n".join(parts)
 
 
 class FactorioPlayData(vf.TaskData):
@@ -56,6 +46,11 @@ class FactorioPlayData(vf.TaskData):
 
 class FactorioPlayTaskConfig(vf.TaskConfig):
     tools: WorldToolsetConfig = WorldToolsetConfig()
+    """construct_smelting_line's tool server."""
+    belt_tools: BeltToolsetConfig = BeltToolsetConfig()
+    """belt_smelting's tool server."""
+    sim_task: str = evaluate.TASK
+    """Which tool server a rollout gets. The taskset sets it from its own `sim_task`."""
 
 
 class FactorioPlayTask(vf.Task[FactorioPlayData, WorldState, FactorioPlayTaskConfig]):
@@ -65,27 +60,37 @@ class FactorioPlayTask(vf.Task[FactorioPlayData, WorldState, FactorioPlayTaskCon
 
     @classmethod
     def toolsets(cls, config: FactorioPlayTaskConfig) -> list[vf.Toolset]:
+        if TASK_PROFILES.get(config.sim_task, "v2") == "v3":
+            return [BeltWorldToolset(config.belt_tools)]
         return [WorldToolset(config.tools)]
 
     @vf.metric
     async def episode(self, trace: vf.Trace) -> dict[str, float]:
         st = trace.state
-        return {
+        out = {
             "finished": float(st.finished),
             "verified_output": float(st.verified_output),
             "decisions": float(st.decisions),
             "refusals": float(st.refusals),
             "tool_calls": float(st.tool_calls),
         }
+        if self.data.sim_task == prompts.BELT_TASK:
+            out["success"] = float(st.finished and st.success)
+        return out
 
     @vf.reward(weight=1.0)
-    async def success(self, trace: vf.Trace) -> float:
+    async def success(self, trace: vf.Trace) -> float | dict[str, float]:
+        """construct_smelting_line: 1 if the line verified. belt_smelting: recorded as
+        `score`, factory-sim's min(1, plates / 150)."""
         st = trace.state
+        if self.data.sim_task == prompts.BELT_TASK:
+            return {"score": belt_tools.score(st.verified_output) if st.finished else 0.0}
         return float(st.finished and st.success)
 
 
 class FactorioPlayConfig(vf.TasksetConfig):
-    sim_task: str = "construct_smelting_line"
+    sim_task: Literal["construct_smelting_line", "belt_smelting"] = "construct_smelting_line"
+    """factory-sim task: construct_smelting_line or belt_smelting."""
     split: Literal["train", "val", "holdout"] = "train"
     """`holdout` is the frozen FactorioRL holdout: evaluation only."""
     num_examples: int = Field(64, ge=1)
@@ -95,6 +100,13 @@ class FactorioPlayConfig(vf.TasksetConfig):
     game_notes: bool = True
     task: FactorioPlayTaskConfig = FactorioPlayTaskConfig()
 
+    @model_validator(mode="after")
+    def _tools_follow_sim_task(self):
+        """The task config names the tool server `Task.toolsets` launches: this taskset's."""
+        if self.task.sim_task != self.sim_task:
+            self.task = self.task.model_copy(update={"sim_task": self.sim_task})
+        return self
+
 
 class FactorioPlayTaskset(vf.Taskset[FactorioPlayTask, FactorioPlayConfig]):
     def load(self) -> list[FactorioPlayTask]:
@@ -102,7 +114,8 @@ class FactorioPlayTaskset(vf.Taskset[FactorioPlayTask, FactorioPlayConfig]):
         if cfg.split == "holdout":
             logger.warning("factorio-play: split=holdout is for evaluation only")
         refs = scene_plan.scene_block(cfg.sim_task, cfg.split, cfg.seed, cfg.num_examples)
-        system = system_prompt(cfg.game_notes)
+        system = prompts.system_prompt(cfg.game_notes, cfg.sim_task)
+        prompt = prompts.user_prompt(cfg.sim_task)
         tasks = []
         for i, ref in enumerate(refs):
             scene_id = f"{cfg.sim_task}/{cfg.split}/{cfg.seed + i}"
@@ -118,8 +131,7 @@ class FactorioPlayTaskset(vf.Taskset[FactorioPlayTask, FactorioPlayConfig]):
                         seed=ref.seed,
                         sample_split=ref.sample_split,
                         system_prompt=system,
-                        prompt="Build the smelting line in this scene with the tools, "
-                        "then call finish().",
+                        prompt=prompt,
                     ),
                     cfg.task,
                 )

@@ -427,17 +427,18 @@ def test_play_scenes_match_factorio_build():
     factory-sim alone; it must pick exactly the scenes factorio-build does."""
     from factorio_play import scenes as play_scenes
 
-    for split, start, n in (
-        ("train", 0, 5),
-        ("val", 3, 5),
-        ("holdout", 0, 5),
-        ("holdout", 1000, 3),
-    ):
-        a = core.scene_block(TASK, split, start, n)
-        b = play_scenes.scene_block(TASK, split, start, n)
-        assert [(r.family, r.seed, r.sample_split) for r in a] == [
-            (r.family, r.seed, r.sample_split) for r in b
-        ]
+    for task in (TASK, "belt_smelting"):
+        for split, start, n in (
+            ("train", 0, 5),
+            ("val", 3, 5),
+            ("holdout", 0, 5),
+            ("holdout", 1000, 3),
+        ):
+            a = core.scene_block(task, split, start, n)
+            b = play_scenes.scene_block(task, split, start, n)
+            assert [(r.family, r.seed, r.sample_split) for r in a] == [
+                (r.family, r.seed, r.sample_split) for r in b
+            ]
 
 
 def test_session_accepts_compass_words_and_says_why_an_action_is_refused():
@@ -456,3 +457,112 @@ def test_session_accepts_compass_words_and_says_why_an_action_is_refused():
     far = session.call("place", "stone-furnace", 999, 999, "south")
     assert far["result"] is False and "tiles from tile()" in far["refused"]
     session.finish()
+
+
+# ------------------------------------------------------------ factorio-play 0.2.0
+
+PLAY_GOLDEN = ROOT / "tests" / "golden" / "factorio_play_construct_smelting_line.json"
+
+
+def _mcp_tools(toolset) -> list[dict]:
+    from mcp.server.fastmcp import FastMCP
+
+    async def listed():
+        mcp = FastMCP("x")
+        toolset.register(mcp)
+        return await mcp.list_tools()
+
+    keys = ("name", "description", "inputSchema", "outputSchema")
+    tools = sorted(asyncio.run(listed()), key=lambda t: t.name)
+    return [{k: t.model_dump(mode="json")[k] for k in keys} for t in tools]
+
+
+@needs_v1
+def test_play_construct_smelting_line_is_unchanged():
+    """0.1.1's tools (names, descriptions, schemas), prompts and task names, as its own
+    code produced them, and the tool server it launches."""
+    import json
+
+    from factorio_play.servers.world import WorldToolset, WorldToolsetConfig
+    from factorio_play.taskset import FactorioPlayConfig, FactorioPlayTask
+
+    golden = json.loads(PLAY_GOLDEN.read_text(encoding="utf-8"))
+    assert _mcp_tools(WorldToolset(WorldToolsetConfig())) == golden["tools"]
+    tasks = list(factorio_play.FactorioPlayTaskset(FactorioPlayConfig(num_examples=2)))
+    assert tasks[0].data.system_prompt == golden["system_prompt"]
+    assert tasks[0].data.prompt == golden["prompt"]
+    assert [t.data.name for t in tasks] == golden["names"]
+    off_cfg = FactorioPlayConfig(num_examples=1, game_notes=False)
+    off = list(factorio_play.FactorioPlayTaskset(off_cfg))
+    assert off[0].data.system_prompt == golden["system_prompt_no_notes"]
+    (server,) = FactorioPlayTask.toolsets(tasks[0].config)
+    assert type(server) is WorldToolset and server.config == WorldToolsetConfig()
+    assert server.config.decision_budget == 600
+
+
+@needs_v1
+def test_play_belt_smelting_tools():
+    from factorio_play.servers.belt_world import BeltWorldToolset
+    from factorio_play.taskset import FactorioPlayConfig, FactorioPlayTask
+
+    cfg = FactorioPlayConfig(sim_task="belt_smelting", num_examples=1)
+    assert cfg.task.sim_task == "belt_smelting"
+    (task,) = list(factorio_play.FactorioPlayTaskset(cfg))
+    (server,) = FactorioPlayTask.toolsets(task.config)
+    assert type(server) is BeltWorldToolset
+    assert server.config.decision_budget == evaluate.task_setup("belt_smelting").decision_budget
+    assert server.config.decision_budget == 2500
+    tools = _mcp_tools(server)
+    assert [t["name"] for t in tools] == sorted(
+        "me tile inventory ore_tiles blocked_tiles entities marker belt_lanes decisions_left "
+        "last_refused move place rotate give take take_fuel mine mine_resource wait finish".split()
+    )
+    assert all(t["description"] and "\n" not in t["description"] for t in tools)
+    assert mutate.GAME_NOTES_BELT_SMELTING in task.data.system_prompt
+    assert mutate.TASK_BELT_SMELTING in task.data.system_prompt
+    assert task.data.scene_id == "belt_smelting/train/0"
+
+
+@needs_v1
+def test_play_belt_smelting_expert_through_the_tool_server():
+    """fsim.belt_expert's build, sent through the MCP tool bodies, scores 1."""
+    from factorio_play.taskset import FactorioPlayConfig, FactorioPlayTask
+    from test_factorio_play import as_tool_calls, expert_decisions, play
+
+    cfg = FactorioPlayConfig(sim_task="belt_smelting", num_examples=2, seed=3)
+    task = list(factorio_play.FactorioPlayTaskset(cfg))[1]
+    (toolset,) = FactorioPlayTask.toolsets(task.config)
+    asyncio.run(toolset.setup_task(task.data))
+    _, blueprint = scenes.sample("belt_smelting", task.data.sample_split, task.data.seed)
+    decisions, outcome = expert_decisions(blueprint)
+    calls = as_tool_calls(decisions)
+    transcript = play(toolset, calls)
+    import json
+
+    final = json.loads(transcript[-1][2])
+    assert final["success"] is True and final["verified_output"] == outcome["verified_output"]
+    trace = _trace(task, state=toolset.state)
+    asyncio.run(task.score(trace))
+    assert trace.rewards["score"].score == 1.0
+    assert "success" not in trace.rewards
+    assert trace.reward == 1.0
+    assert trace.metrics["success"] == 1.0 and trace.metrics["finished"] == 1.0
+    assert trace.metrics["decisions"] == outcome["decisions"]
+    assert trace.metrics["tool_calls"] == len(calls)
+
+
+@needs_v1
+def test_play_belt_smelting_partial_and_unfinished_scores():
+    from factorio_play.servers.world import WorldState
+    from factorio_play.taskset import FactorioPlayConfig
+
+    cfg = FactorioPlayConfig(sim_task="belt_smelting", num_examples=1)
+    (task,) = list(factorio_play.FactorioPlayTaskset(cfg))
+    for state, score in (
+        (WorldState(finished=True, verified_output=60), 0.4),
+        (WorldState(finished=True, verified_output=150, success=True), 1.0),
+        (WorldState(finished=False, verified_output=0), 0.0),
+    ):
+        trace = _trace(task, state=state)
+        asyncio.run(task.score(trace))
+        assert trace.rewards["score"].score == pytest.approx(score)
