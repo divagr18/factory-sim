@@ -115,7 +115,9 @@ class WorldSession:
             if item is _FINISH:
                 return
             name, args = item
-            before = len(world._trace)
+            # Every intent appends one trace line and bumps either `refusals` or
+            # `decisions`; `_trace` itself is capped, so its length can't tell.
+            before = world.refusals + world.decisions
             try:
                 value = name(world, *args) if callable(name) else getattr(world, name)(*args)
             except Exception as e:
@@ -127,7 +129,8 @@ class WorldSession:
             # records why an intent was refused, or that the game refused a legal
             # action (which still cost a decision); pass that back.
             note = None
-            if (name in ACTIONS or name in ACTIONS_V3) and len(world._trace) > before:
+            acted = world.refusals + world.decisions > before
+            if (name in ACTIONS or name in ACTIONS_V3) and acted:
                 last = world._trace[-1]
                 if "-> refused" in last:
                     note = last.split("-> refused", 1)[1].strip()

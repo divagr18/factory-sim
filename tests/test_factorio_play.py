@@ -319,3 +319,15 @@ def test_expert_decisions_replay_the_expert_exactly():
         outcome["decisions"],
         0,
     )
+
+
+def test_refusal_notes_survive_past_the_trace_cap():
+    # World._trace is a capped deque, so its length stops growing after its 20th
+    # intent; the reply's `refused` note must still appear after that.
+    _, blueprint = scenes.sample(TASK, "train", 0)
+    session = WorldSession(blueprint, task=TASK)
+    for _ in range(25):
+        assert session.call("wait")["ok"]
+    far = session.call("place", "stone-furnace", 999, 999, "N")
+    assert far["ok"] and far["result"] is False and far["refused"]
+    session.finish()

@@ -129,7 +129,8 @@ not a benchmark number.
   splits, and its score, min(1, plates / 150), as the reward. Its tools that
   take a count or an amount run several world actions per call, and their
   replies are compact JSON. `construct_smelting_line`'s tools, prompts and
-  reward are unchanged. Requires factory-sim 0.2.0.
+  reward are unchanged. Fixes its action replies, which stopped carrying the
+  refusal reason after an episode's twentieth action. Requires factory-sim 0.2.0.
 - 2026-09-24 (0.1.1): The default harness uses the Responses API. Refused
   actions return their reason, and directions and facings accept words
   (`east`) as well as letters (`E`). Before this, every action a model phrased
