@@ -23,6 +23,24 @@ and inserters, at every tick. The measurements live in
 [FactorioGym](https://github.com/divagr18/FactorioGym), which drives the real
 game through a mod.
 
+## Scope
+
+"Tick-exact" applies to the mechanics listed above, not to Factorio as a whole.
+The simulator is a work in progress: more of the game (electricity, assemblers
+and beyond) is being measured and added.
+
+Known exceptions within that scope:
+
+- A few floating-point values are compared to within 1e-12, because the game
+  prints some of them with an imprecise last digit.
+- Ore under a drill is compared as a total over its four tiles. The order a
+  drill mines its tiles follows the engine's internal entity order, which could
+  not be reduced to a rule.
+- Loading a mid-episode state that would need the engine's belt update order
+  (which the game does not expose) raises an error instead of guessing.
+- About 1% of `belt_smelting` scenes place ore or walls on water. What the game
+  does there has not been measured yet.
+
 ## Quick start
 
 ```python
