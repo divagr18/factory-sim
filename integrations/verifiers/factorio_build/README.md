@@ -1,5 +1,10 @@
 # factorio-build
 
+**Program synthesis.** The model writes one Python program that builds the
+factory, and the program is scored on unseen scenes. For the agentic version,
+where the model plays one tool call at a time, see
+[`factorio-play`](https://app.primeintellect.ai/dashboard/environments/divagr/factorio-play).
+
 Requires `verifiers>=0.3.1` and `factory-sim>=0.2.0`, installed from PyPI with
 prebuilt wheels.
 

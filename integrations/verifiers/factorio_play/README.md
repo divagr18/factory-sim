@@ -1,5 +1,10 @@
 # factorio-play
 
+**Agentic play.** The model builds the factory one tool call at a time,
+seeing the result of each action. For the program-synthesis version, where the
+model writes one program that is scored on unseen scenes, see
+[`factorio-build`](https://app.primeintellect.ai/dashboard/environments/divagr/factorio-build).
+
 Requires `verifiers>=0.3.1` and `factory-sim>=0.2.0`, installed from PyPI with
 prebuilt wheels. Runs on Linux and macOS: `verifiers.v1` does not import on
 Windows.
