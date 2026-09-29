@@ -23,8 +23,8 @@ outcome. The program sees
 only what a trained reinforcement-learning policy would see, and every call it
 makes costs one decision from the same budget a policy has.
 
-If you want the model to play step by step instead, taking one action at a
-time and seeing what happens after each, use the companion environment
+If you want the model to play the game instead, taking one action at a time
+and seeing what happens after each, use the companion environment
 [factorio-play](https://app.primeintellect.ai/dashboard/environments/divagr/factorio-play).
 It uses the same tasks, maps and scoring.
 
@@ -89,11 +89,9 @@ one failure has its whole coal patch on water.
 
 `prompt_version` sets the last line of the user message.
 
-- `v1` (default): a plan of at most five lines, then the program. The
-  baselines below and the SFT-800 recipe used it.
+- `v1` (default): a plan of at most five lines, then the program.
 - `v2`: think the problem through step by step in plain prose, then the
-  program. The Evolve & Reinforce warm start trains on replies that reason, so
-  it asks for them.
+  program. Use it when you want the model to reason before it writes code.
 
 ## Run it
 
@@ -146,53 +144,18 @@ env.taskset.task.workers = 4
 The full SFT + GRPO recipe, with its deploy scripts and the fixes it needed,
 is [`recipes/grpo-factorio-build`](https://github.com/divagr18/factory-sim/tree/main/recipes/grpo-factorio-build).
 
-## Results
+## Example results
 
-Every number in the two tables is scored in the simulator, on
-`construct_smelting_line`.
+These are early, small-scale runs, included only to show the environment is
+learnable. They are not a benchmark for the environment.
 
-**Zero-shot baseline.** One reply per row, game notes on, 16 scenes per row,
-`prompt_version` v1, and up to 32,000 completion tokens, reasoning included.
-
-| Model | `val` scenes solved (32 rows) | `holdout` scenes solved (6 rows) | Programs accepted | Rows fully solved |
-| --- | --- | --- | --- | --- |
-| `gpt-6-luna` | 80.9% | 89.6% | 97% val, 100% holdout | 16/32 val, 2/6 holdout |
-
-The `val` rows are subsets 0-31 at `seed=0`; the `holdout` rows are 0-5,
-frozen indices 0-95. Six rows is a small sample. Almost every remaining
-failure is a valid program whose plan fails on some scenes.
-
-**Trained Qwen3.5-9B.** 16 rows x 4 samples x 8 scenes per split, temperature
-0.6, thinking off. PlanBench is Blocksworld plan generation (task 1) and plan
-execution (task 7), 500 instances each, thinking off. It measures how much
-general planning a recipe costs the model.
-
-| Qwen3.5-9B | `val` (sim) | `holdout` (sim) | PlanBench generation | PlanBench execution |
-| --- | --- | --- | --- | --- |
-| base | 2.1% | 1.6% | 53.2 | 39.8 |
-| SFT-800 + GRPO (earlier recipe) | 85.9% | 84.0% | 2.8 | 3.0 |
-| Evolve & Reinforce, round 1 | 85.6% | 71.9% | 46.4 | 27.8 |
-
-Base Qwen3.5-9B solves almost nothing: half its programs exceed the sandbox's
-size limit and most of the rest fail to parse. The earlier recipe fine-tuned
-it on 800 bare programs found by program search, then ran GRPO. It reached
-84.0% on the holdout, and PlanBench fell to 2.8 and 3.0. Evolve & Reinforce
-builds its warm start from the model's own explanations of those programs
-(prompt v2), mixes in replay of the base model's answers to general prompts,
-then runs GRPO. PlanBench stays at 46.4 and 27.8, and the holdout is 12 points
-lower.
-
-Models: [`qwen3.5-9b-factorio-build-er-r1`](https://huggingface.co/divagr1925/qwen3.5-9b-factorio-build-er-r1)
-(Evolve & Reinforce, round 1) and its warm start
-[`qwen3.5-9b-factorio-build-er-r1-sft`](https://huggingface.co/divagr1925/qwen3.5-9b-factorio-build-er-r1-sft).
-All models: [models collection](https://huggingface.co/collections/divagr1925/factoriogym-models-wip).
-
-**On the real game.** A random 16 of the SFT-800 + GRPO model's holdout
-programs, each on 10 holdout scenes, succeed in 136 of 160 episodes on
-Factorio 2.0.60, and the simulator gives the same outcome in every episode.
-Programs from program search succeed in 397 of 400 engine episodes (99.3%),
-again matching the simulator in every episode. The evidence files are in
-FactorioGym.
+- `gpt-6-luna`, zero-shot, `construct_smelting_line`: 80.9% of `val` scenes and
+  89.6% of `holdout` scenes solved.
+- Qwen3.5-9B, base: 1.6% of `holdout` scenes.
+- Qwen3.5-9B after a short SFT warm start and 30 GRPO steps
+  ([`qwen3.5-9b-factorio-build-er-r1`](https://huggingface.co/divagr1925/qwen3.5-9b-factorio-build-er-r1)):
+  85.6% of `val` and 71.9% of `holdout` scenes, scored in the simulator. One
+  seed, work in progress.
 
 ## Config
 

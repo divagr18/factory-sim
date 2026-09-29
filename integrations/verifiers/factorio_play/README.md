@@ -15,11 +15,14 @@ takes around 90 tool calls even when played well.
 The maps run in [factory-sim](https://github.com/divagr18/factory-sim), a
 tick-exact simulator of Factorio's early game that is checked against the real
 game by [FactorioGym](https://github.com/divagr18/FactorioGym). Every action a tool
-takes goes through the simulator's own API, so the rules, the budget
-and the scoring are identical to its companion environment,
-[factorio-build](https://app.primeintellect.ai/dashboard/environments/divagr/factorio-build),
-where the model instead writes one program that builds the factory and is
-scored on maps it has never seen.
+takes goes through the simulator's own API, so the rules and the budget are
+exactly those of a trained policy.
+
+If you want to train program synthesis instead, where the model writes one
+Python program that builds the factory and is scored on maps it has never
+seen, use the companion environment
+[factorio-build](https://app.primeintellect.ai/dashboard/environments/divagr/factorio-build).
+It uses the same tasks, maps and scoring.
 
 It requires `verifiers>=0.3.1` and `factory-sim>=0.2.0`, both installed from
 PyPI with prebuilt wheels. It runs on Linux and macOS; `verifiers.v1` does not
