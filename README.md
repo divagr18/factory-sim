@@ -52,8 +52,9 @@ obs, info = env.reset(seed=0)
 obs, reward, terminated, truncated, info = env.step(env.action_space.sample())
 ```
 
-Install the Gymnasium extra with `pip install factory-sim[gym]`. PufferLib,
-OpenEnv and Prime Intellect's verifiers format are also supported; see
+Install the Gymnasium extra with `pip install factory-sim[gym]`. Prime
+Intellect's Environments Hub (verifiers), OpenEnv and PufferLib are also
+supported; see
 [docs/interfaces.md](https://github.com/divagr18/factory-sim/blob/main/docs/interfaces.md).
 
 ## Speed
