@@ -1,25 +1,40 @@
 # factorio-build
 
-**Program synthesis.** The model writes one Python program that builds the
-factory, and the program is scored on unseen scenes. For the agentic version,
-where the model plays one tool call at a time, see
-[`factorio-play`](https://app.primeintellect.ai/dashboard/environments/divagr/factorio-play).
+factorio-build is a program-synthesis environment built on Factorio, the
+factory-building game. The model is given a description of the task and an
+API for controlling a player character, and it writes a single Python program,
+`def build(world):`, that walks the map, places machines and fuels them. That
+one program is then run, unchanged, on a set of maps it has never seen, and the
+reward is the fraction of those maps where the factory it builds actually
+works.
 
-Requires `verifiers>=0.3.1` and `factory-sim>=0.2.0`, installed from PyPI with
-prebuilt wheels.
+Because the program has to succeed on maps it wasn't written for, it can't
+hard-code coordinates: it has to find the ore, pick a spot that isn't blocked
+by walls or water, and lay the machines out correctly wherever it lands. A
+factory "works" only if it verifiably produces during a measurement window at
+the end, so building something that looks right isn't enough.
 
-The model writes one Python program, `def build(world):`, that builds a
-working factory in [factory-sim](https://github.com/divagr18/factory-sim), a
-tick-exact simulator of Factorio's early game. The program runs on scenes it
-has never seen, and the reward is the fraction of them where the factory
-verifiably produces. The program sees only what a trained RL policy sees, and
-every call it makes is one decision of that policy's action space. The
-simulator is checked against the real game by
-[FactorioGym](https://github.com/divagr18/FactorioGym).
+The maps run in [factory-sim](https://github.com/divagr18/factory-sim), a
+tick-exact simulator of Factorio's early game, so scoring a program takes well
+under a second on a CPU. The simulator is checked against the real game by
+[FactorioGym](https://github.com/divagr18/FactorioGym), and programs written
+here have been played in real Factorio, with the simulator predicting every
+outcome. The program sees
+only what a trained reinforcement-learning policy would see, and every call it
+makes costs one decision from the same budget a policy has.
+
+If you want the model to play step by step instead, taking one action at a
+time and seeing what happens after each, use the companion environment
+[factorio-play](https://app.primeintellect.ai/dashboard/environments/divagr/factorio-play).
+It uses the same tasks, maps and scoring.
+
+It requires `verifiers>=0.3.1` and `factory-sim>=0.2.0`, both installed from
+PyPI with prebuilt wheels.
 
 ## Tasks
 
-`task` (`sim_task` in the v1 config) picks one of two tasks.
+There are two tasks. Choose one with `task` (it's called `sim_task` in the
+v1 config).
 
 | Task | The program has to | A scene succeeds when | Decisions |
 | --- | --- | --- | --- |

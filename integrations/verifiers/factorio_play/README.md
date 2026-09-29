@@ -1,26 +1,33 @@
 # factorio-play
 
-**Agentic play.** The model builds the factory one tool call at a time,
-seeing the result of each action. For the program-synthesis version, where the
-model writes one program that is scored on unseen scenes, see
-[`factorio-build`](https://app.primeintellect.ai/dashboard/environments/divagr/factorio-build).
+factorio-play is an agentic environment built on Factorio, the
+factory-building game. The model controls a player character through tool
+calls, one action at a time: it looks around, walks, places machines, fuels
+them, and sees the result of every action before choosing the next. When it
+thinks the factory is ready it calls `finish`, the game runs a measurement
+window, and the reward is what the factory actually produced.
 
-Requires `verifiers>=0.3.1` and `factory-sim>=0.2.0`, installed from PyPI with
-prebuilt wheels. Runs on Linux and macOS: `verifiers.v1` does not import on
-Windows.
+This makes it a test of closed-loop behaviour. The model has to explore a map
+it only partly sees, notice when an action is refused or doesn't do what it
+expected, and recover, all within a fixed budget of decisions. The larger task
+takes around 90 tool calls even when played well.
 
-The model builds a working factory in
-[factory-sim](https://github.com/divagr18/factory-sim), a tick-exact simulator
-of Factorio's early game, one tool call at a time. It reads what it can see,
-walks, places and fuels machines, and calls `finish`. The episode then runs a
-verification window, and the reward is what the factory verifiably produced
-in it. These are the tasks of
-[`factorio-build`](https://app.primeintellect.ai/dashboard/environments/divagr/factorio-build),
-played live instead of written as one program.
+The maps run in [factory-sim](https://github.com/divagr18/factory-sim), a
+tick-exact simulator of Factorio's early game that is checked against the real
+game by [FactorioGym](https://github.com/divagr18/FactorioGym). Every action a tool
+takes goes through the simulator's own API, so the rules, the budget
+and the scoring are identical to its companion environment,
+[factorio-build](https://app.primeintellect.ai/dashboard/environments/divagr/factorio-build),
+where the model instead writes one program that builds the factory and is
+scored on maps it has never seen.
+
+It requires `verifiers>=0.3.1` and `factory-sim>=0.2.0`, both installed from
+PyPI with prebuilt wheels. It runs on Linux and macOS; `verifiers.v1` does not
+import on Windows.
 
 ## Tasks
 
-`sim_task` picks one of two tasks.
+There are two tasks. Choose one with `sim_task`.
 
 | Task | The model has to | Reward | Decisions |
 | --- | --- | --- | --- |
