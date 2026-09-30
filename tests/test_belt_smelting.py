@@ -15,6 +15,7 @@ import random
 
 import pytest
 
+import fsim
 from evolve import evaluate as ev
 from fsim import belt_expert, ffi, lib, scenes
 from fsim.parity import GOLDEN
@@ -49,6 +50,21 @@ def test_the_holdout_is_factoriorls_frozen_one():
         pytest.skip("no FactorioRL checkout (with a frozen belt_smelting holdout) beside this one")
     assert check["matched"] == check["compared"] == ev.HOLDOUT_FROZEN
     assert {f for f, _, _ in sets["holdout"]} == {"obstructed", "far_chest"}
+
+
+def test_the_redrawn_gate_scenes_are_the_ones_on_water():
+    """Every other gate scene is the one the engine played."""
+    water = set(fsim.water_tiles())
+    for split, index in REDRAWN:
+        family, scene = scenes.sample(TASK, split, _gate_seed(index))
+        tiles = {tuple(int(v // 1) for v in e["position"]) for e in scene["entities"]}
+        tiles |= {tuple(int(v // 1) for v in r["position"]) for r in scene["resources"]}
+        assert not tiles & water
+    assert all(
+        scenes.sample(TASK, r["split"], _gate_seed(r["index"]))[0] == r["family"]
+        for r in REFERENCE["episodes"]
+        if (r["split"], r["index"]) not in REDRAWN
+    )
 
 
 def test_the_splits_draw_their_own_families():
@@ -188,9 +204,14 @@ def test_a_chest_that_was_picked_up_holds_nothing():
 # ------------------------------------------------------------------ builder
 
 
+#: Gate scenes (split, index) that belt_smelting 1.2.0 redrew because 1.1.0 put
+#: something on water. The engine played the 1.1.0 scene, so they are left out.
+REDRAWN = {("train", 0), ("train", 71), ("test", 12)}
+
+
 def _reference_rows():
     """A spread of the engine episodes: every coal supply, every family."""
-    rows = REFERENCE["episodes"]
+    rows = [r for r in REFERENCE["episodes"] if (r["split"], r["index"]) not in REDRAWN]
     picked, seen = [], set()
     for row in rows:
         key = (row["gate"], row["family"])

@@ -14,6 +14,7 @@ family of the requested split, then (optionally) the exploring-starts move of
 
 from __future__ import annotations
 
+import functools
 import math
 import random
 
@@ -287,12 +288,16 @@ def plate_line(family: str, rng: random.Random) -> dict:
 
 # ------------------------------------------------------------ belt_smelting
 #
-# FactorioRL `tasks/families/belt_smelting.py` 1.1.0: an iron patch, a coal
+# FactorioRL `tasks/families/belt_smelting.py` 1.2.0: an iron patch, a coal
 # patch and a marked output chest, each at least 21 tiles (edge to edge) from
 # the other two, with walls in some families. The draw order is that module's
 # docstring's: only `rng.randint`, fixed-count loops and rejection loops that
 # redraw the same values in the same order, and every acceptance test is
-# integer arithmetic on inclusive tile rectangles (x0, y0, x1, y1).
+# integer arithmetic on inclusive tile rectangles (x0, y0, x1, y1). 1.2.0 keeps
+# every scene off the benchmark map's water (`fsim.water_tiles`): the chest and
+# the whole coal rectangle must be dry, a wall on water is illegal, and the
+# start is redrawn off it. A scene that touched no water under 1.1.0 is
+# unchanged.
 
 BELT_INVENTORY = {
     "burner-mining-drill": 4,
@@ -360,10 +365,25 @@ def _clipped(rect, clip: int) -> list[tuple[int, int]]:
     ]
 
 
+@functools.cache
+def _water() -> frozenset[tuple[int, int]]:
+    from fsim import water_tiles
+
+    return frozenset(water_tiles())
+
+
+def _dry(r) -> bool:
+    water = _water()
+    return not any(
+        (x, y) in water for x in range(r[0], r[2] + 1) for y in range(r[1], r[3] + 1)
+    )
+
+
 def _wall_ok(tile, iron, coal, chest) -> bool:
     t = (tile[0], tile[1], tile[0], tile[1])
     return (
         _in_scene(t)
+        and _dry(t)
         and max(_gaps(t, iron)) >= BELT_CLEARANCE
         and max(_gaps(t, coal)) >= BELT_CLEARANCE
         and max(_gaps(t, chest)) >= BELT_CHEST_CLEARANCE
@@ -413,6 +433,7 @@ def belt_smelting_scene(family: str, rng: random.Random) -> dict:
             _in_scene(chest_rect)
             and _pair_ok(iron_rect, chest_rect)
             and low <= sum(_gaps(iron_rect, chest_rect)) <= high
+            and _dry(chest_rect)
         ):
             break
     while True:
@@ -423,6 +444,7 @@ def belt_smelting_scene(family: str, rng: random.Random) -> dict:
             _in_scene(coal_rect)
             and _pair_ok(iron_rect, coal_rect)
             and _pair_ok(chest_rect, coal_rect)
+            and _dry(coal_rect)
         ):
             break
     coal = _clipped(coal_rect, 1 if family == "obstructed" else 0)
@@ -481,7 +503,11 @@ def belt_smelting_scene(family: str, rng: random.Random) -> dict:
 
     while True:
         start = (rng.randint(bx0, bx1), rng.randint(by0, by1))
-        if start not in taken and start != (chest_rect[0], chest_rect[1]):
+        if (
+            start not in taken
+            and start != (chest_rect[0], chest_rect[1])
+            and start not in _water()
+        ):
             break
     return {
         "iron": iron,

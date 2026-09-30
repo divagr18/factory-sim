@@ -38,8 +38,6 @@ Known exceptions within that scope:
   not be reduced to a rule.
 - Loading a mid-episode state that would need the engine's belt update order
   (which the game does not expose) raises an error instead of guessing.
-- About 1% of `belt_smelting` scenes place ore or walls on water. What the game
-  does there has not been measured yet.
 
 ## Quick start
 
