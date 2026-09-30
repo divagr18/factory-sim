@@ -26,7 +26,7 @@ So a policy exported from here runs unchanged against FactorioRL's real-engine
 environment, whose `action_masks()` is the same flat 201-entry vector.
 
 **v3: a mask per operation** (user decision "v3 masks: per operation", option
-C). `action_space="v3"` is `MultiDiscrete[25, 97, 226, 5, 19, 4]` over the v3
+C). `action_space="v3"` is `MultiDiscrete[26, 97, 226, 5, 19, 4]` over the v3
 tensors, and its environment also supplies `op_masks` (`RlEnv.op_masks()`,
 FactorioRL `ParameterizedEnv.operation_masks`): per operation, its own legal
 values of each argument dimension. Given them, the arguments are drawn under
@@ -51,9 +51,13 @@ ARG_NVEC = NVEC[1:]
 OPS = NVEC[0]
 MASKED = -1e8
 #: v3 (FactorioRL parameterized-v3): v1's operations, `mine_tile`,
-#: `take_fuel` and `finish`, over the 96-row table and the 15x15 window.
-NVEC3 = (25, 97, 226, 5, 19, 4)
-_MINE_TILE, _TAKE_FUEL = 22, 23
+#: `take_fuel`, `finish` and `inspect`, over the 96-row table and the 15x15
+#: window.
+NVEC3 = (26, 97, 226, 5, 19, 4)
+_MINE_TILE, _TAKE_FUEL, _INSPECT = 22, 23, 25
+#: v3's self vector: v1's 12, the free share of the main inventory, and the
+#: chest `inspect` opened (a flag and 18 item counts).
+SELF3 = 32
 
 #: parameterized-v1: which of (target, placement, direction, item, amount)
 #: each operation reads. Moves (0-11), set_recipe/craft/cancel (18-20, never
@@ -72,6 +76,7 @@ def argument_uses(action_space: str = "v1") -> torch.Tensor:
     if action_space == "v3":
         uses[_MINE_TILE, [1, 4]] = True  # a resource tile's slot, and a count
         uses[_TAKE_FUEL, [0, 4]] = True  # a burner's row, and a count
+        uses[_INSPECT, 0] = True  # a chest's row
     return uses
 
 
@@ -101,7 +106,7 @@ class Extractor(nn.Module):
         vector_dim: int = 12 + 14 + 12,
         crop: int = 13,
     ) -> None:
-        """The defaults are v1's; v3 reads 32 features a row, a 13 + 18 + 30
+        """The defaults are v1's; v3 reads 32 features a row, a 32 + 18 + 30
         vector and a 17x17 crop (the 15x15 window and its one-cell margin)."""
         super().__init__()
         #: The crop: `crop` cells a side from grid row and column `crop_start`,
@@ -365,7 +370,7 @@ class Policy(nn.Module):
         #: The placement window's side: the crop less its one-cell margin.
         self.side: int = self.crop - 2
         if v3:
-            self.extractor = Extractor(features_dim, 32, 13 + 18 + 30, self.crop)
+            self.extractor = Extractor(features_dim, 32, SELF3 + 18 + 30, self.crop)
         else:
             self.extractor = Extractor(features_dim)
         self.extractor.expose = self.v2

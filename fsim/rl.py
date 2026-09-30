@@ -6,10 +6,11 @@ observation, for `construct_smelting_line` and `build_line`. The arrays it
 returns are views over C memory, refreshed by `observe()`.
 
 `action_space="v3"` is `parameterized-v3` over `local-v3`: 96 entity rows of
-32 features, 18 items, a 13-slot self vector (the free share of the main
-inventory last), a 30-slot goal (the v1 goal, then six public-marker triples)
-and `MultiDiscrete[25, 97, 226, 5, 19, 4]` -- v1's operations, `mine_tile`,
-`take_fuel` and `finish`. `observe3()` reads the v3 tensors and mask whatever
+32 features, 18 items, a 32-slot self vector (v1's 12, the free share of the
+main inventory, then the chest `inspect` opened: a flag and 18 item counts), a
+30-slot goal (the v1 goal, then six public-marker triples) and
+`MultiDiscrete[26, 97, 226, 5, 19, 4]` -- v1's operations, `mine_tile`,
+`take_fuel`, `finish` and `inspect`. `observe3()` reads the v3 tensors and mask whatever
 the action space, so a v1 run can be checked in v3, and `op_masks()` the v3
 masks per operation (user decision "v3 masks: per operation"): row o is
 operation o's legal values of the five argument dimensions, concatenated, and
@@ -23,7 +24,7 @@ import numpy as np
 from fsim import ffi, lib, scene_struct
 
 NVEC = (22, 33, 122, 5, 15, 4)
-NVEC3 = (25, 97, 226, 5, 19, 4)
+NVEC3 = (26, 97, 226, 5, 19, 4)
 #: v3's argument dimensions, concatenated: one row of `RlEnv.op_masks()`.
 ARG_WIDTH3 = sum(NVEC3[1:])
 TASKS = {

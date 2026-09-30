@@ -124,6 +124,12 @@ class BeltWorldToolset(vf.Toolset[BeltToolsetConfig, WorldState]):
         return self._call("belt_lanes", row)
 
     @vf.tool
+    def opened(self) -> str:
+        """The chest inspect() opened, {"row": ..., "contents": {item: count}}, or null when
+        none is open. Costs no decision."""
+        return self._call("opened")
+
+    @vf.tool
     def decisions_left(self) -> str:
         """Decisions the build phase still allows."""
         return self._call("decisions_left")
@@ -182,6 +188,13 @@ class BeltWorldToolset(vf.Toolset[BeltToolsetConfig, WorldState]):
     def mine(self, row: int) -> str:
         """Mine (pick up) entity `row`. One decision."""
         return self._call("mine", row)
+
+    @vf.tool
+    def inspect(self, row: int) -> str:
+        """Open chest `row`, within 10 tiles, and read what it holds by item. One decision.
+        It stays open, readable free with opened(), until you walk out of reach or open
+        another; a chest's row otherwise shows only its total and its main item."""
+        return self._call("inspect", row)
 
     @vf.tool
     def mine_resource(self, x: int, y: int, amount: int = 1, wait: bool = True) -> str:

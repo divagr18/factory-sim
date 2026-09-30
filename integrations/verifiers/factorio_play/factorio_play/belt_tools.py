@@ -226,6 +226,18 @@ def _mine(world, row):
     return _reply(world, status, reason)
 
 
+def _inspect(world, row):
+    status, reason = _act(world, "inspect", _entity(world, row))
+    opened = world.opened() if status == "ok" else None
+    extra = {"row": opened[0], "contents": opened[1]} if opened else {}
+    return _reply(world, status, reason, **extra)
+
+
+def _opened(world):
+    opened = world.opened()
+    return None if opened is None else {"row": opened[0], "contents": opened[1]}
+
+
 def _transfer(world, method, row, item, amount):
     target = _entity(world, row)
     start, status, reason = world.decisions, "ok", None
@@ -335,6 +347,9 @@ class BeltTools:
     def belt_lanes(self, row: int) -> str:
         return self._query("belt_lanes", row, shape=lambda v: None if v is None else list(v))
 
+    def opened(self) -> str:
+        return self._run(_opened)
+
     def decisions_left(self) -> str:
         return self._query("decisions_left")
 
@@ -371,6 +386,9 @@ class BeltTools:
 
     def mine(self, row: int) -> str:
         return self._run(_mine, row)
+
+    def inspect(self, row: int) -> str:
+        return self._run(_inspect, row)
 
     def mine_resource(self, x: int, y: int, amount: int = 1, wait: bool = True) -> str:
         if wait:

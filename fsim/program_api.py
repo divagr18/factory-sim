@@ -29,8 +29,9 @@ one over the real game, and `play` runs a program on either.
 A task on the v3 profile (`TASK_PROFILES`; `belt_smelting`) gets `WorldV3`
 instead: the same verbs and queries over v3's tensors and action vector (a
 15x15 placement window, 96 entity rows, `ITEMS_V3`), plus `rotate`, the task's
-named public markers (`marker`) and belt lanes (`belt_lanes`), `take_fuel` and
-`finish`, and `EntityV3` rows that carry what the v3 layout adds. A v3
+named public markers (`marker`) and belt lanes (`belt_lanes`), `take_fuel`,
+`finish` and `inspect` (open a chest within reach to read its items), and
+`EntityV3` rows that carry what the v3 layout adds. A v3
 program's return is its `finish`: the verification window runs then, rather
 than after the rest of the budget is waited out (user decision, 2026-09-25).
 Deliberately no pathfinding and no belt-routing helper: which tiles a line
@@ -69,7 +70,7 @@ PLACEMENT_RADIUS = 5
 PLACEMENT_RADIUS_V3 = 7
 OP_PLACE, OP_MINE, OP_GIVE, OP_TAKE, OP_WAIT = 12, 13, 16, 17, 21
 OP_ROTATE, OP_ROTATE_REVERSE = 14, 15
-OP_MINE_TILE, OP_TAKE_FUEL, OP_FINISH = 22, 23, 24  # v3 only
+OP_MINE_TILE, OP_TAKE_FUEL, OP_FINISH, OP_INSPECT = 22, 23, 24, 25  # v3 only
 #: The action space each task's programs run under; unlisted tasks are v2.
 TASK_PROFILES = {
     "construct_smelting_line": "v2",
@@ -505,6 +506,28 @@ class WorldV3(World):
             return self._refuse(intent, "no such entity in the table")
         vector = (OP_TAKE_FUEL, row + 1, 0, 0, 0, AMOUNTS[amount])
         return self._act(intent, vector, "no fuel in its fuel slot, or out of reach")
+
+    def inspect(self, entity) -> dict[str, int] | None:
+        """Open a chest within reach (10 tiles) and return what it holds, by item.
+
+        Costs one decision. The chest stays open, and `opened()` reads it free,
+        until the character walks out of reach or another chest is opened.
+        Otherwise a row shows only `contents` (the total) and `item` (what it
+        holds most of). None if refused: not a chest, or out of reach.
+        """
+        intent = f"inspect {_describe(entity)}"
+        row = self._row(entity)
+        if row is None:
+            self._refuse(intent, "no such entity in the table")
+            return None
+        if not self._act(intent, (OP_INSPECT, row + 1, 0, 0, 0, 0), "not a chest, or out of reach"):
+            return None
+        opened = self._obs().opened()
+        return dict(opened[1]) if opened else None
+
+    def opened(self) -> tuple[int, dict[str, int]] | None:
+        """The chest `inspect` opened, as (its current row, what it holds), or None."""
+        return self._obs().opened()
 
     def finish(self) -> bool:
         """End the build phase now: the verification window runs at once and the episode ends.

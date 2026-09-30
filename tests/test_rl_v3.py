@@ -68,12 +68,12 @@ def test_shapes():
     assert obs["grid"].shape == (6, 65, 65)
     assert obs["entities"].shape == (96, 32)
     assert obs["entity_mask"].shape == (96,)
-    assert obs["self"].shape == (13,)
+    assert obs["self"].shape == (32,)
     assert obs["inventory"].shape == (18,)
     assert obs["goal"].shape == (30,)
     assert env.mask.shape == (sum(NVEC3),) == (lib.RL3_MASK_SIZE,)
-    assert NVEC3 == (25, 97, 226, 5, 19, 4)
-    assert env.op_masks().shape == (25, sum(NVEC3[1:])) == (25, lib.RL3_ARG_WIDTH)
+    assert NVEC3 == (26, 97, 226, 5, 19, 4)
+    assert env.op_masks().shape == (26, sum(NVEC3[1:])) == (26, lib.RL3_ARG_WIDTH)
 
 
 def test_v1_unchanged_after_a_v3_episode_in_the_same_env():

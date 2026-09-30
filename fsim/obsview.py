@@ -58,6 +58,11 @@ GOAL_V1 = 12
 MARKER_SLOTS = 6
 MARKER_SCALE = 128.0
 LANE_CAP = 8.0
+#: v3's self vector: the open chest's flag, then its contents per `ITEMS_V3`
+#: item as log counts over `OPEN_CAP` (FactorioRL `encoders.OPEN_FLAG_V3`).
+OPEN_FLAG = 13
+OPEN_CONTENTS = 14
+OPEN_CAP = 1600.0
 OFFSET_SCALE = 2.0
 #: Grid planes 0-3, by resource name.
 ORE_PLANES = {"iron-ore": 0, "copper-ore": 1, "coal": 2, "stone": 3}
@@ -236,6 +241,25 @@ class ObsView:
             "drop": _offset(x, y, f[25], f[26]) if f[27] > 0.5 else None,
             "item": self._item_at(f[28]),
         }
+
+    def opened(self) -> tuple[int, dict[str, int]] | None:
+        """The chest `inspect` opened, as (its row, what it holds by item), or
+        None when none is open (v3 only). Exact: the counts are log counts
+        over 1600, which float32 keeps to well under half an item."""
+        if not self.v3 or self._self.size < OPEN_CONTENTS + len(ITEMS_V3):
+            return None
+        if self._self[OPEN_FLAG] < 0.5:
+            return None
+        rows = [i for i in np.flatnonzero(self._mask).tolist() if self._entities[i][30] > 0.5]
+        if not rows:
+            return None
+        values = self._self[OPEN_CONTENTS : OPEN_CONTENTS + len(ITEMS_V3)]
+        held = {
+            item: round(math.expm1(float(v) * math.log1p(OPEN_CAP)))
+            for item, v in zip(ITEMS_V3, values, strict=True)
+            if v > 0
+        }
+        return rows[0], held
 
     def markers(self) -> list[tuple[float, float] | None]:
         """The task's public markers, in its declared order (v3 only; [] under v2).

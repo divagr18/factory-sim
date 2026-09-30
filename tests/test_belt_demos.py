@@ -50,7 +50,7 @@ def test_a_recorded_build_replays_to_the_state_it_reached():
     records: list[dict] = []
     data = demos.collect(2, task=TASK, threads=2, seed_base=0, records=records)
     assert int(data["episodes_kept"]) == len(records) == 2
-    assert data["op_masks"].shape[1:] == (25, 351)
+    assert data["op_masks"].shape[1:] == (26, 351)
     assert data["grid"].dtype == np.uint8
     # Every label is legal under its own operation's mask.
     offsets = np.cumsum((0, 97, 226, 5, 19, 4))

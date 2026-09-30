@@ -349,7 +349,9 @@ def action_struct(key: str, arguments: dict | None = None):
         a.to_handle = _endpoint(arguments["to"] if key == "give_to" else "character")
         a.item = ITEM_IDS.get(arguments["item"], lib.IT_NONE)
         a.count = int(arguments["count"])
-    elif key == "wait":
+    elif key in ("wait", "inspect"):
+        # `inspect` (v3) is answered by FactorioRL's environment on the mod's
+        # `wait`: in the world it is a wait.
         a.verb = lib.V_WAIT
     else:
         raise ValueError(f"unsupported action {key}")

@@ -58,6 +58,13 @@ static int32_t rl3_item_slot(int32_t item) {
 #define OP_MINE_TILE 22
 #define OP_TAKE_FUEL 23
 #define OP_FINISH 24
+/* v3 only: open a chest within reach (`inspect`, user decision 2026-09-30).
+ * A wait in the world; while it stays open the observation carries its
+ * contents item by item (self features 14.., row feature 30). */
+#define OP_INSPECT 25
+/* The open chest's contents are log counts over a wooden chest's 16 slots of a
+ * 100-stack item (encoders.OPEN_CONTENTS_CAP). */
+#define RL3_OPEN_CAP 1600.0
 
 static const int32_t TRANSFER_AMOUNTS[3] = {1, 5, 20};
 
@@ -552,6 +559,13 @@ static int rl3_op_row(const fsim_rl *rl, const rl3_facts *f, int32_t op, uint8_t
         if (legal)
             for (int k = 1; k <= 3; k++) w[RL3_DIM_AMOUNT + k] = 1;
         break;
+    case OP_INSPECT:
+        for (int32_t k = 0; k < f->targets; k++)
+            if (rl3_reachable(f, k) && env->entities[d->row_entity[k]].kind == K_CHEST) {
+                w[RL3_DIM_TARGET + 1 + k] = 1;
+                legal = 1;
+            }
+        break;
     case OP_TAKE_FUEL:
         for (int32_t k = 0; k < f->targets; k++) {
             if (!rl3_reachable(f, k)) continue;
@@ -653,6 +667,14 @@ static int32_t rl_decode3(fsim_rl *rl, const int32_t *v, fsim_action *out) {
         out->count = TRANSFER_AMOUNTS[amount - 1];
         return 0;
     }
+    case OP_INSPECT:
+        /* `FactorioEnv._open_container`: a chest, visible and within reach.
+         * A wait in the world; fsim_rl_step opens `out->handle`. */
+        if (target < 1 || target > targets) return 1;
+        if (!d.row_legal[target - 1]) return 1;
+        if (rl->env->entities[d.row_entity[target - 1]].kind != K_CHEST) return 1;
+        out->handle = d.targets[target - 1];
+        return 0;
     default:
         return 1;
     }
@@ -1007,7 +1029,26 @@ static void rl_encode_into(fsim_rl *rl, rl_fields *obs) {
         f[13] = working_known ? 1.0f : 0.0f;
         f[14] = (float)rl_log_count((double)fuel, 200.0);
         f[15] = (float)rl_log_count((double)output, 200.0);
-        if (obs->v3) rl3_entity_features(env, &rows[i], f);
+        if (obs->v3) {
+            rl3_entity_features(env, &rows[i], f);
+            if (!rows[i].remembered && rl->opened &&
+                env->seen[rows[i].index].handle == rl->opened) {
+                /* The open chest: its row, and its contents item by item. */
+                const fsim_entity *e = &env->entities[env->seen[rows[i].index].entity];
+                int32_t held[IT_COUNT];
+                memset(held, 0, sizeof(held));
+                for (int s = 0; s < FSIM_CHEST_SLOTS; s++)
+                    if (e->chest[s].count > 0) held[e->chest[s].item] += e->chest[s].count;
+                f[30] = 1.0f;
+                obs->self_[RL_SELF_FEATURES + 1] = 1.0f;
+                for (int32_t k = 0; k < RL3_ITEMS; k++) {
+                    int32_t item = RL3_ITEM_IDS[k];
+                    if (item != IT_NONE)
+                        obs->self_[RL_SELF_FEATURES + 2 + k] =
+                            (float)rl_log_count((double)held[item], RL3_OPEN_CAP);
+                }
+            }
+        }
         obs->entity_mask[i] = 1;
     }
 
@@ -1410,11 +1451,33 @@ static double rl_finish(fsim_rl *rl) {
     return reward;
 }
 
+/* `FactorioEnv._open_row`: the open chest stays open while a visible row of
+ * the entity table holds it within reach, and is closed for good otherwise. */
+static void rl3_update_open(fsim_rl *rl) {
+    if (!rl->opened) return;
+    const fsim_env *env = rl->env;
+    rl_row rows[FSIM_MAX_SWEEP + FSIM_MAX_MEMORY];
+    int32_t n = rl_rows(env, rows, RL3_MAX_ENTITIES);
+    for (int32_t k = 0; k < n; k++) {
+        int32_t handle = rows[k].remembered ? env->memory[rows[k].index].handle
+                                            : env->seen[rows[k].index].handle;
+        if (handle != rl->opened) continue;
+        if (!rows[k].remembered && can_reach(env, 1, env->seen[rows[k].index].entity)) return;
+        break;
+    }
+    rl->opened = 0;
+}
+
 double fsim_rl_step(fsim_rl *rl, const int32_t *vector) {
     if (rl->task.action_space == ACTION_SPACE_V3 && vector[0] == OP_FINISH) return rl_finish(rl);
     fsim_action action;
     rl->decode_failure = fsim_rl_decode(rl, vector, &action);
     if (rl->decode_failure) rl->decode_failures++;
+    if (rl->task.action_space == ACTION_SPACE_V3 && vector[0] == OP_INSPECT &&
+        !rl->decode_failure) {
+        rl->opened = action.handle;
+        action.handle = 0;
+    }
     rl->steps++;
     fsim_step(rl->env, &action, rl->task.decision_ticks);
     rl_window_record(rl);
@@ -1467,6 +1530,7 @@ double fsim_rl_step(fsim_rl *rl, const int32_t *vector) {
     rl->truncated = truncated;
     rl->success = succeeded;
     rl->done = terminated || truncated;
+    if (rl->task.action_space == ACTION_SPACE_V3) rl3_update_open(rl);
     return reward;
 }
 

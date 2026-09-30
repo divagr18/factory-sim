@@ -80,8 +80,8 @@ Game notes:
 tile whose centre is also within 10 tiles (straight line) of `me()`, never the tile the \
 character stands on, and never an occupied or blocked tile. The sites are 20 to 40 tiles \
 apart, so the character has to walk between them.
-- `give`, `take`, `mine` and `rotate` need the entity within 10 tiles of `me()`, measured \
-to the edge of the entity's box; `mine_resource` needs the tile's centre within 2.7 tiles.
+- `give`, `take`, `mine`, `rotate` and `inspect` need the entity within 10 tiles of `me()`, \
+measured to the edge of the entity's box; `mine_resource` needs the tile's centre within 2.7 tiles.
 - Hand-mining takes 2 s per item for ore, coal and stone, and keeps going until the asked \
 amount has arrived; a `move` stops it. If an entity stands on the tile, `mine_resource` \
 mines that entity instead and then nothing more until you move. With no room left in the \
@@ -90,6 +90,9 @@ at all is refused.
 - A 2x2 machine placed at (x, y) covers tiles x..x+1, y..y+1; its centre is (x+1, y+1).
 - Returning from `build` ends the build phase at once, and so does `world.finish()`: the \
 verification window starts then, not when the budget runs out.
+- A chest's row shows only its total (`contents`) and what it holds most of (`item`). \
+`inspect` opens it and returns every item; it stays open, readable free with `opened()`, \
+until you walk out of reach or open another.
 - `take_fuel` empties a machine's fuel slot into the inventory; the fuel already burning \
 stays in the machine and burns on.
 - A belt carries items toward its facing, 1.875 tiles per second. Each belt tile has two \

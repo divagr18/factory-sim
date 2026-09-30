@@ -33,8 +33,8 @@ QUERIES = (
 ).split()
 ACTIONS = "move place give take mine wait".split()
 #: What a v3 (`WorldV3`) session answers besides those.
-QUERIES_V3 = ["marker", "belt_lanes"]
-ACTIONS_V3 = "rotate mine_resource take_fuel".split()
+QUERIES_V3 = ["marker", "belt_lanes", "opened"]
+ACTIONS_V3 = "rotate mine_resource take_fuel inspect".split()
 
 _FINISH = object()
 

@@ -110,7 +110,7 @@ def test_known_gaps_are_logistics_scenarios():
         "logistics_inserter_fuel_exhaustion", "logistics_smelting_chain",
         "logistics_sideload_merge", "hand_mine_rules", "hand_mine_spills",
         "hand_mine_contents", "hand_mine_build_over", "hand_mine_carried",
-        "v3_take_fuel", "v3_finish"}  # fmt: skip
+        "v3_take_fuel", "v3_finish", "v3_inspect"}  # fmt: skip
 
 
 SENSED = sorted(name for name, entry in INDEX.items() if entry.get("local_v3"))

@@ -26,19 +26,19 @@ fuelled: the episode is scored only after finish()."""
 TOOLS_NOTE_V3 = """\
 You act through tools that mirror the `world` API: where the text says `world.<name>`, \
 call the tool <name>. Queries (me, tile, inventory, ore_tiles, blocked_tiles, entities, \
-marker, belt_lanes, decisions_left, last_refused) cost nothing. Actions spend decisions, \
-one per world action: move, place, rotate, give, take, take_fuel, mine, mine_resource, \
-wait and finish. A tool that takes a count or an amount can run several world actions in \
-one call: move and wait one per count; give, take and take_fuel transfers of 20, 5 and 1 \
-(giving 23 coal is four: 20, 1, 1 and 1); mine_resource requests of 20, 5 and 1, each \
-followed by the waits for its items. Its reply says how many decisions it spent. rotate, \
-give, take, take_fuel, mine and belt_lanes name an entity by its current `row` in \
-entities(); rows renumber as the character moves. Replies are compact JSON. An action's \
-reply has "ok": true when every step went through, "refused" with the reason when the \
-action space refused a step (no decision spent on it), and "failed" when the game refused \
-a legal step (it still cost a decision). There is no program here: calling finish() is \
-what returning from `build` does. It ends the build phase, runs the verification window \
-and scores the episode; nothing can be done after it."""
+marker, belt_lanes, opened, decisions_left, last_refused) cost nothing. Actions spend \
+decisions, one per world action: move, place, rotate, give, take, take_fuel, mine, \
+mine_resource, inspect, wait and finish. A tool that takes a count or an amount can run \
+several world actions in one call: move and wait one per count; give, take and take_fuel \
+transfers of 20, 5 and 1 (giving 23 coal is four: 20, 1, 1 and 1); mine_resource requests \
+of 20, 5 and 1, each followed by the waits for its items. Its reply says how many \
+decisions it spent. rotate, give, take, take_fuel, mine, inspect and belt_lanes name an \
+entity by its current `row` in entities(); rows renumber as the character moves. Replies \
+are compact JSON. An action's reply has "ok": true when every step went through, \
+"refused" with the reason when the action space refused a step (no decision spent on it), \
+and "failed" when the game refused a legal step (it still cost a decision). There is no \
+program here: calling finish() is what returning from `build` does. It ends the build \
+phase, runs the verification window and scores the episode; nothing can be done after it."""
 
 #: The user message, per task.
 PROMPTS = {

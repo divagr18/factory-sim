@@ -65,14 +65,16 @@ task text and measured mechanics that `factorio-build` shows a program writer.
   `wait(count)`. `finish()` ends the build phase. Unchanged from 0.1.1.
 - **Tools, `belt_smelting`:** these cost no decision: `me`, `tile`,
   `inventory`, `ore_tiles(kind)`, `blocked_tiles`, `entities(kind)`,
-  `marker(name)` (`iron`, `coal`, `output`), `belt_lanes(row)`,
+  `marker(name)` (`iron`, `coal`, `output`), `belt_lanes(row)`, `opened`,
   `decisions_left` and `last_refused`. These spend decisions from a
   2,500-decision budget, exactly as `WorldV3` counts them:
   `move(direction, stride, count)`, `place(item, x, y, facing)` for drills,
   furnaces, belts, inserters and chests, `rotate(row, reverse)`,
   `give(row, item, amount)`, `take(row, item, amount)`,
   `take_fuel(row, amount)`, `mine(row)`, `mine_resource(x, y, amount, wait)`,
-  `wait(count)` and `finish()`.
+  `inspect(row)`, `wait(count)` and `finish()`. `inspect` opens a chest within
+  reach and returns what it holds by item; `opened` reads it again for free
+  until the character walks out of reach.
 - **Entities** are named by their current `row` in `entities()`.
 - **Reward:** `success` for `construct_smelting_line`, 1.0 if `finish` was
   called and the line verified. `score` for `belt_smelting`, factory-sim's own
@@ -138,6 +140,10 @@ not a benchmark number.
 | `task.belt_tools.decision_budget` | 2,500 | `belt_smelting`'s budget |
 
 ## Changelog
+
+- Unreleased: `belt_smelting` follows FactorioGym 1.2.0, whose generator keeps
+  scenes off the map's lake (the roughly 1% of scenes that touched water are
+  redrawn; the rest are unchanged), and gains the `inspect` and `opened` tools.
 
 - 2026-09-28 (0.2.0): Adds `belt_smelting` (FactorioGym `belt_smelting`
   1.1.0) with factory-sim's `WorldV3` as tools, its train, val and holdout

@@ -46,14 +46,15 @@ burner inserters and 20 coal. Twenty coal runs a line for about 79 plates, so
 the line also needs coal from the coal patch, mined by hand or by a drill.
 Plates smelted from hand-mined ore do not count. Programs on this task hold a
 larger `world` (the v3 profile): public markers for the three sites,
-`mine_resource`, `rotate`, `take_fuel`, `finish`, belt lanes, and each
-inserter's pickup and drop points. The prompt lists the whole API and the
+`mine_resource`, `rotate`, `take_fuel`, `finish`, `inspect` (open a chest within
+reach to read what it holds, item by item), belt lanes, and each inserter's
+pickup and drop points. The prompt lists the whole API and the
 measured mechanics.
 
-The task is FactorioGym's `belt_smelting` 1.1.0, ported draw for draw. Its
+The task is FactorioGym's `belt_smelting` 1.2.0, ported draw for draw. Its
 reference solver delivers 150 plates in 200 of 200 episodes on the real game,
-and its port (`fsim.belt_expert`) in 599 of the first 600 simulator scenes; the
-one failure has its whole coal patch on water.
+and its port (`fsim.belt_expert`) in all of the first 600 train and 600 test
+simulator scenes.
 
 ## Taskset
 
@@ -180,6 +181,13 @@ To enable the refusal penalty in v1:
 `[env.taskset.task.rewards] refusal_penalty = { weight = 0.05 }`.
 
 ## Changelog
+
+- Unreleased: `belt_smelting` follows FactorioGym 1.2.0, whose generator keeps
+  scenes off the map's lake; the roughly 1% of scenes that put coal, a wall or
+  the start on water are redrawn, and every other scene is unchanged. Its
+  `world` gains `inspect(entity)` and `opened()`: a chest's row shows only its
+  total and main item, and its full contents are read by opening it within
+  reach, which costs one decision.
 
 - 2026-09-26 (0.2.0): Adds `belt_smelting` (FactorioGym `belt_smelting`
   1.1.0) with its v3 `world`, and `prompt_version` (`v1`, the default, or

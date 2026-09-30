@@ -10,6 +10,7 @@ import lzma
 import pytest
 
 from fsim import ITEM_IDS, Sim, lib
+from fsim.obsview import ObsView
 from fsim.parity import GOLDEN
 from fsim.program_api import SimBackend, WorldV3, play
 from fsim.rl import RlEnv
@@ -109,3 +110,47 @@ def test_finish_is_not_a_v1_operation():
     env.reset(header["task"], header["blueprint"])
     _, _, terminated, _, info = env.step([OP_FINISH, 0, 0, 0, 0, 0])
     assert info["decode_failure"] and not terminated
+
+
+# ------------------------------------------------------------------ inspect
+#
+# User decision (2026-09-30): a chest's contents, item by item, are read by
+# opening it with `inspect` within reach; it stays open while visible and in
+# reach. The `v3_inspect` engine trace pins every tensor (test_rl_contract);
+# these read the same episode through `ObsView` and `WorldV3`.
+
+
+def _opened_by_decision() -> list:
+    header, records = read_trace(GOLDEN / "v3_inspect.jsonl.xz")
+    env = _env("v3_inspect")
+    out = [ObsView(env.obs).opened()]
+    for record in records[1:]:
+        env.step(record["transition"]["action"]["vector"])
+        out.append(ObsView(env.obs).opened())
+    return out
+
+
+def test_an_inspected_chest_shows_every_item_until_out_of_reach():
+    seen = _opened_by_decision()
+    contents = [None if s is None else s[1] for s in seen]
+    assert contents[:2] == [None, None]
+    assert contents[2] == {"coal": 7, "iron-plate": 30}
+    assert contents[3] == {"coal": 12, "iron-plate": 30}  # a give, shown at once
+    assert contents[4] == contents[5] == contents[6] == {"coal": 12, "iron-plate": 10}
+    assert contents[7:12] == [None] * 5  # walked out of reach; back does not reopen
+    assert contents[12] == {}  # the empty chest, open
+    assert contents[13:] == [{"coal": 12, "iron-plate": 10}] * 3
+
+
+def test_world_inspect_returns_the_contents_and_costs_a_decision():
+    env = _env("v3_inspect")
+    world = WorldV3(SimBackend(env))
+    chests = [e for e in world.entities() if e.kind == "container"]
+    full = min(chests, key=lambda e: abs(e.x - world.me()[0]) + abs(e.y - world.me()[1]))
+    assert world.opened() is None
+    assert world.inspect(full) == {"coal": 7, "iron-plate": 30}
+    assert world.decisions == 1 and world.opened()[1] == {"coal": 7, "iron-plate": 30}
+    # A drill or a belt is not a chest: refused, no decision spent.
+    furnace = WorldV3(SimBackend(_env("v3_take_fuel")))
+    drill = next(e for e in furnace.entities() if e.kind == "mining-drill")
+    assert furnace.inspect(drill) is None and furnace.decisions == 0

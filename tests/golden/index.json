@@ -1669,7 +1669,7 @@
     "layout_family": "offset_patch",
     "mod_source_digest": "9b7b10b6f9d4ce19",
     "replay_identical": true,
-    "replay_sha256": "3287fcb4c258f11bb20ca4c516aaf2589352aa32bb16414dc4fe9bde0f9afd66",
+    "replay_sha256": "1ae8f5800e6e93db8322600e83a51ec99227c8e5db93a63a48d2e691b1b3ae09",
     "requires": "logistics",
     "return": 1.0,
     "success": true,
@@ -1677,7 +1677,7 @@
     "task_version": "1.2.0",
     "terminated": true,
     "trace": "v3_finish.jsonl.xz",
-    "trace_sha256": "3287fcb4c258f11bb20ca4c516aaf2589352aa32bb16414dc4fe9bde0f9afd66",
+    "trace_sha256": "1ae8f5800e6e93db8322600e83a51ec99227c8e5db93a63a48d2e691b1b3ae09",
     "truncated": false,
     "unencodable_actions": 0,
     "verification": {
@@ -1687,7 +1687,59 @@
       "success": true,
       "uncapped_output": 15.0
     },
-    "wall_seconds": 3.6
+    "wall_seconds": 3.7
+  },
+  "v3_inspect": {
+    "about": "v3: a chest opened with inspect shows its contents live while within reach, and closes when the character walks out of reach",
+    "action_outcomes": {
+      "give_to:completed": 1,
+      "inspect:completed": 3,
+      "move_north:completed": 3,
+      "move_south:completed": 3,
+      "take_from:completed": 1,
+      "wait:completed": 4
+    },
+    "decisions": 15,
+    "decode_failures": 0,
+    "engine_build": 83512,
+    "error": null,
+    "final_entities": [
+      {
+        "name": "wooden-chest",
+        "status": "normal"
+      },
+      {
+        "name": "wooden-chest",
+        "status": "normal"
+      }
+    ],
+    "final_ground_items": 0,
+    "final_tick": 450,
+    "layout_family": "varied_patch",
+    "mod_source_digest": "9b7b10b6f9d4ce19",
+    "replay_identical": true,
+    "replay_sha256": "b677117f6aa9df73b5d3b8ee03ee577d4c3383ba187fa09888af6400bc53efdf",
+    "requires": "logistics",
+    "return": 0.0,
+    "success": false,
+    "task": "construct_smelting_line",
+    "task_version": "1.2.0",
+    "terminated": false,
+    "ticks": {
+      "first_mismatch": null,
+      "matches_decision_trace": true,
+      "repeat_identical": true,
+      "ticks": 450,
+      "trace": "v3_inspect.ticks.jsonl.xz",
+      "trace_sha256": "94e56bcf9c57fec5789c2a033dbb6cc019349e4c2a423b956547107e22940be4",
+      "wall_seconds": 14.5
+    },
+    "trace": "v3_inspect.jsonl.xz",
+    "trace_sha256": "b677117f6aa9df73b5d3b8ee03ee577d4c3383ba187fa09888af6400bc53efdf",
+    "truncated": false,
+    "unencodable_actions": 0,
+    "verification": null,
+    "wall_seconds": 0.8
   },
   "v3_take_fuel": {
     "about": "v3: fuel taken out of a drill, a furnace and an inserter mid-burn, with room for part of it, none, and after room is made",
@@ -1728,7 +1780,7 @@
     "layout_family": "varied_patch",
     "mod_source_digest": "9b7b10b6f9d4ce19",
     "replay_identical": true,
-    "replay_sha256": "d4519e41908ac49637f23d07d6d4885eb967d05e6647961f5e24d344a8e3069c",
+    "replay_sha256": "63b6cf82a290e4f66f12c739805e8e3089dec05c1952812f6e8816f86fbce2f8",
     "requires": "logistics",
     "return": 0.0,
     "success": false,
@@ -1742,10 +1794,10 @@
       "ticks": 840,
       "trace": "v3_take_fuel.ticks.jsonl.xz",
       "trace_sha256": "b82d60390c8a6ce4576894622928365539b0aac4e7f18fa501965da75ed0fa50",
-      "wall_seconds": 23.8
+      "wall_seconds": 25.1
     },
     "trace": "v3_take_fuel.jsonl.xz",
-    "trace_sha256": "d4519e41908ac49637f23d07d6d4885eb967d05e6647961f5e24d344a8e3069c",
+    "trace_sha256": "63b6cf82a290e4f66f12c739805e8e3089dec05c1952812f6e8816f86fbce2f8",
     "truncated": false,
     "unencodable_actions": 0,
     "verification": null,
