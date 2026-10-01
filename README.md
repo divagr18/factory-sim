@@ -121,7 +121,7 @@ uv run python bench/bench.py   # throughput
   author  = {Agrawal, Divyansh},
   title   = {{factory-sim}: a fast, tick-exact simulator of an early-game factory},
   year    = {2026},
-  version = {0.2.0},
+  version = {0.3.0},
   url     = {https://github.com/divagr18/factory-sim}
 }
 ```

@@ -1,6 +1,6 @@
 [project]
 name = "factorio-play"
-version = "0.2.0"
+version = "0.3.0"
 description = "Agentic play: the model builds a working Factorio factory one tool call at a time in a tick-exact simulator, rewarded on verified output. For the write-one-program version, see factorio-build."
 tags = [
     "multi-turn", "tool-use", "agent", "agentic", "train", "eval", "v1", "game", "factorio",
@@ -10,7 +10,7 @@ license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
     "verifiers>=0.3.1",
-    "factory-sim>=0.2.0",
+    "factory-sim>=0.3.0",
 ]
 
 [build-system]

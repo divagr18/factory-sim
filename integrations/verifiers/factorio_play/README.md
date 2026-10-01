@@ -24,7 +24,7 @@ seen, use the companion environment
 [factorio-build](https://app.primeintellect.ai/dashboard/environments/divagr/factorio-build).
 It uses the same tasks, maps and scoring.
 
-It requires `verifiers>=0.3.1` and `factory-sim>=0.2.0`, both installed from
+It requires `verifiers>=0.3.1` and `factory-sim>=0.3.0`, both installed from
 PyPI with prebuilt wheels. It runs on Linux and macOS; `verifiers.v1` does not
 import on Windows.
 
@@ -141,10 +141,11 @@ not a benchmark number.
 
 ## Changelog
 
-- Unreleased: `belt_smelting` follows FactorioGym 1.2.0, whose generator keeps
-  scenes off the map's lake (the roughly 1% of scenes that touched water are
-  redrawn; the rest are unchanged), and gains the `inspect` and `opened` tools.
-
+- 2026-10-01 (0.3.0): `belt_smelting` follows FactorioGym 1.2.0, whose
+  generator keeps scenes off the map's lake (the roughly 1% of scenes that
+  touched water are redrawn; the rest are unchanged), and gains the `inspect`
+  and `opened` tools. `construct_smelting_line` is unchanged. Requires
+  factory-sim 0.3.0.
 - 2026-09-28 (0.2.0): Adds `belt_smelting` (FactorioGym `belt_smelting`
   1.1.0) with factory-sim's `WorldV3` as tools, its train, val and holdout
   splits, and its score, min(1, plates / 150), as the reward. Its tools that

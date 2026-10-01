@@ -1,6 +1,6 @@
 [project]
 name = "factorio-build"
-version = "0.2.0"
+version = "0.3.0"
 description = "Program synthesis: the model writes one Python program that builds a working Factorio factory, scored in a tick-exact simulator on unseen scenes. For step-by-step agentic play, see factorio-play."
 tags = [
     "single-turn", "train", "eval", "v1", "game", "factorio", "coding", "python", "reasoning",
@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
     "verifiers>=0.3.1",
     "datasets",
-    "factory-sim>=0.2.0",
+    "factory-sim>=0.3.0",
 ]
 
 [build-system]

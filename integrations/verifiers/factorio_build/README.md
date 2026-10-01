@@ -28,7 +28,7 @@ and seeing what happens after each, use the companion environment
 [factorio-play](https://app.primeintellect.ai/dashboard/environments/divagr/factorio-play).
 It uses the same tasks, maps and scoring.
 
-It requires `verifiers>=0.3.1` and `factory-sim>=0.2.0`, both installed from
+It requires `verifiers>=0.3.1` and `factory-sim>=0.3.0`, both installed from
 PyPI with prebuilt wheels.
 
 ## Tasks
@@ -182,13 +182,13 @@ To enable the refusal penalty in v1:
 
 ## Changelog
 
-- Unreleased: `belt_smelting` follows FactorioGym 1.2.0, whose generator keeps
-  scenes off the map's lake; the roughly 1% of scenes that put coal, a wall or
-  the start on water are redrawn, and every other scene is unchanged. Its
-  `world` gains `inspect(entity)` and `opened()`: a chest's row shows only its
-  total and main item, and its full contents are read by opening it within
-  reach, which costs one decision.
-
+- 2026-10-01 (0.3.0): `belt_smelting` follows FactorioGym 1.2.0, whose
+  generator keeps scenes off the map's lake; the roughly 1% of scenes that put
+  coal, a wall or the start on water are redrawn, and every other scene is
+  unchanged. Its `world` gains `inspect(entity)` and `opened()`: a chest's row
+  shows only its total and main item, and its full contents are read by
+  opening it within reach, which costs one decision. `construct_smelting_line`
+  is unchanged. Requires factory-sim 0.3.0.
 - 2026-09-26 (0.2.0): Adds `belt_smelting` (FactorioGym `belt_smelting`
   1.1.0) with its v3 `world`, and `prompt_version` (`v1`, the default, or
   `v2`). `decision_budget` now defaults to the task's own. `validate` checks

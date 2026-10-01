@@ -131,7 +131,7 @@ RL's Razor), and one round of self-SFT still forgets unless it is iterated
 Before you start, check the pod's env imports. `deploy.sh` packs factory-sim
 and builds the factorio-build wheel from the same committed HEAD, and
 `pod_setup.sh` installs both; without `FSIM_SRC` it falls back to
-`factory-sim>=0.2.0` from PyPI. Uncommitted changes are not deployed.
+`factory-sim>=0.3.0` from PyPI. Uncommitted changes are not deployed.
 
 ```bash
 ssh rp 'cd /root/prime-rl && .venv/bin/python -c "from factorio_build import core; print(core.SUPPORTED_TASKS)"'
