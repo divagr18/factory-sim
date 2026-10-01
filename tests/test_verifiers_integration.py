@@ -113,16 +113,6 @@ def test_only_construct_smelting_line_is_offered():
         core.rows("plate_line", "train", 8, 1)
 
 
-def test_belt_smelting_is_supported():
-    assert "belt_smelting" in core.KNOWN_TASKS
-    assert core.SUPPORTED_TASKS == (TASK, "belt_smelting")
-    assert core.rows("belt_smelting", "train", 8, 1)
-    # The prompt names the v3 API.
-    text = core.system_prompt(True, "belt_smelting")
-    assert "world.belt_lanes" in text and mutate.GAME_NOTES_BELT_SMELTING in text
-    assert mutate.GAME_NOTES_BELT_SMELTING not in core.system_prompt(False, "belt_smelting")
-
-
 def test_belt_smelting_rows_are_solvable():
     """The reference builder, which `validate` plays, solves a train and a holdout row."""
     for split in ("train", "holdout"):

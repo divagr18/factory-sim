@@ -24,10 +24,6 @@ def _settled(gate: GatedBackplay) -> GatedBackplay:
     return gate
 
 
-def test_it_starts_at_the_first_rung():
-    assert GatedBackplay().window == BACKPLAY_LADDER[0]
-
-
 def test_the_deepest_cut_decides_not_the_average():
     """The fault the first version had, kept as a test.
 

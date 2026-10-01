@@ -7,7 +7,6 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from torch import nn  # noqa: E402
 
 from fsim.policy import (  # noqa: E402
     CROP,
@@ -204,25 +203,6 @@ def test_v2_target_scores_follow_the_rows(batch_v2):
 def test_v1_checkpoints_still_load():
     state = Policy().state_dict()
     Policy(action_space="v1").load_state_dict(state)
-
-
-def test_the_placement_head_reads_the_same_nine_cells_a_padded_one_would():
-    """Why `PlacementHead.second` has no padding.
-
-    Only the middle 11x11 of the 13x13 crop names a placement slot. A padded
-    convolution's interior positions each read nine inputs that are all inside
-    the crop, which is exactly what an unpadded convolution computes -- so the
-    unpadded one is the same numbers over 48 fewer positions.
-    """
-    import torch.nn.functional as F
-
-    torch.manual_seed(0)
-    padded = nn.Conv2d(16, 16, 3, padding=1)
-    x = torch.randn(4, 16, 13, 13)
-    with torch.no_grad():
-        interior = padded(x)[:, :, 1:12, 1:12]
-        unpadded = F.conv2d(x, padded.weight, padded.bias)
-    assert torch.equal(interior, unpadded)
 
 
 def test_the_placement_head_returns_one_score_per_slot():

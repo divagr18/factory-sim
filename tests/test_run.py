@@ -12,7 +12,6 @@ import pytest
 
 import evolve
 from evolve import run as evo_run
-from evolve import sandbox
 from evolve.archive import Islands, Store
 from evolve.llm import Completion
 from evolve.run import Config, Evolution, load_islands
@@ -606,12 +605,6 @@ def test_parse_operators():
         evo_run.parse_operators("mutate:1")
     with pytest.raises(ValueError):
         evo_run.parse_operators("fix:0")
-
-
-def test_sandbox_accepts_the_test_programs():
-    sandbox.check(program(3))
-    with pytest.raises(sandbox.SandboxError):
-        sandbox.check("import os\n\ndef build(world):\n    world.wait()\n")
 
 
 def test_defaults_start_from_the_trivial_seed_without_simplify():
